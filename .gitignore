@@ -1,0 +1,12 @@
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Electron build artefacts
+dist/
+out/
+
+# OS
+.DS_Store
+Thumbs.db

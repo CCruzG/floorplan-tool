@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Floorplan Prototype</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+
+  <!-- Toolbar -->
+  <div id="toolbar">
+    <button id="clearBtn">Clear</button>
+    <button id="areaModeBtn">Add Area</button>
+    <!-- <button id="editModeBtn">Edit</button> -->
+    <button id="entranceModeBtn">Entrance</button>
+    <button id="lockBtn">Lock</button>
+    <!-- <button id="saveReqBtn">Save Requirements</button> -->
+    <button id="openFloorplanBtn">Open Floorplan</button>
+    <button id="saveFloorplanBtn">Save Floorplan</button>
+    <!-- <div id="modeIndicator">Edit Mode</div> -->
+  </div>
+
+  <!-- Main App -->
+  <div id="app">
+
+    <!-- Top block: canvas + JSON -->
+    <div id="canvasAndJson">
+      <div id="canvasPanel">
+        <div id="canvasBg">
+          <canvas id="canvas" width="512" height="512"></canvas>
+        </div>
+        <div class="mode-indicator" id="canvasModeIndicator">Edit Mode</div>
+      </div>
+
+      <div id="jsonPanel" class="panel">
+        <h3>Floorplan JSON</h3>
+        <pre id="jsonOutput"></pre>
+      </div>
+    </div>
+
+    <!-- Bottom block: requirements + areas -->
+    <div id="bottomPanels">
+      <div id="requirementsPanel" class="panel">
+        <div class="form-row">
+          <label for="planNameInput">Plan name:</label>
+          <input id="planNameInput" type="text" placeholder="Untitled plan" />
+        </div>
+        <h3>Design Requirements</h3>
+
+        <!-- Row 1: bedrooms + bathrooms -->
+        <div class="form-row">
+          <label>Bedrooms: <input type="number" id="bedroomsInput" min="0"></label>
+          <label>Bathrooms: <input type="number" id="bathroomsInput" min="0"></label>
+        </div>
+
+        <!-- Row 2: checkboxes -->
+        <div class="form-row">
+          <label><input type="checkbox" id="openKitchenChk"> Open Kitchen</label>
+          <label><input type="checkbox" id="balconyChk"> Balcony</label>
+        </div>
+
+        <label>Balcony Style:
+          <select id="styleSelect">
+            <option>Modern</option>
+            <option>Traditional</option>
+            <option>Industrial</option>
+          </select>
+        </label>
+        <textarea id="notesInput" placeholder="Other notes..."></textarea>
+      </div>
+
+      <div id="areasPanel" class="panel">
+        <h3>Areas</h3>
+        <input id="areaLabelInput" placeholder="Label (e.g. private)">
+        <button id="finishAreaBtn">Finish Area</button>
+        <ul id="areasList"></ul>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Your JS entry point -->
+  <script type="module" src="index.js"></script>
+</body>
+
+</html>
