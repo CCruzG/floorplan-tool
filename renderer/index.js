@@ -33,14 +33,27 @@ const mouse = { x: 0, y: 0, constrain: false };
 
 // Subscribe to store and render
 store.onChange(() => {
-  DrawingService.render(ctx, store.active, {
-    showVertices: true,
-    ghost: mouse,
-    constrain: mouse.constrain
-  });
+  // Instrumented rendering: wrap render with a small diagnostic log so we
+  // can confirm the renderer pipeline is being invoked during smoke tests.
+  try {
+    DrawingService.render(ctx, store.active, {
+      showVertices: true,
+      ghost: mouse,
+      constrain: mouse.constrain
+    });
+    console.log('[renderer] DrawingService.render invoked', {
+      boundaryClosed: !!store.active?.boundaryClosed,
+      nodes: (store.active?.wall_graph?.nodes || []).length,
+      edges: (store.active?.wall_graph?.edges || []).length,
+      areas: (store.active?.areas || []).length,
+      entrances: (store.active?.entrances || []).length
+    });
+  } catch (err) {
+    console.error('[renderer] Error during DrawingService.render', err);
+  }
 
-  document.getElementById("jsonOutput").textContent =
-    JSON.stringify(store.active, null, 2);
+  const out = document.getElementById("jsonOutput");
+  if (out) out.textContent = JSON.stringify(store.active, null, 2);
 });
 
 // Bind UI events (will update mouse and call store.update as needed)

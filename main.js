@@ -56,9 +56,24 @@ function createWindow() {
   const win = new BrowserWindow({
     width: 1024,
     height: 1024,
-    webPreferences: { preload: path.join(__dirname, 'preload.js') }
+    webPreferences: { 
+      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: true,
+      contextIsolation: true      
+    },
   });
   win.loadFile('renderer/index.html');
+
+  // Forward renderer console messages to the main process terminal so
+  // logs emitted in the renderer (e.g. console.log from renderer/index.js)
+  // are visible when running `npm start`.
+  if (win && win.webContents && typeof win.webContents.on === 'function') {
+    win.webContents.on('console-message', (event, level, message, line, sourceId) => {
+      // level: 0 = log, 1 = warn, 2 = error (may vary by Electron version)
+      const levelStr = level === 2 ? 'ERROR' : level === 1 ? 'WARN' : 'LOG';
+      console.log(`[renderer] [${levelStr}] ${message} (${sourceId}:${line})`);
+    });
+  }
 }
 
 app.whenReady().then(createWindow);

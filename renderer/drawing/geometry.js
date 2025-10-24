@@ -1,3 +1,5 @@
+import { getNodeById } from '../models/floorPlanUtils.js';
+
 
 export function closestEdgeProjection(fp, pt) {
   if (!pt) return null;
@@ -5,10 +7,18 @@ export function closestEdgeProjection(fp, pt) {
   let minDist = Infinity;
 
   fp.wall_graph.edges.forEach((edge, i) => {
-    const [x1, y1] = edge.v1;
-    const [x2, y2] = edge.v2;
+    // const [x1, y1] = edge.v1;
+    // const [x2, y2] = edge.v2;
+    const n1 = getNodeById(fp.wall_graph.nodes, edge.v1);
+    const n2 = getNodeById(fp.wall_graph.nodes, edge.v2);
+    if (!n1 || !n2) return null;
+
+    const x1 = n1.x, y1 = n1.y;
+    const x2 = n2.x, y2 = n2.y;
+
+
     const dx = x2 - x1, dy = y2 - y1;
-    const len2 = dx*dx + dy*dy || 1;
+    const len2 = dx * dx + dy * dy || 1;
 
     let t = ((pt.x - x1) * dx + (pt.y - y1) * dy) / len2;
     t = Math.max(0, Math.min(1, t));
@@ -38,21 +48,35 @@ export function closestPointOnSegment(ax, ay, bx, by, px, py) {
   return [ax + t * abx, ay + t * aby];
 }
 
-export function edgeAngle(edge) {
-  const [x1, y1] = edge.v1;
-  const [x2, y2] = edge.v2;
+export function edgeAngle(fp, edge) {
+  // const [x1, y1] = edge.v1;
+  // const [x2, y2] = edge.v2;
+  const n1 = getNodeById(fp.wall_graph.nodes, edge.v1);
+  const n2 = getNodeById(fp.wall_graph.nodes, edge.v2);
+  if (!n1 || !n2) return null;
+
+  const x1 = n1.x, y1 = n1.y;
+  const x2 = n2.x, y2 = n2.y;
   return Math.atan2(y2 - y1, x2 - x1); // radians
 }
 
-export function edgeLength(edge) {
-  const [x1, y1] = edge.v1;
-  const [x2, y2] = edge.v2;
+export function edgeLength(fp, edge) {
+  const n1 = getNodeById(fp.wall_graph.nodes, edge.v1);
+  const n2 = getNodeById(fp.wall_graph.nodes, edge.v2);
+  if (!n1 || !n2) return null;
+
+  const x1 = n1.x, y1 = n1.y;
+  const x2 = n2.x, y2 = n2.y;
   return Math.hypot(x2 - x1, y2 - y1);
 }
 
-export function edgeMidpoint(edge) {
-  const [x1, y1] = edge.v1;
-  const [x2, y2] = edge.v2;
+export function edgeMidpoint(fp, edge) {
+  const n1 = getNodeById(fp.wall_graph.nodes, edge.v1);
+  const n2 = getNodeById(fp.wall_graph.nodes, edge.v2);
+  if (!n1 || !n2) return null;
+
+  const x1 = n1.x, y1 = n1.y;
+  const x2 = n2.x, y2 = n2.y;
   return { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
 }
 
@@ -60,14 +84,21 @@ export function findClosestEdgeProjection(fp, { x, y }, maxDist) {
   let closest = null;
   let minDist = Infinity;
   fp.wall_graph.edges.forEach((edge, i) => {
-    const [x1, y1] = edge.v1;
-    const [x2, y2] = edge.v2;
+    // const [x1, y1] = edge.v1;
+    // const [x2, y2] = edge.v2;
+    const n1 = getNodeById(fp.wall_graph.nodes, edge.v1);
+    const n2 = getNodeById(fp.wall_graph.nodes, edge.v2);
+    if (!n1 || !n2) return null;
+
+    const x1 = n1.x, y1 = n1.y;
+    const x2 = n2.x, y2 = n2.y;
+
     const dx = x2 - x1, dy = y2 - y1;
-    const len2 = dx*dx + dy*dy || 1;
-    let t = ((x - x1)*dx + (y - y1)*dy) / len2;
+    const len2 = dx * dx + dy * dy || 1;
+    let t = ((x - x1) * dx + (y - y1) * dy) / len2;
     t = Math.max(0, Math.min(1, t));
-    const projX = x1 + t*dx;
-    const projY = y1 + t*dy;
+    const projX = x1 + t * dx;
+    const projY = y1 + t * dy;
     const dist = Math.hypot(x - projX, y - projY);
     if (dist < minDist) {
       minDist = dist;
@@ -81,10 +112,10 @@ export function findClosestNode(fp, { x, y }, maxDist) {
   let closest = null;
   let minDist = Infinity;
   fp.wall_graph.nodes.forEach((node, i) => {
-    const dist = Math.hypot(x - node[0], y - node[1]);
+    const dist = Math.hypot(x - node.x, y - node.y);
     if (dist < minDist) {
       minDist = dist;
-      closest = { type: "node", index: i, x: node[0], y: node[1], dist };
+      closest = { type: "node", index: i, x: node.x, y: node.y, dist };
     }
   });
   return (closest && closest.dist <= maxDist) ? closest : null;
@@ -94,8 +125,8 @@ export function findClosestProjection(fp, mouse) {
   let best = null;
   let bestDist = Infinity;
 
-  fp.wall_graph.nodes.forEach(v => {
-    const proj = projectToVertex(v, mouse);
+  fp.wall_graph.nodes.forEach(node => {
+    const proj = projectToVertex(node, mouse);
     const dist = Math.hypot(mouse.x - proj.x, mouse.y - proj.y);
     if (dist < bestDist) {
       bestDist = dist;
@@ -111,10 +142,17 @@ export function findClosestSegment(fp, pt, threshold = 8) {
   let minDist = Infinity;
 
   fp.wall_graph.edges.forEach((edge, i) => {
-    const [x1, y1] = edge.v1;
-    const [x2, y2] = edge.v2;
+    // const [x1, y1] = edge.v1;
+    // const [x2, y2] = edge.v2;
+    const n1 = getNodeById(fp.wall_graph.nodes, edge.v1);
+    const n2 = getNodeById(fp.wall_graph.nodes, edge.v2);
+    if (!n1 || !n2) return null;
+
+    const x1 = n1.x, y1 = n1.y;
+    const x2 = n2.x, y2 = n2.y;
+
     const dx = x2 - x1, dy = y2 - y1;
-    const len2 = dx*dx + dy*dy || 1;
+    const len2 = dx * dx + dy * dy || 1;
 
     let t = ((pt.x - x1) * dx + (pt.y - y1) * dy) / len2;
     t = Math.max(0, Math.min(1, t));
@@ -132,12 +170,17 @@ export function findClosestSegment(fp, pt, threshold = 8) {
 }
 
 
-export function isPointNearEdge(pt, edge, threshold = 6) {
+export function isPointNearEdge(fp, pt, edge, threshold = 6) {
   if (!pt) return false;
-  const [x1, y1] = edge.v1;
-  const [x2, y2] = edge.v2;
+  // resolve nodes from fp
+  const n1 = getNodeById(fp.wall_graph.nodes, edge.v1);
+  const n2 = getNodeById(fp.wall_graph.nodes, edge.v2);
+  if (!n1 || !n2) return false;
+
+  const x1 = n1.x, y1 = n1.y;
+  const x2 = n2.x, y2 = n2.y;
   const dx = x2 - x1, dy = y2 - y1;
-  const len2 = dx*dx + dy*dy || 1;
+  const len2 = dx * dx + dy * dy || 1;
   let t = ((pt.x - x1) * dx + (pt.y - y1) * dy) / len2;
   t = Math.max(0, Math.min(1, t));
   const projX = x1 + t * dx;
@@ -147,7 +190,8 @@ export function isPointNearEdge(pt, edge, threshold = 6) {
 }
 
 export function projectToVertex(vertex, mouse) {
-  const [vx, vy] = vertex;
+  // const [vx, vy] = vertex;
+  const vx = vertex.x, vy = vertex.y;
   const vertical = { x: vx, y: mouse.y };
   const horizontal = { x: mouse.x, y: vy };
 

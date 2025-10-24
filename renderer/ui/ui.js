@@ -4,6 +4,8 @@
 import { DrawingService } from '../drawing/drawingService.js';
 import { findClosestProjection, findClosestSegment, findClosestNode, findClosestEdgeProjection } from '../drawing/geometry.js';
 import { FloorPlan } from '../models/FloorPlan.js'; // adjust path if needed
+import { validateFloorPlan } from '../models/validation.js';
+import { renderPrompt } from '../models/promptRenderer.js';
 
 // import { DrawingService, findClosestBoundaryPoint } from '../drawing/drawingService.js';
 
@@ -168,7 +170,7 @@ export function bindUI(store, canvas, mouse) {
       if (store.active.entrances.length === 0) {
         const closest = DrawingService.findClosestBoundaryPoint(store.active, { x, y });
         if (closest) {
-          store.active.addEntrance(closest.edge, closest.x, closest.y);
+          store.active.addEntrance(closest.edgeId, closest.x, closest.y);
           store.update(store.active);
           console.log("Entrance added at", closest);
           store.setMode("edit");
@@ -180,7 +182,9 @@ export function bindUI(store, canvas, mouse) {
 
     // DRAW MODE: boundary creation
     if (store.active.wall_graph.nodes.length > 0) {
-      const [fx, fy] = store.active.wall_graph.nodes[0];
+      const first = store.active.wall_graph.nodes[0];
+      const fx = first.x;
+      const fy = first.y;
       const dist = Math.hypot(x - fx, y - fy);
       if (dist < 10) {
         store.active.addVertex(fx, fy, { constrain: e.shiftKey });
@@ -326,6 +330,67 @@ export function bindUI(store, canvas, mouse) {
       }
     });
   }
+
+  const btnRefine = document.getElementById('btn-refine-ai');
+  const aiDebug = document.getElementById('ai-debug');
+  const aiError = document.getElementById('ai-error');
+
+  btnRefine.addEventListener('click', async () => {
+    const fp = store.active;
+    if (!fp) return;
+
+    // 1) Serialize
+    const planJson = fp.toJSON();
+
+    // // 2) Validate
+    // const result = validateFloorPlan(planJson);
+    // if (!result.ok) {
+    //   aiError.style.display = 'block';
+    //   aiError.textContent = `Validation failed:\n- ${result.errors.join('\n- ')}`;
+    //   aiDebug.style.display = 'none';
+    //   return;
+    // } else {
+    //   aiError.style.display = 'none';
+    // }
+
+    // 3) Render prompt
+    const prompt = renderPrompt(fp);
+    // console.log("Generated prompt:\n", prompt);
+
+    // 5) Send to local AI service (no validation for now)
+    try {
+      const res = await fetch("http://localhost:11434/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-oss",
+          prompt: prompt,   // <-- your dynamic string
+          stream: false
+        })
+      });
+
+      if (!res.ok) {
+        console.log("res not ok");
+        throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      }
+      
+      
+      const data = await res.json();
+      // const raw = await res.text();
+      console.log("Raw service response: ", data.response);
+
+      // Directly apply refined plan (skip validation)
+      const refined = FloorPlan.fromJSON(data.response);
+      store.update(refined);
+
+      aiError.style.display = "none"; // hide any previous error
+    } catch (err) {
+      aiError.style.display = "block";
+      aiError.textContent = `AI service error: ${err.message}`;
+    }
+
+  });
+
 }
 
 // Helper: commit the area, prompt for label, add to model, and reset temp state
