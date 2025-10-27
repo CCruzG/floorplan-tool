@@ -278,6 +278,9 @@ export class FloorPlan {
     fp.entrances = this.entrances.map(ent => ({ ...ent, position: { ...ent.position } }));
     fp.areas = this.areas.map(a => ({ ...a, vertices: [...a.vertices] }));
     fp.requirements = { ...this.requirements };
+    // Preserve the internal id counter so cloned/restored instances continue
+    // generating unique ids and avoid collisions after undo/redo.
+    fp._idCounter = this._idCounter;
     return fp;
   }
 

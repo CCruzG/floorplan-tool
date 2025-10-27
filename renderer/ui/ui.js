@@ -363,7 +363,8 @@ export function bindUI(store, canvas, mouse) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "gpt-oss",
+          // model: "gpt-oss",
+          model: "mistral-nemo",
           prompt: prompt,   // <-- your dynamic string
           stream: false
         })

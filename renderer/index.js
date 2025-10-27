@@ -41,13 +41,13 @@ store.onChange(() => {
       ghost: mouse,
       constrain: mouse.constrain
     });
-    console.log('[renderer] DrawingService.render invoked', {
-      boundaryClosed: !!store.active?.boundaryClosed,
-      nodes: (store.active?.wall_graph?.nodes || []).length,
-      edges: (store.active?.wall_graph?.edges || []).length,
-      areas: (store.active?.areas || []).length,
-      entrances: (store.active?.entrances || []).length
-    });
+    // console.log('[renderer] DrawingService.render invoked', {
+    //   boundaryClosed: !!store.active?.boundaryClosed,
+    //   nodes: (store.active?.wall_graph?.nodes || []).length,
+    //   edges: (store.active?.wall_graph?.edges || []).length,
+    //   areas: (store.active?.areas || []).length,
+    //   entrances: (store.active?.entrances || []).length
+    // });
   } catch (err) {
     console.error('[renderer] Error during DrawingService.render', err);
   }
