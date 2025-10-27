@@ -20,6 +20,17 @@
     <button id="openFloorplanBtn">Open Floorplan</button>
     <button id="saveFloorplanBtn">Save Floorplan</button>
     <button id="btn-refine-ai">Refine with AI</button>
+    <label style="margin-left:12px;">
+      Canvas width:
+      <input id="canvasWidthValue" type="number" value="1000" min="1" style="width:90px; margin-left:6px" />
+      <select id="canvasUnitSelect" style="margin-left:6px">
+        <option value="mm">mm</option>
+        <option value="cm">cm</option>
+        <option value="m">m</option>
+        <option value="in">in</option>
+        <option value="ft">ft</option>
+      </select>
+    </label>
     <div id="ai-error" style="display:none; color:#b00020; margin-top:8px;"></div>
     <!-- <div id="modeIndicator">Edit Mode</div> -->
   </div>

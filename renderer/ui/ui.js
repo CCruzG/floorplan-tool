@@ -4,6 +4,7 @@
 import { DrawingService } from '../drawing/drawingService.js';
 import { findClosestProjection, findClosestSegment, findClosestNode, findClosestEdgeProjection } from '../drawing/geometry.js';
 import { FloorPlan } from '../models/FloorPlan.js'; // adjust path if needed
+import { setScalePixelsPerUnit } from '../../config.js';
 import { validateFloorPlan } from '../models/validation.js';
 import { renderPrompt } from '../models/promptRenderer.js';
 
@@ -57,7 +58,8 @@ export function bindUI(store, canvas, mouse) {
       ghost: mouse,
       constrain: mouse.constrain,
       tempArea: store.tempAreaActive ? store.tempArea : null,
-      selectedSegment: store.active.selectedSegment
+      // In area mode we should not show or highlight selected segments
+      selectedSegment: store.mode === 'area' ? null : store.active.selectedSegment
     });
 
     const indicator = document.getElementById('canvasModeIndicator');
@@ -133,20 +135,95 @@ export function bindUI(store, canvas, mouse) {
       const nodeSnap = findClosestNode(store.active, { x, y }, SNAP_TO_NODE_DIST);
       const edgeSnap = nodeSnap ? null : findClosestEdgeProjection(store.active, { x, y }, SNAP_TO_EDGE_DIST);
 
-      if (nodeSnap) {
-        x = nodeSnap.x; y = nodeSnap.y;
-        store.tempAreaLastSnap = nodeSnap;
-        console.log("Snapped to node", nodeSnap);
-      } else if (edgeSnap) {
-        x = edgeSnap.x; y = edgeSnap.y;
-        store.tempAreaLastSnap = edgeSnap;
-        console.log("Snapped to edge projection", edgeSnap);
-      } else {
-        store.tempAreaLastSnap = null;
+      const constrain = e.shiftKey;
+      // Determine previous temp point coordinates (if any) for constrain logic
+      let last = store.tempArea.length ? store.tempArea[store.tempArea.length - 1] : null;
+      let lastX = null, lastY = null;
+      if (last) {
+        if (typeof last === 'string') {
+          const n = store.active.wall_graph.nodes.find(n => n.id === last);
+          if (n) { lastX = n.x; lastY = n.y; }
+        } else if (Array.isArray(last)) {
+          lastX = last[0]; lastY = last[1];
+        }
       }
 
-      store.tempArea.push([x, y]);
+      if (nodeSnap) {
+        // If constrained, store coords aligned to the previous point (cannot
+        // be represented as a node id anymore). If not constrained, store
+        // the node id so it stays linked to the wall graph.
+        const nx = nodeSnap.x, ny = nodeSnap.y;
+        store.tempAreaLastSnap = nodeSnap;
+        if (constrain && lastX != null && lastY != null) {
+          // Align either horizontally or vertically relative to last
+          const dx = Math.abs(nx - lastX);
+          const dy = Math.abs(ny - lastY);
+          if (dx > dy) {
+            // snap horizontally -> keep nx, set y to lastY
+            x = nx; y = lastY;
+          } else {
+            // snap vertically -> keep ny, set x to lastX
+            x = lastX; y = ny;
+          }
+          store.tempArea.push([x, y]);
+          console.log("Snapped to node (constrained)", nodeSnap, "->", [x, y]);
+        } else {
+          x = nx; y = ny;
+          console.log("Snapped to node", nodeSnap);
+          store.tempArea.push(nodeSnap.id);
+        }
+      } else if (edgeSnap) {
+        const ex = edgeSnap.x, ey = edgeSnap.y;
+        store.tempAreaLastSnap = edgeSnap;
+        if (constrain && lastX != null && lastY != null) {
+          const dx = Math.abs(ex - lastX);
+          const dy = Math.abs(ey - lastY);
+          if (dx > dy) { x = ex; y = lastY; } else { x = lastX; y = ey; }
+          store.tempArea.push([x, y]);
+          console.log("Snapped to edge (constrained)", edgeSnap, "->", [x, y]);
+        } else {
+          x = ex; y = ey;
+          store.tempArea.push([x, y]);
+          console.log("Snapped to edge projection", edgeSnap);
+        }
+      } else {
+        store.tempAreaLastSnap = null;
+        if (constrain && lastX != null && lastY != null) {
+          const dx = Math.abs(x - lastX);
+          const dy = Math.abs(y - lastY);
+          if (dx > dy) { y = lastY; } else { x = lastX; }
+          console.log('Constrained free point ->', [x, y]);
+        }
+        store.tempArea.push([x, y]);
+      }
+
       store.tempAreaActive = true;
+
+      // If clicking close to the first temp vertex, close the polygon
+      // to match the boundary drawing UX (click the first point to close)
+      if (store.tempArea.length >= 3) {
+        const first = store.tempArea[0];
+        let fx, fy;
+        if (typeof first === 'string') {
+          const n = store.active.wall_graph.nodes.find(n => n.id === first);
+          if (n) { fx = n.x; fy = n.y; }
+        } else if (Array.isArray(first)) {
+          fx = first[0]; fy = first[1];
+        }
+
+        if (fx != null && fy != null) {
+          const dx = Math.hypot(x - fx, y - fy);
+          if (dx < SNAP_TO_NODE_DIST) {
+            // Close and commit the area just like the boundary
+            commitArea(store);
+            refreshAreasList(store);
+            store.setMode('edit');
+            store.update(store.active);
+            return;
+          }
+        }
+      }
+
       store.notify();
       return;
     }
@@ -296,6 +373,21 @@ export function bindUI(store, canvas, mouse) {
           const fp = FloorPlan.fromJSON(result.data);
           store.add(fp);          // set as active + push to history
           store.setActive(fp);    // triggers notify()
+
+          // Restore saved scale (if present) so measurements and GUI reflect
+          // the plan's intended physical dimensions.
+          if (fp.units && fp.units.pxPerUnit) {
+            setScalePixelsPerUnit(fp.units.pxPerUnit, fp.units.length || 'mm');
+            // Update canvas controls if present
+            const valEl = document.getElementById('canvasWidthValue');
+            const unitEl = document.getElementById('canvasUnitSelect');
+            if (valEl && unitEl) {
+              unitEl.value = fp.units.length || unitEl.value;
+              // compute the numeric value in the chosen unit from canvas width
+              const numeric = Math.round((document.getElementById('canvas').width / fp.units.pxPerUnit) * 100) / 100;
+              valEl.value = numeric;
+            }
+          }
           store.setMode("edit");
 
           // Repopulate requirements form
@@ -405,7 +497,22 @@ function commitArea(store) {
   const labelInput = document.getElementById("areaLabelInput");
   const label = labelInput?.value?.trim() || "area";
 
-  store.active.addArea(label, store.tempArea);
+  // Map temporary coordinate vertices back to existing node ids when
+  // they are within snap tolerance. This keeps area vertices linked to
+  // the wall graph when users snapped to nodes or constrained near them.
+  const mapped = store.tempArea.map(v => {
+    // already a node id
+    if (typeof v === 'string') return v;
+    if (!Array.isArray(v) || v.length < 2) return null;
+    const [x, y] = v;
+    // find closest node within snap distance
+    const node = store.active.wall_graph.nodes.find(n => Math.hypot(n.x - x, n.y - y) <= SNAP_TO_NODE_DIST);
+    if (node) return node.id;
+    // otherwise keep coordinates
+    return [x, y];
+  }).filter(v => v !== null);
+
+  store.active.addArea(label, mapped);
   store.update(store.active);       // commit to history
   store.tempArea = [];
   store.tempAreaActive = false;
@@ -424,11 +531,23 @@ function refreshAreasList(store) {
     // Optional: delete button
     const del = document.createElement("button");
     del.textContent = "x";
-    del.onclick = () => {
-      store.active.removeArea(area.id);
-      store.update(store.active);
-      refreshAreasList(store);
-    };
+    // Do not allow deleting the canonical boundary area from the UI
+    if (area.label === 'boundary') {
+      del.disabled = true;
+      del.title = 'Boundary area cannot be deleted';
+      li.style.fontWeight = '600';
+      const badge = document.createElement('span');
+      badge.textContent = ' (boundary)';
+      badge.style.fontSize = '0.9em';
+      badge.style.marginLeft = '6px';
+      li.appendChild(badge);
+    } else {
+      del.onclick = () => {
+        store.active.removeArea(area.id);
+        store.update(store.active);
+        refreshAreasList(store);
+      };
+    }
     li.appendChild(del);
     listEl.appendChild(li);
   });

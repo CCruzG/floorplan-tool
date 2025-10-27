@@ -1,7 +1,24 @@
 // config.js
-export const UNIT_SCALE = 1; // pixels-to-metres or your chosen unit
-export const UNIT_LABEL = "px"; // or "m"
+// Runtime-configurable unit formatting. By default we report pixels.
+let UNIT_SCALE = 1; // multiplier to convert px -> unit (e.g., mm)
+let UNIT_LABEL = "px";
+
+export function setScalePixelsPerUnit(pixelsPerUnit, label = 'mm') {
+  if (!pixelsPerUnit || typeof pixelsPerUnit !== 'number' || !isFinite(pixelsPerUnit)) return;
+  UNIT_SCALE = 1 / pixelsPerUnit; // px * UNIT_SCALE => units
+  UNIT_LABEL = label;
+}
+
 export function formatLen(pxLen) {
   const v = pxLen * UNIT_SCALE;
   return `${v.toFixed(2)} ${UNIT_LABEL}`;
+}
+
+export function getUnitScale() { return UNIT_SCALE; }
+export function formatArea(pxArea) {
+  // pxArea is in square pixels. Convert to square units using UNIT_SCALE.
+  const unitArea = pxArea * (UNIT_SCALE * UNIT_SCALE);
+  // Choose a sensible label for squared units
+  const label = `${UNIT_LABEL}\u00B2`; // e.g., mm²
+  return `${unitArea.toFixed(2)} ${label}`;
 }

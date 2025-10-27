@@ -39,7 +39,7 @@ export const DrawingService = {
     }
 
     if (options.mode === "area" && options.tempArea) {
-      R.drawAreaGhost(ctx, options.tempArea, options.ghost);
+      R.drawAreaGhost(ctx, fp, options.tempArea, options.ghost);
     }
   },
 

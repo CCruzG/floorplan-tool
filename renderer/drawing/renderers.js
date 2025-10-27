@@ -1,6 +1,6 @@
 // renderer/drawing/renderers.js
-import { closestPointOnSegment, findClosestProjection, edgeLength, edgeMidpoint, isPointNearEdge, closestEdgeProjection } from './geometry.js';
-import { formatLen } from '../../config.js'
+import { closestPointOnSegment, findClosestProjection, edgeLength, edgeMidpoint, isPointNearEdge, closestEdgeProjection, polygonArea, findClosestNode, findClosestEdgeProjection, projectToVertex } from './geometry.js';
+import { formatLen, formatArea } from '../../config.js'
 import { drawTooltip } from '../ui/labels.js'
 import { getNodeById } from '../models/floorPlanUtils.js';
 
@@ -55,39 +55,203 @@ export function drawAreas(ctx, fp) {
     });
     ctx.closePath();
 
-    ctx.fillStyle = area.label === "private" ? "rgba(200,0,0,0.2)" : "rgba(0,200,0,0.2)";
-    ctx.fill();
+  // Use the areaColour helper so different labels (including the
+  // canonical 'boundary') are rendered distinctively.
+  const col = areaColour(area.label || '');
+  ctx.fillStyle = col.fill || 'rgba(120,120,120,0.15)';
+  ctx.fill();
 
-    ctx.strokeStyle = "#666";
-    ctx.lineWidth = 1;
-    ctx.stroke();
+  ctx.strokeStyle = col.stroke || '#666';
+  ctx.lineWidth = col.strokeWidth || 1;
+  if (col.dashed) ctx.setLineDash([6, 4]);
+  ctx.stroke();
+  if (col.dashed) ctx.setLineDash([]);
 
     const cx = pts.reduce((s, v) => s + v[0], 0) / pts.length;
     const cy = pts.reduce((s, v) => s + v[1], 0) / pts.length;
     ctx.fillStyle = "#000";
     ctx.font = "12px sans-serif";
-    ctx.fillText(area.label, cx, cy);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(area.label, cx, cy - 8);
+
+    // compute polygon area (in px^2) and display formatted area
+    try {
+      const areaPx = polygonArea(pts);
+      const areaText = formatArea(areaPx);
+      ctx.font = "11px sans-serif";
+      ctx.fillStyle = "#222";
+      ctx.fillText(areaText, cx, cy + 10);
+    } catch (err) {
+      // non-fatal: if polygonArea or formatArea fail, don't break rendering
+      console.warn('Area formatting failed', err);
+    }
   });
 }
 
-export function drawAreaGhost(ctx, points, mouse) {
+export function drawAreaGhost(ctx, fp, points, mouse) {
   if (!points.length) return;
   ctx.save();
   ctx.strokeStyle = "#007acc";
   ctx.setLineDash([4, 4]);
   ctx.lineWidth = 2;
 
+  // Draw the current temporary polygon (resolve node ids to coords)
   ctx.beginPath();
-  points.forEach(([px, py], i) => (i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py)));
-  if (mouse?.x != null && mouse?.y != null) ctx.lineTo(mouse.x, mouse.y);
+  points.forEach((v, i) => {
+    let px = null, py = null;
+    if (typeof v === 'string') {
+      const n = getNodeById(fp.wall_graph.nodes, v);
+      if (n) { px = n.x; py = n.y; }
+    } else if (Array.isArray(v)) {
+      px = v[0]; py = v[1];
+    }
+    if (px == null || py == null) return;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
+
+  // Compute preview point for the next vertex (snapping + constrain)
+  let previewX = mouse?.x ?? null;
+  let previewY = mouse?.y ?? null;
+  let previewMode = 'free'; // 'node' | 'edge' | 'constrained' | 'free'
+
+  // find last drawn vertex to support constrain
+  const lastRaw = points[points.length - 1];
+  let lastX = null, lastY = null;
+  if (typeof lastRaw === 'string') {
+    const n = getNodeById(fp.wall_graph.nodes, lastRaw);
+    if (n) { lastX = n.x; lastY = n.y; }
+  } else if (Array.isArray(lastRaw)) {
+    lastX = lastRaw[0]; lastY = lastRaw[1];
+  }
+
+  if (mouse) {
+    const nodeSnap = findClosestNode(fp, { x: mouse.x, y: mouse.y }, SNAP_DISTANCE);
+    const edgeSnap = findClosestEdgeProjection(fp, { x: mouse.x, y: mouse.y }, 8);
+    const constrain = mouse.constrain;
+
+    if (nodeSnap && !constrain) {
+      previewX = nodeSnap.x; previewY = nodeSnap.y; previewMode = 'node';
+    } else if (nodeSnap && constrain && lastX != null) {
+      // align node to last
+      const dx = Math.abs(nodeSnap.x - lastX);
+      const dy = Math.abs(nodeSnap.y - lastY);
+      if (dx > dy) { previewX = nodeSnap.x; previewY = lastY; } else { previewX = lastX; previewY = nodeSnap.y; }
+      previewMode = 'constrained';
+    } else if (edgeSnap && !constrain) {
+      previewX = edgeSnap.x; previewY = edgeSnap.y; previewMode = 'edge';
+    } else if (edgeSnap && constrain && lastX != null) {
+      const dx = Math.abs(edgeSnap.x - lastX);
+      const dy = Math.abs(edgeSnap.y - lastY);
+      if (dx > dy) { previewX = edgeSnap.x; previewY = lastY; } else { previewX = lastX; previewY = edgeSnap.y; }
+      previewMode = 'constrained';
+    } else if (constrain && lastX != null) {
+      // project mouse onto horizontal/vertical through last vertex
+      const proj = projectToVertex({ x: lastX, y: lastY }, { x: mouse.x, y: mouse.y });
+      previewX = proj.x; previewY = proj.y; previewMode = 'constrained';
+    } else {
+      previewMode = 'free';
+      previewX = mouse.x; previewY = mouse.y;
+    }
+  }
+
+  // Draw line to preview point
+  if (previewX != null && previewY != null) {
+    ctx.lineTo(previewX, previewY);
+  }
   ctx.stroke();
 
-  points.forEach(([px, py]) => {
+  // Draw small markers for temporary vertices (resolve node ids)
+  points.forEach(v => {
+    let px = null, py = null;
+    if (typeof v === 'string') {
+      const n = getNodeById(fp.wall_graph.nodes, v);
+      if (n) { px = n.x; py = n.y; }
+    } else if (Array.isArray(v)) {
+      px = v[0]; py = v[1];
+    }
+    if (px == null || py == null) return;
     ctx.beginPath();
     ctx.arc(px, py, 3, 0, Math.PI * 2);
     ctx.fillStyle = "#007acc";
     ctx.fill();
   });
+
+  // Draw preview marker for the next vertex
+  if (previewX != null && previewY != null) {
+    let fill = '#999';
+    if (previewMode === 'node') fill = '#2a9d8f';
+    else if (previewMode === 'edge') fill = '#007acc';
+    else if (previewMode === 'constrained') fill = '#e76f51';
+
+    ctx.beginPath();
+    ctx.arc(previewX, previewY, 5, 0, Math.PI * 2);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+
+    // Show length from last point to preview when possible
+    if (lastX != null && lastY != null) {
+      const dx = previewX - lastX;
+      const dy = previewY - lastY;
+      const d = Math.hypot(dx, dy);
+      const midX = (previewX + lastX) / 2;
+      const midY = (previewY + lastY) / 2;
+      const text = formatLen(d);
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      // draw subtle background box
+      const metrics = ctx.measureText(text);
+      const padding = 6;
+      const bw = metrics.width + padding;
+      const bh = 16;
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.rect(midX - bw/2, midY - bh - 6, bw, bh);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#000';
+      ctx.fillText(text, midX, midY - 2);
+    }
+  }
+
+  // Show a small shift/constrain indicator near the mouse when user
+  // holds Shift (mouse.constrain === true).
+  if (mouse && mouse.constrain) {
+    try {
+      const ix = mouse.x + 12;
+      const iy = mouse.y + 12;
+      const w = 28;
+      const h = 18;
+      ctx.fillStyle = 'rgba(30,30,30,0.9)';
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 1;
+      // rounded rect
+      const r = 4;
+      ctx.beginPath();
+      ctx.moveTo(ix + r, iy);
+      ctx.arcTo(ix + w, iy, ix + w, iy + h, r);
+      ctx.arcTo(ix + w, iy + h, ix, iy + h, r);
+      ctx.arcTo(ix, iy + h, ix, iy, r);
+      ctx.arcTo(ix, iy, ix + w, iy, r);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('\u21E7', ix + w / 2, iy + h / 2); // up-pointing double arrow as shift symbol
+    } catch (err) {
+      // swallow
+    }
+  }
 
   ctx.restore();
 }
@@ -98,6 +262,9 @@ export function areaColour(label) {
     common: { fill: "rgba(0,150,0,0.2)", stroke: "#2a2" },
     circulation: { fill: "rgba(0,0,200,0.2)", stroke: "#22a" }
   };
+  // Special casing for the canonical boundary area so it is visually
+  // distinct and users understand it's the plan boundary (non-deletable).
+  if (label === 'boundary') return { fill: 'rgba(0,0,0,0.06)', stroke: '#333', strokeWidth: 2, dashed: false };
   return map[label] || { fill: "rgba(120,120,120,0.2)", stroke: "#666" };
 }
 
@@ -141,16 +308,16 @@ export function drawWalls(ctx, fp, options = {}) {
     }
 
     if (options.mode === "draw") {
-      const len = edgeLength(fp, edge);
-      const mid = edgeMidpoint(fp, edge);
+        const len = edgeLength(fp, edge);
+        const mid = edgeMidpoint(fp, edge);
 
-      ctx.save();
-      ctx.fillStyle = "#000";
-      ctx.font = "11px sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(len.toFixed(2), mid.x, mid.y);
-      ctx.restore();
+        ctx.save();
+        ctx.fillStyle = "#000";
+        ctx.font = "11px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(formatLen(len), mid.x, mid.y);
+        ctx.restore();
     }
   });
 }
@@ -179,7 +346,7 @@ export function drawHoverDimensions(ctx, fp, options) {
     ctx.font = "12px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(len.toFixed(2), mid.x, mid.y);
+    ctx.fillText(formatLen(len), mid.x, mid.y);
     ctx.restore();
   }
 }
@@ -189,9 +356,8 @@ export function drawHoverTooltip(ctx, fp, options) {
   const hit = closestEdgeProjection(fp, ghost);
   if (!hit) return;
   if (hit.dist > 8) return;
-
-  const len = edgeLength(fp, hit.edge).toFixed(2);
-  drawTooltip(ctx, `${len}`, ghost.x, ghost.y, {
+  const len = edgeLength(fp, hit.edge);
+  drawTooltip(ctx, `${formatLen(len)}`, ghost.x, ghost.y, {
     font: "12px sans-serif",
     bg: "rgba(30,30,35,0.95)",
     fg: "#fff",
@@ -244,6 +410,34 @@ export function drawGhost(ctx, fp, mouse, { constrain = false } = {}) {
     ctx.beginPath();
     ctx.arc(ghostX, ghostY, 4, 0, Math.PI * 2);
     ctx.fill();
+  }
+
+  // Draw a small constraint indicator near the ghost point when Shift is held
+  if (constrained && mouse) {
+    try {
+      const ix = ghostX + 10;
+      const iy = ghostY + 10;
+      const w = 26;
+      const h = 16;
+      ctx.fillStyle = 'rgba(30,30,30,0.95)';
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 1;
+      const r = 3;
+      ctx.beginPath();
+      ctx.moveTo(ix + r, iy);
+      ctx.arcTo(ix + w, iy, ix + w, iy + h, r);
+      ctx.arcTo(ix + w, iy + h, ix, iy + h, r);
+      ctx.arcTo(ix, iy + h, ix, iy, r);
+      ctx.arcTo(ix, iy, ix + w, iy, r);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('\u21E7', ix + w / 2, iy + h / 2);
+    } catch (err) {}
   }
 
   if (isNearFirstNode(fp, mouse)) {

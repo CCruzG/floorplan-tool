@@ -3,6 +3,7 @@ import { FloorPlanStore } from './state/store.js';
 import { FloorPlan } from './models/FloorPlan.js';
 import { DrawingService } from './drawing/drawingService.js';
 import { bindUI } from './ui/ui.js';
+import { setScalePixelsPerUnit } from '../config.js';
 
 const reqFields = {
   bedrooms: document.getElementById("bedroomsInput"),
@@ -27,6 +28,43 @@ function readRequirementsFromForm() {
 const store = new FloorPlanStore();
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+
+// Scale control: numeric width + unit selection
+const canvasWidthValue = document.getElementById('canvasWidthValue');
+const canvasUnitSelect = document.getElementById('canvasUnitSelect');
+
+function parseUnitValue(value, unit) {
+  // value is the number in the chosen unit; we will treat it directly as "units"
+  // pxPerUnit = canvas.width / value
+  const v = parseFloat(value);
+  if (!isFinite(v) || v <= 0) return null;
+  return v;
+}
+
+function updateScaleFromInput() {
+  const val = parseUnitValue(canvasWidthValue?.value, canvasUnitSelect?.value);
+  const unit = canvasUnitSelect?.value || 'mm';
+  if (!val) return;
+
+  const pxPerUnit = canvas.width / val; // pixels per (selected unit)
+  setScalePixelsPerUnit(pxPerUnit, unit);
+
+  // store the scale on the active floorplan so it's included on save
+  if (store.active) {
+    store.active.units = { length: unit, pxPerUnit };
+  }
+
+  // trigger a redraw / JSON panel update
+  store.notify();
+}
+
+if (canvasWidthValue && canvasUnitSelect) {
+  canvasWidthValue.addEventListener('change', updateScaleFromInput);
+  canvasWidthValue.addEventListener('input', updateScaleFromInput);
+  canvasUnitSelect.addEventListener('change', updateScaleFromInput);
+  // initialize
+  updateScaleFromInput();
+}
 
 // Track mouse and constraint state centrally
 const mouse = { x: 0, y: 0, constrain: false };
