@@ -4,9 +4,10 @@
 import { DrawingService } from '../drawing/drawingService.js';
 import { findClosestProjection, findClosestSegment, findClosestNode, findClosestEdgeProjection } from '../drawing/geometry.js';
 import { FloorPlan } from '../models/FloorPlan.js'; // adjust path if needed
-import { setScalePixelsPerUnit } from '../../config.js';
+import { setScalePixelsPerUnit, getPixelsPerUnit, getUnitLabel } from '../../config.js';
 import { validateFloorPlan } from '../models/validation.js';
 import { renderPrompt } from '../models/promptRenderer.js';
+import { evaluateRequirements } from '../models/requirementsEvaluator.js';
 
 // import { DrawingService, findClosestBoundaryPoint } from '../drawing/drawingService.js';
 
@@ -71,6 +72,33 @@ export function bindUI(store, canvas, mouse) {
     const jsonEl = document.getElementById('jsonOutput');
     if (jsonEl && store.active) {
       jsonEl.textContent = JSON.stringify(store.active.toJSON(), null, 2);
+    }
+
+    // Update feasibility panel when requirements or boundary change
+    const feasEl = document.getElementById('feasibilityPanel');
+    if (feasEl && store.active) {
+      try {
+        const report = evaluateRequirements(store.active);
+        const statusEl = document.getElementById('feasibilityStatus');
+        const summaryEl = document.getElementById('feasibilitySummary');
+        if (statusEl && summaryEl) {
+          statusEl.className = 'status ' + (report.feasible ? 'ok' : 'warn');
+          statusEl.textContent = report.feasible ? 'Feasible' : 'Not feasible';
+          summaryEl.textContent = (report.summary || '') + ' ' + ((report.suggestions || []).slice(0,3).join('; '));
+        } else {
+          // Backward compatible: if markup isn't present, fall back to simple text
+          feasEl.textContent = (report.summary || '') + ' ' + ((report.suggestions || []).slice(0,3).join('; '));
+          feasEl.dataset.status = report.feasible ? 'ok' : 'warn';
+        }
+      } catch (err) {
+        const statusEl = document.getElementById('feasibilityStatus');
+        const summaryEl = document.getElementById('feasibilitySummary');
+        if (statusEl) {
+          statusEl.className = 'status unknown';
+          statusEl.textContent = 'Unknown';
+        }
+        if (summaryEl) summaryEl.textContent = 'Feasibility: unavailable';
+      }
     }
   });
 
@@ -472,8 +500,88 @@ export function bindUI(store, canvas, mouse) {
       // const raw = await res.text();
       console.log("Raw service response: ", data.response);
 
-      // Directly apply refined plan (skip validation)
-      const refined = FloorPlan.fromJSON(data.response);
+      // Try to validate the returned JSON and perform a best-effort
+      // sanitisation if it doesn't comply with the schema (common issues:
+      // missing `units`, missing `entrances.edgeRef`).
+      let candidate = typeof data.response === 'string' ? JSON.parse(data.response) : data.response;
+
+      // If `units` missing, try to infer the unit used by the AI from the
+      // magnitude of the returned coordinates, then set candidate.units and
+      // an appropriate pxPerUnit so FloorPlan.fromJSON converts correctly.
+      if (!candidate.units) {
+        const nodes = (candidate.wall_graph && candidate.wall_graph.nodes) || [];
+        let maxVal = 0;
+        nodes.forEach(n => {
+          if (n && typeof n.x === 'number' && typeof n.y === 'number') {
+            maxVal = Math.max(maxVal, Math.abs(n.x), Math.abs(n.y));
+          }
+        });
+
+        // Heuristic: if coordinates are large (>50) treat as mm, if medium
+        // (10-50) treat as cm, otherwise meters.
+        let inferredUnit = 'm';
+        if (maxVal > 50) inferredUnit = 'mm';
+        else if (maxVal > 10) inferredUnit = 'cm';
+
+        const METERS = { mm: 0.001, cm: 0.01, m: 1 };
+        const appUnit = getUnitLabel() || 'm';
+        const pxPerApp = getPixelsPerUnit() || 1; // pixels per app unit
+        // pxPerCandidate = pxPerApp * (metersPerCandidate / metersPerApp)
+        const pxPerCandidate = pxPerApp * (METERS[inferredUnit] / METERS[appUnit]);
+
+        candidate.units = { length: inferredUnit, pxPerUnit: pxPerCandidate };
+      }
+
+      // Ensure edges include a locked flag (default false) so schema validation
+      // and subsequent code expecting the flag do not break.
+      if (candidate.wall_graph && Array.isArray(candidate.wall_graph.edges)) {
+        candidate.wall_graph.edges = candidate.wall_graph.edges.map(e => ({ ...e, locked: typeof e.locked === 'boolean' ? e.locked : false }));
+      }
+
+      // Ensure entrances have an edgeRef (best-effort: match nearest edge by projection)
+      if (Array.isArray(candidate.entrances) && candidate.wall_graph && Array.isArray(candidate.wall_graph.edges) && Array.isArray(candidate.wall_graph.nodes)) {
+        // helper: project point onto segment and compute distance
+        function projPointToSeg(px, py, ax, ay, bx, by) {
+          const vx = bx - ax, vy = by - ay;
+          const wx = px - ax, wy = py - ay;
+          const vv = vx*vx + vy*vy;
+          const t = vv === 0 ? 0 : Math.max(0, Math.min(1, (wx*vx + wy*vy) / vv));
+          const qx = ax + t*vx, qy = ay + t*vy;
+          const dx = px - qx, dy = py - qy;
+          return Math.hypot(dx, dy);
+        }
+
+        const nodesById = Object.fromEntries(candidate.wall_graph.nodes.map(n => [n.id, n]));
+        candidate.entrances = candidate.entrances.map(ent => {
+          if (!ent.edgeRef) {
+            // find closest edge
+            let best = null; let bestDist = Infinity;
+            candidate.wall_graph.edges.forEach(edge => {
+              const n1 = nodesById[edge.v1];
+              const n2 = nodesById[edge.v2];
+              if (!n1 || !n2) return;
+              const d = projPointToSeg(ent.position.x, ent.position.y, n1.x, n1.y, n2.x, n2.y);
+              if (d < bestDist) { bestDist = d; best = edge.id; }
+            });
+            if (best) ent.edgeRef = best;
+          }
+          return ent;
+        });
+      }
+
+      // Validate the candidate plan JSON
+      const valid = validateFloorPlan(candidate);
+      if (!valid.ok) {
+        // If still invalid, show errors and abort applying the plan
+        aiError.style.display = 'block';
+        aiError.textContent = `AI returned an invalid plan:\n- ${valid.errors.join('\n- ')}`;
+        aiDebug.style.display = 'block';
+        aiDebug.textContent = JSON.stringify(candidate, null, 2);
+        return;
+      }
+
+      // Convert into a FloorPlan and apply
+      const refined = FloorPlan.fromJSON(candidate);
       store.update(refined);
 
       aiError.style.display = "none"; // hide any previous error
@@ -483,6 +591,29 @@ export function bindUI(store, canvas, mouse) {
     }
 
   });
+
+  // Wire color picker apply button (inside bindUI so `store` is available)
+  const applyBtn = document.getElementById('applyAreaColorBtn');
+  const colorPicker = document.getElementById('areaColorPicker');
+  if (applyBtn && colorPicker) {
+    applyBtn.addEventListener('click', () => {
+      if (!store.active) return;
+      const sel = store.selectedAreaId || (store.active.areas.length ? store.active.areas[0].id : null);
+      if (!sel) return;
+      const area = store.active.areas.find(a => a.id === sel);
+      if (!area) return;
+      const alphaInput = document.getElementById('areaAlphaRange');
+      const alphaValueInput = document.getElementById('areaAlphaValue');
+      const alpha = alphaInput ? parseFloat(alphaInput.value) : (area.alpha || 0.3);
+      // ensure numeric range
+      area.color = colorPicker.value;
+      area.alpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 0.3;
+      // sync numeric input display
+      if (alphaValueInput) alphaValueInput.value = area.alpha.toFixed(2);
+      store.update(store.active);
+      refreshAreasList(store);
+    });
+  }
 
 }
 
@@ -512,7 +643,9 @@ function commitArea(store) {
     return [x, y];
   }).filter(v => v !== null);
 
-  store.active.addArea(label, mapped);
+  const newId = store.active.addArea(label, mapped);
+  // Auto-select the newly created area so the user can change its color immediately
+  store.selectedAreaId = newId;
   store.update(store.active);       // commit to history
   store.tempArea = [];
   store.tempAreaActive = false;
@@ -527,10 +660,46 @@ function refreshAreasList(store) {
   listEl.innerHTML = "";
   store.active.areas.forEach(area => {
     const li = document.createElement("li");
-    li.textContent = area.label;
-    // Optional: delete button
-    const del = document.createElement("button");
-    del.textContent = "x";
+    // make the list item clickable to select the area
+    const labelSpan = document.createElement('span');
+    labelSpan.textContent = area.label;
+    labelSpan.style.cursor = 'pointer';
+    labelSpan.onclick = () => {
+      store.selectedAreaId = area.id;
+      // reflect selection in the UI (e.g. set color picker)
+      const picker = document.getElementById('areaColorPicker');
+      if (picker) picker.value = area.color || '#c86464';
+      const alphaInput = document.getElementById('areaAlphaRange');
+      const alphaValueInput = document.getElementById('areaAlphaValue');
+      if (alphaInput) alphaInput.value = typeof area.alpha === 'number' ? area.alpha : 0.3;
+      if (alphaValueInput) alphaValueInput.value = typeof area.alpha === 'number' ? area.alpha.toFixed(2) : '0.30';
+      // highlight the selected list item
+      Array.from(listEl.children).forEach(ch => ch.classList.remove('selected'));
+      li.classList.add('selected');
+    };
+    li.appendChild(labelSpan);
+
+    // small swatch showing current color
+    const sw = document.createElement('span');
+    sw.style.display = 'inline-block';
+    sw.style.width = '14px';
+    sw.style.height = '14px';
+    sw.style.marginLeft = '8px';
+    sw.style.verticalAlign = 'middle';
+    sw.style.border = '1px solid rgba(0,0,0,0.1)';
+    // prefer to show color with alpha if available
+    if (area.color && typeof area.alpha === 'number') {
+      // convert hex to rgba for display
+      sw.style.background = area.color;
+      sw.style.opacity = String(area.alpha);
+    } else {
+      sw.style.background = area.color || '';
+      sw.style.opacity = '';
+    }
+    li.appendChild(sw);
+  // Optional: delete button
+  const del = document.createElement("button");
+  del.textContent = "x";
     // Do not allow deleting the canonical boundary area from the UI
     if (area.label === 'boundary') {
       del.disabled = true;
@@ -552,4 +721,6 @@ function refreshAreasList(store) {
     listEl.appendChild(li);
   });
 }
+
+  // (moved into bindUI where `store` is in scope)
 

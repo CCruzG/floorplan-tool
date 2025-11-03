@@ -192,17 +192,26 @@ setName(newName) {
 }
 **/
 
+import { getPixelsPerUnit, getUnitLabel } from '../../config.js';
+
 export class FloorPlan {
   constructor(name = Date.now()) {
     this.schema_version = "1.0.0";
-    this.units = { length: "mm" };
+    // Initialize units from the global config so new floorplans created
+    // after the app starts inherit the current pxPerUnit and unit label.
+    const pxPerUnit = getPixelsPerUnit() || 1;
+    const unitLabel = getUnitLabel() || 'mm';
+    this.units = { length: unitLabel, pxPerUnit };
     this.name = name;
     this.boundaryClosed = false;
 
     this.wall_graph = { nodes: [], edges: [] };
     this.areas = [];       // [{ id, label, vertices: [nodeIds...] }]
     this.entrances = [];   // [{ id, position: {x,y}, edgeRef, width }]
-    this.requirements = {};
+  // Seed default requirements so every new floorplan has a sensible default
+  // (at minimum one bathroom). This ensures the evaluator and UI always
+  // have a baseline to operate on.
+  this.requirements = { bathrooms: 1 };
 
     this.selectedSegment = null;
     this.draggingSegment = null;
@@ -297,7 +306,8 @@ export class FloorPlan {
 
   addArea(label, nodeIds) {
     const id = this._genId("a");
-    this.areas.push({ id, label, vertices: nodeIds });
+    // Default new areas to 30% opacity
+    this.areas.push({ id, label, vertices: nodeIds, color: undefined, alpha: 0.3 });
     return id;
   }
 
@@ -363,6 +373,9 @@ export class FloorPlan {
       areas: (this.areas || []).map(a => ({
         id: a.id,
         label: a.label,
+        // preserve color if present
+        color: a.color,
+        alpha: typeof a.alpha === 'number' ? a.alpha : 0.3,
         vertices: (a.vertices || []).map(v => {
           const pxPerUnit = this.units?.pxPerUnit || 1;
           // node id string -> keep as-is
@@ -434,7 +447,7 @@ export class FloorPlan {
     // node id (or legacy n_<index>) we normalize it to the existing node id.
     fp.areas = (obj.areas || []).map((a, i) => {
       const original = (a.vertices || []).slice();
-      const mapped = (a.vertices || []).map(v => {
+      const mapped = original.map(v => {
         // string -> try to resolve to existing node id (or legacy n_<index>)
         if (typeof v === 'string') {
           const exists = fp.wall_graph.nodes.find(n => n.id === v);
@@ -451,12 +464,11 @@ export class FloorPlan {
           return null;
         }
 
+        // array [x,y] -> treat as saved units and convert to pixels
+        if (Array.isArray(v) && v.length >= 2) return [v[0] * (savedPxPerUnit || 1), v[1] * (savedPxPerUnit || 1)];
 
-  // array [x,y] -> treat as saved units and convert to pixels
-  if (Array.isArray(v) && v.length >= 2) return [v[0] * (savedPxPerUnit || 1), v[1] * (savedPxPerUnit || 1)];
-
-  // object {x,y} -> convert to array in pixels
-  if (v && typeof v.x === 'number' && typeof v.y === 'number') return [v.x * (savedPxPerUnit || 1), v.y * (savedPxPerUnit || 1)];
+        // object {x,y} -> convert to array in pixels
+        if (v && typeof v.x === 'number' && typeof v.y === 'number') return [v.x * (savedPxPerUnit || 1), v.y * (savedPxPerUnit || 1)];
 
         // otherwise drop
         return null;
@@ -469,13 +481,17 @@ export class FloorPlan {
       return {
         id: a.id || `a_${i}`,
         label: a.label,
+        color: a.color,
+        alpha: typeof a.alpha === 'number' ? a.alpha : 0.3,
         vertices: mapped
       };
     })
     // Keep areas that have at least 3 vertices (coordinate or ids).
     .filter(a => a.vertices && a.vertices.length >= 3);
 
-    fp.requirements = obj.requirements || {};
+  fp.requirements = obj.requirements || { bathrooms: 1 };
+  // Ensure missing keys fall back to defaults (backwards compatible).
+  if (typeof fp.requirements.bathrooms !== 'number') fp.requirements.bathrooms = 1;
     // If the saved plan indicated a closed boundary but did not include
     // an explicit boundary area, create one so the boundary surface is
     // available as an area for measurement and UI listing.

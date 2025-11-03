@@ -22,3 +22,11 @@ export function formatArea(pxArea) {
   const label = `${UNIT_LABEL}\u00B2`; // e.g., mm²
   return `${unitArea.toFixed(2)} ${label}`;
 }
+
+// Return the configured pixels-per-unit (pxPerUnit). If UNIT_SCALE is
+// zero or unset, fall back to 1.
+export function getPixelsPerUnit() {
+  return UNIT_SCALE ? (1 / UNIT_SCALE) : 1;
+}
+
+export function getUnitLabel() { return UNIT_LABEL; }

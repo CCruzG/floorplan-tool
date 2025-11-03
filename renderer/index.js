@@ -99,3 +99,14 @@ bindUI(store, canvas, mouse);
 
 // Start with one plan
 store.add(new FloorPlan('Plan 1'));
+
+// Initialize requirements from the form defaults so evaluator and UI
+// have a consistent starting state (e.g. bathrooms=1).
+try {
+  const initialReq = readRequirementsFromForm();
+  if (initialReq && store.active) {
+    store.updateRequirements(initialReq);
+  }
+} catch (err) {
+  // non-fatal
+}

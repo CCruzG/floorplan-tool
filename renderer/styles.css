@@ -124,6 +124,31 @@
     border-right: 1px solid #ccc;
 }
 
+/* Feasibility panel (status + short summary) */
+#feasibilityPanel {
+    flex: 1 1 0;
+    overflow-y: auto;
+    padding: 10px;
+    box-sizing: border-box;
+    border-right: 1px solid #ccc;
+    background: #fffaf7;
+}
+
+#feasibilityPanel .status {
+    padding: 6px 10px;
+    border-radius: 6px;
+    display: inline-block;
+    margin-bottom: 8px;
+    font-weight: 700;
+}
+
+/* status variants */
+.status.ok { background: #eaf9ee; color: #0a7a2b; border: 1px solid #b2e6bd; }
+.status.warn { background: #fff8ec; color: #8a4f00; border: 1px solid #ffd89b; }
+.status.unknown { background: #f4f4f4; color: #666; border: 1px solid #e0e0e0; }
+
+#feasibilitySummary { font-size: 13px; color: #333; margin-top:6px; }
+
 #requirementsPanel {
     background: #f9f9f9;
 }

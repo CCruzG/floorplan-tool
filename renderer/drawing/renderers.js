@@ -57,15 +57,26 @@ export function drawAreas(ctx, fp) {
 
   // Use the areaColour helper so different labels (including the
   // canonical 'boundary') are rendered distinctively.
-  const col = areaColour(area.label || '');
-  ctx.fillStyle = col.fill || 'rgba(120,120,120,0.15)';
+  // Area fill: prefer a user-provided color (area.color) with alpha.
+  // By default use the labelled palette from areaColour(). We intentionally
+  // do NOT draw a stroke/border so areas appear as flat color fills by default.
+  const palette = areaColour(area.label || '');
+  let fill = palette.fill || 'rgba(120,120,120,0.15)';
+  if (area.color) {
+    const alpha = typeof area.alpha === 'number' ? area.alpha : 0.3;
+    // If area.color is a hex value like #rrggbb, convert to rgba
+    if (/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/.test(area.color)) {
+      fill = hexToRgba(area.color, alpha);
+    } else {
+      // assume the color string is usable directly; apply global alpha
+      fill = area.color;
+      ctx.globalAlpha = alpha;
+    }
+  }
+  ctx.fillStyle = fill;
   ctx.fill();
-
-  ctx.strokeStyle = col.stroke || '#666';
-  ctx.lineWidth = col.strokeWidth || 1;
-  if (col.dashed) ctx.setLineDash([6, 4]);
-  ctx.stroke();
-  if (col.dashed) ctx.setLineDash([]);
+  // reset globalAlpha if we modified it
+  ctx.globalAlpha = 1;
 
     const cx = pts.reduce((s, v) => s + v[0], 0) / pts.length;
     const cy = pts.reduce((s, v) => s + v[1], 0) / pts.length;
@@ -87,6 +98,18 @@ export function drawAreas(ctx, fp) {
       console.warn('Area formatting failed', err);
     }
   });
+}
+
+function hexToRgba(hex, alpha = 1) {
+  // strip '#'
+  let h = hex.replace('#', '');
+  if (h.length === 3) {
+    h = h.split('').map(ch => ch + ch).join('');
+  }
+  const r = parseInt(h.substring(0, 2), 16);
+  const g = parseInt(h.substring(2, 4), 16);
+  const b = parseInt(h.substring(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 export function drawAreaGhost(ctx, fp, points, mouse) {
@@ -296,7 +319,8 @@ export function drawWalls(ctx, fp, options = {}) {
       ctx.lineWidth = 2;
       ctx.stroke();
     } else if (isLocked) {
-      ctx.strokeStyle = "#888";
+      // Render locked edges in red to make them visually distinct.
+      ctx.strokeStyle = "#c22"; // red-ish color for locked edges
       ctx.lineWidth = 3;
       ctx.setLineDash([6, 4]);
       ctx.stroke();
