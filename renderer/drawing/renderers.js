@@ -35,18 +35,48 @@ export function drawEdgeWithDimension(ctx, fp, edge) {
 }
 
 export function drawAreas(ctx, fp) {
-  fp.areas.forEach(area => {
-    // area.vertices may be stored as coordinates [[x,y],...] or as node IDs
-    // (strings) when plans are serialized. Normalize to coordinate array.
-    let pts = area.vertices;
+  // Build a unified list of area-like objects: boundaryArea, Temperature_Regions, then legacy areas
+  const unified = [];
+
+  // boundaryArea (if present) - its vertices may be node ids
+  if (fp.boundaryArea) {
+    unified.push({ label: fp.boundaryArea.label || 'boundary', vertices: fp.boundaryArea.vertices, color: fp.boundaryArea.color, alpha: fp.boundaryArea.alpha });
+  }
+
+  // Temperature_Regions: convert Pt_* subregions to coordinate arrays
+  (fp.Temperature_Regions || []).forEach(region => {
+    // pick the first subregion for rendering
+    const sub = (region.subregions && region.subregions[0]) || {};
+    const coords = Object.keys(sub).sort((a,b)=>{
+      const ai = parseInt(a.replace(/^Pt_/,''),10);
+      const bi = parseInt(b.replace(/^Pt_/,''),10);
+      return ai - bi;
+    }).map(k => {
+      const v = sub[k];
+      if (!v) return null;
+      return [v[0], v[1]];
+    }).filter(Boolean);
+    if (coords.length) unified.push({ label: region.name || 'temp', vertices: coords, color: region.color, alpha: region.alpha });
+  });
+
+  // legacy areas
+  (fp.areas || []).forEach(area => unified.push({ label: area.label, vertices: area.vertices, color: area.color, alpha: area.alpha }));
+
+  unified.forEach(area => {
+    // normalize vertices (may be node ids or coordinate pairs)
+    const ptsRaw = area.vertices || [];
+    if (ptsRaw.length === 0) return;
+    const resolved = ptsRaw.map(v => {
+      if (typeof v === 'string') {
+        const n = getNodeById(fp.wall_graph.nodes, v);
+        return n ? [n.x, n.y] : null;
+      }
+      if (Array.isArray(v) && v.length >= 2) return [v[0], v[1]];
+      if (v && typeof v.x === 'number' && typeof v.y === 'number') return [v.x, v.y];
+      return null;
+    }).filter(Boolean);
+    const pts = resolved;
     if (pts.length === 0) return;
-    // detect nodeId style: string entries
-    if (typeof pts[0] === 'string') {
-      // resolve node ids to coords
-      const resolved = pts.map(id => getNodeById(fp.wall_graph.nodes, id)).filter(Boolean).map(n => [n.x, n.y]);
-      pts = resolved;
-      if (pts.length === 0) return;
-    }
 
     ctx.beginPath();
     pts.forEach(([x, y], i) => {
@@ -55,46 +85,36 @@ export function drawAreas(ctx, fp) {
     });
     ctx.closePath();
 
-  // Use the areaColour helper so different labels (including the
-  // canonical 'boundary') are rendered distinctively.
-  // Area fill: prefer a user-provided color (area.color) with alpha.
-  // By default use the labelled palette from areaColour(). We intentionally
-  // do NOT draw a stroke/border so areas appear as flat color fills by default.
-  const palette = areaColour(area.label || '');
-  let fill = palette.fill || 'rgba(120,120,120,0.15)';
-  if (area.color) {
-    const alpha = typeof area.alpha === 'number' ? area.alpha : 0.3;
-    // If area.color is a hex value like #rrggbb, convert to rgba
-    if (/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/.test(area.color)) {
-      fill = hexToRgba(area.color, alpha);
-    } else {
-      // assume the color string is usable directly; apply global alpha
-      fill = area.color;
-      ctx.globalAlpha = alpha;
+    const palette = areaColour(area.label || '');
+    let fill = palette.fill || 'rgba(120,120,120,0.15)';
+    if (area.color) {
+      const alpha = typeof area.alpha === 'number' ? area.alpha : 0.3;
+      if (/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/.test(area.color)) {
+        fill = hexToRgba(area.color, alpha);
+      } else {
+        fill = area.color;
+        ctx.globalAlpha = alpha;
+      }
     }
-  }
-  ctx.fillStyle = fill;
-  ctx.fill();
-  // reset globalAlpha if we modified it
-  ctx.globalAlpha = 1;
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.globalAlpha = 1;
 
     const cx = pts.reduce((s, v) => s + v[0], 0) / pts.length;
     const cy = pts.reduce((s, v) => s + v[1], 0) / pts.length;
-    ctx.fillStyle = "#000";
-    ctx.font = "12px sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
+    ctx.fillStyle = '#000';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
     ctx.fillText(area.label, cx, cy - 8);
 
-    // compute polygon area (in px^2) and display formatted area
     try {
       const areaPx = polygonArea(pts);
       const areaText = formatArea(areaPx);
-      ctx.font = "11px sans-serif";
-      ctx.fillStyle = "#222";
+      ctx.font = '11px sans-serif';
+      ctx.fillStyle = '#222';
       ctx.fillText(areaText, cx, cy + 10);
     } catch (err) {
-      // non-fatal: if polygonArea or formatArea fail, don't break rendering
       console.warn('Area formatting failed', err);
     }
   });
@@ -584,6 +604,153 @@ export function drawProjectionGuides(ctx, fp, mouse) {
   ctx.fill();
 }
 
+// ═══════════════════════════════════════════════════════════
+// NEW REFERENCE SCHEMA RENDERING FUNCTIONS
+// ═══════════════════════════════════════════════════════════
+
+export function drawCoreBoundaries(ctx, fp) {
+  if (!fp.Core_Boundary || fp.Core_Boundary.length === 0) return;
+  
+  ctx.save();
+  ctx.strokeStyle = "#ff6b6b"; // Red color for core boundaries
+  ctx.lineWidth = 2;
+  ctx.fillStyle = "rgba(255, 107, 107, 0.1)"; // Light red fill
+  
+  fp.Core_Boundary.forEach(core => {
+    const points = Object.values(core);
+    if (points.length < 3) return;
+    
+    ctx.beginPath();
+    const [startX, startY] = points[0];
+    ctx.moveTo(startX, startY);
+    
+    for (let i = 1; i < points.length; i++) {
+      const [x, y] = points[i];
+      ctx.lineTo(x, y);
+    }
+    
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  });
+  
+  ctx.restore();
+}
+
+export function drawCoreGhost(ctx, fp, tempCore, mouse, constrain = false) {
+  if (!tempCore || tempCore.length === 0) return;
+
+  ctx.save();
+  ctx.strokeStyle = "#ff6b6b";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([5, 5]);
+  ctx.fillStyle = "rgba(255, 107, 107, 0.05)";
+
+  // Draw temp core boundary
+  ctx.beginPath();
+  const [startX, startY] = tempCore[0];
+  ctx.moveTo(startX, startY);
+
+  for (let i = 1; i < tempCore.length; i++) {
+    const [x, y] = tempCore[i];
+    ctx.lineTo(x, y);
+  }
+
+  // compute the target point to draw to: if orthogonal locking is
+  // active, compute a constrained cursor aligned to the previous point
+  let targetX = mouse?.x ?? null;
+  let targetY = mouse?.y ?? null;
+  let constrainedPoint = null;
+  if (constrain && mouse && tempCore.length) {
+    const last = tempCore[tempCore.length - 1];
+    if (last) {
+      const lastX = last[0];
+      const lastY = last[1];
+      const dx = Math.abs(mouse.x - lastX);
+      const dy = Math.abs(mouse.y - lastY);
+      if (dx > dy) {
+        // lock horizontally
+        targetX = mouse.x;
+        targetY = lastY;
+      } else {
+        // lock vertically
+        targetX = lastX;
+        targetY = mouse.y;
+      }
+      constrainedPoint = [targetX, targetY];
+    }
+  }
+
+  // Draw line to target (mouse or constrained)
+  if (targetX != null && targetY != null) {
+    ctx.lineTo(targetX, targetY);
+  }
+
+  // If we have 3+ points, show the closing line
+  if (tempCore.length >= 3 && mouse) {
+    ctx.lineTo(startX, startY);
+    ctx.fill();
+  }
+
+  ctx.stroke();
+
+  // Visual feedback for orthogonal lock: draw guide and marker
+  if (constrainedPoint) {
+    const [cx, cy] = constrainedPoint;
+    // Guide line between last point and constrained cursor
+    const last = tempCore[tempCore.length - 1];
+    ctx.setLineDash([]);
+    ctx.strokeStyle = 'rgba(255,107,107,0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(last[0], last[1]);
+    ctx.lineTo(cx, cy);
+    ctx.stroke();
+
+    // Draw small locked marker (crosshair)
+    ctx.fillStyle = 'rgba(255,107,107,0.95)';
+    ctx.beginPath();
+    ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // label the lock state near the cursor
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillText('Locked', cx + 8, cy - 8);
+  }
+
+  ctx.restore();
+}
+
+export function drawColumns(ctx, fp) {
+  if (!fp.Columns || fp.Columns.length === 0) return;
+  
+  ctx.save();
+  ctx.strokeStyle = "#4a4a4a"; // Dark gray for columns
+  ctx.lineWidth = 1;
+  ctx.fillStyle = "rgba(74, 74, 74, 0.3)"; // Semi-transparent gray fill
+  
+  fp.Columns.forEach(column => {
+    const points = Object.values(column);
+    if (points.length < 3) return;
+    
+    ctx.beginPath();
+    const [startX, startY] = points[0];
+    ctx.moveTo(startX, startY);
+    
+    for (let i = 1; i < points.length; i++) {
+      const [x, y] = points[i];
+      ctx.lineTo(x, y);
+    }
+    
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  });
+  
+  ctx.restore();
+}
+
 // export default object for convenience
 export default {
   isNearFirstNode,
@@ -599,5 +766,8 @@ export default {
   drawEntranceProjection,
   drawEntrances,
   findClosestBoundaryPoint,
-  drawProjectionGuides
+  drawProjectionGuides,
+  drawCoreBoundaries,
+  drawCoreGhost,
+  drawColumns
 };

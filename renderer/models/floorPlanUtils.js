@@ -17,10 +17,18 @@ export function edgeToCoords(fp, edgeId) {
 }
 
 export function areaToCoords(fp, area) {
-  const pts = area.vertices
-    .map(id => getNodeById(fp.wall_graph.nodes, id))
-    .filter(Boolean)
-    .map(n => ({ x: n.x, y: n.y }));
+  // Support mixed vertex representations (node id strings, [x,y] arrays,
+  // or {x,y} objects) and return an array of {x,y} coords in pixels.
+  const pts = (area.vertices || []).map(v => {
+    if (typeof v === 'string') {
+      const n = getNodeById(fp.wall_graph.nodes, v);
+      if (n) return { x: n.x, y: n.y };
+      return null;
+    }
+    if (Array.isArray(v) && v.length >= 2) return { x: v[0], y: v[1] };
+    if (v && typeof v.x === 'number' && typeof v.y === 'number') return { x: v.x, y: v.y };
+    return null;
+  }).filter(Boolean);
   return pts;
 }
 

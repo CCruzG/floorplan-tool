@@ -5,26 +5,6 @@ import { DrawingService } from './drawing/drawingService.js';
 import { bindUI } from './ui/ui.js';
 import { setScalePixelsPerUnit } from '../config.js';
 
-const reqFields = {
-  bedrooms: document.getElementById("bedroomsInput"),
-  bathrooms: document.getElementById("bathroomsInput"),
-  openKitchen: document.getElementById("openKitchenChk"),
-  balcony: document.getElementById("balconyChk"),
-  style: document.getElementById("styleSelect"),
-  notes: document.getElementById("notesInput")
-};
-
-function readRequirementsFromForm() {
-  return {
-    bedrooms: parseInt(reqFields.bedrooms.value, 10) || 0,
-    bathrooms: parseInt(reqFields.bathrooms.value, 10) || 0,
-    openKitchen: reqFields.openKitchen.checked,
-    balcony: reqFields.balcony.checked,
-    style: reqFields.style.value,
-    notes: reqFields.notes.value.trim()
-  };
-}
-
 const store = new FloorPlanStore();
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -99,14 +79,3 @@ bindUI(store, canvas, mouse);
 
 // Start with one plan
 store.add(new FloorPlan('Plan 1'));
-
-// Initialize requirements from the form defaults so evaluator and UI
-// have a consistent starting state (e.g. bathrooms=1).
-try {
-  const initialReq = readRequirementsFromForm();
-  if (initialReq && store.active) {
-    store.updateRequirements(initialReq);
-  }
-} catch (err) {
-  // non-fatal
-}

@@ -13,6 +13,7 @@
   <div id="toolbar">
     <button id="clearBtn">Clear</button>
     <button id="areaModeBtn">Add Area</button>
+    <button id="coreModeBtn">Add Core</button>
     <!-- <button id="editModeBtn">Edit</button> -->
     <button id="entranceModeBtn">Entrance</button>
     <button id="lockBtn">Lock</button>
@@ -54,44 +55,20 @@
     </div>
     <div id="ai-debug" style="display:none; padding:8px; border:1px solid #ccc; margin-top:8px;"></div>
 
-    <!-- Bottom block: requirements + areas -->
+    <!-- Bottom block: areas + layers -->
     <div id="bottomPanels">
-      <div id="requirementsPanel" class="panel">
+      <div id="planPanel" class="panel">
         <div class="form-row">
           <label for="planNameInput">Plan name:</label>
           <input id="planNameInput" type="text" placeholder="Untitled plan" />
         </div>
-        <h3>Design Requirements</h3>
-
-        <!-- Row 1: bedrooms + bathrooms -->
-        <div class="form-row">
-          <label>Bedrooms: <input type="number" id="bedroomsInput" min="0"></label>
-          <label>Bathrooms: <input type="number" id="bathroomsInput" min="0" value="1"></label>
-        </div>
-
-        <!-- Row 2: checkboxes -->
-        <div class="form-row">
-          <label><input type="checkbox" id="openKitchenChk"> Open Kitchen</label>
-          <label><input type="checkbox" id="balconyChk"> Balcony</label>
-        </div>
-
-        <label>Balcony Style:
-          <select id="styleSelect">
-            <option>Modern</option>
-            <option>Traditional</option>
-            <option>Industrial</option>
-          </select>
-        </label>
-        <textarea id="notesInput" placeholder="Other notes..."></textarea>
-      </div>
-
-      <div id="feasibilityPanel" class="panel">
+      <!-- </div>
         <h3>Feasibility</h3>
         <div id="feasibilityContent">
           <div id="feasibilityStatus" class="status unknown">Unknown</div>
           <div id="feasibilitySummary">Set a boundary and requirements to see feasibility.</div>
         </div>
-      </div>
+      </div> -->
 
       <div id="areasPanel" class="panel">
         <h3>Areas</h3>
@@ -103,15 +80,35 @@
           <label for="areaAlphaRange" style="margin-left:6px; font-size:0.9em">Alpha:</label>
           <input id="areaAlphaRange" type="range" min="0" max="1" step="0.01" value="0.3" style="width:120px">
           <input id="areaAlphaValue" type="number" min="0" max="1" step="0.01" value="0.3" style="width:60px">
+          <label for="areaAirReq" style="margin-left:6px; font-size:0.9em">Air req (l/s):</label>
+          <input id="areaAirReq" type="number" min="0" step="0.1" value="7.5" style="width:80px">
           <button id="applyAreaColorBtn">Apply color</button>
         </div>
         <ul id="areasList"></ul>
       </div>
-    </div>
+      </div>
 
-  </div>
+      <div id="corePanel" class="panel">
+        <h3>Core</h3>
+        <button id="finishCoreBtn">Finish Core</button>
+      </div>
 
-  <!-- Your JS entry point -->
+      <div id="layersPanel" class="panel">
+        <h3>Layers</h3>
+        <div class="layer-controls">
+          <label><input type="checkbox" id="planBoundaryLayer" checked> Plan Boundary</label>
+          <label><input type="checkbox" id="coreBoundaryLayer" checked> Core Boundary</label>
+          <label><input type="checkbox" id="columnsLayer" checked> Columns</label>
+          <label><input type="checkbox" id="temperatureRegionsLayer" checked> Temperature Regions</label>
+          <label><input type="checkbox" id="beamsLayer"> Beams</label>
+          <label><input type="checkbox" id="pointsLayer"> Grid Points</label>
+          <label><input type="checkbox" id="edgesLayer"> Grid Edges</label>
+          <label><input type="checkbox" id="ductsLayer"> Ducts</label>
+          <label><input type="checkbox" id="ductPlanLayer"> Duct Plan</label>
+        </div>
+      </div>
+
+    </div>  <!-- Your JS entry point -->
   <script type="module" src="index.js"></script>
 </body>
 

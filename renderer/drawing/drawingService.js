@@ -15,9 +15,19 @@ export const DrawingService = {
     // element's CSS grid/background remains visible. The canvas should be
     // transparent and only draw geometry on top of the CSS background.
 
-    // Delegate to modular render functions
-    R.drawAreas(ctx, fp);
-    R.drawWalls(ctx, fp, options);
+    // Delegate to modular render functions - respecting layer visibility
+    if (fp.layers?.Temperature_Regions !== false) {
+      R.drawAreas(ctx, fp);
+    }
+    if (fp.layers?.Plan_Boundary !== false) {
+      R.drawWalls(ctx, fp, options);
+    }
+    if (fp.layers?.Core_Boundary !== false) {
+      R.drawCoreBoundaries(ctx, fp);
+    }
+    if (fp.layers?.Columns !== false) {
+      R.drawColumns(ctx, fp);
+    }
     R.drawEntrances(ctx, fp);
     if (options.showVertices) R.drawVertices(ctx, fp);
 
@@ -40,6 +50,12 @@ export const DrawingService = {
 
     if (options.mode === "area" && options.tempArea) {
       R.drawAreaGhost(ctx, fp, options.tempArea, options.ghost);
+    }
+
+    if (options.mode === "core" && options.tempCore) {
+      // pass the orthogonal constraint flag so the ghost renderer can
+      // show visual feedback when the user holds Shift
+      R.drawCoreGhost(ctx, fp, options.tempCore, options.ghost, !!options.constrain);
     }
   },
 

@@ -38,10 +38,13 @@ function resolveAreaCoords(fp, area) {
 }
 
 export function computeBoundaryAreaPx(fp) {
-  // Prefer an explicit boundary area if present
-  const boundary = (fp.areas || []).find(a => a && a.label === 'boundary');
+  // Prefer an explicit boundaryArea if present (special object) or a
+  // legacy 'boundary' area in the areas list.
+  let boundary = fp.boundaryArea || (fp.areas || []).find(a => a && a.label === 'boundary');
   if (boundary) {
-    const pts = resolveAreaCoords(fp, boundary);
+    // boundaryArea may contain node ids or coordinate arrays; adapt resolver
+    const proxy = { vertices: boundary.vertices };
+    const pts = resolveAreaCoords(fp, proxy);
     if (pts.length >= 3) return polygonArea(pts);
   }
 
@@ -185,10 +188,10 @@ export function evaluateRequirements(fp, options = {}) {
   const unitLabel = (fp.units && fp.units.length) || 'mm';
   const unitMeters = unitToMeter(unitLabel);
 
-  // Resolve boundary points (prefer explicit boundary area)
-  const boundaryArea = (fp.areas || []).find(a => a && a.label === 'boundary');
+  // Resolve boundary points (prefer explicit boundaryArea special object)
+  const boundaryAreaObj = fp.boundaryArea || (fp.areas || []).find(a => a && a.label === 'boundary');
   let bboxPts = [];
-  if (boundaryArea) bboxPts = resolveAreaCoords(fp, boundaryArea);
+  if (boundaryAreaObj) bboxPts = resolveAreaCoords(fp, { vertices: boundaryAreaObj.vertices });
   if (!bboxPts || bboxPts.length === 0) {
     bboxPts = (fp.wall_graph?.nodes || []).map(n => [n.x, n.y]);
   }

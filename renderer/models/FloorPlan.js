@@ -2,13 +2,41 @@
 export class FloorPlan {
   constructor(name = Date.now()) {
     this.name = name;
+    
+    // Reference schema structure
+    this.Plan_Boundary = []; // Array of polygon objects with Pt_0, Pt_1, etc.
+    this.Core_Boundary = []; // Array of core polygon objects
+    this.Columns = []; // Array of column footprint polygons
+    this.Temperature_Regions = []; // Array of thermal zone objects (replacing simple areas)
+    this.Beams = []; // Array of beam objects with height constraints
+    this.Points = []; // Discretized grid points for routing
+    this.Edges = []; // Valid connections between points
+    this.Ducts = []; // Available duct specifications
+    this.Duct_Plan = []; // Final duct routing solution
+    
+    // Layer visibility controls
+    this.layers = {
+      Plan_Boundary: true,
+      Core_Boundary: true,
+      Columns: true,
+      Temperature_Regions: true,
+      Beams: false,
+      Points: false,
+      Edges: false,
+      Ducts: false,
+      Duct_Plan: false
+    };
+    
+    // Legacy compatibility - keep for gradual migration
     this.wall_graph = { nodes: [], edges: [] };
-    this.areas = []; // NEW: [{ label: "private", vertices: [[x,y], [x,y], ...] }]
-    this.entrances = [];
-    this.requirements = {}; // <— new
+    this.areas = []; // Will be migrated to Temperature_Regions
+    this.entrances = []; // Will be integrated with Points/entry_candidates
+    
+    // UI state
     this.boundaryClosed = false;
     this.selectedSegment = null;
     this.draggingSegment = null;
+    this.mode = 'draw'; // draw | edit | area | core | column | beam
   }
 
   addVertex(x, y, { constrain = false } = {}) {
@@ -69,6 +97,103 @@ export class FloorPlan {
     this.areas.push({ label, vertices: closed });
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // NEW REFERENCE SCHEMA METHODS
+  // ═══════════════════════════════════════════════════════════
+
+  // Convert current wall_graph to Plan_Boundary format
+  updatePlanBoundaryFromWallGraph() {
+    if (this.wall_graph.nodes.length >= 3 && this.boundaryClosed) {
+      const boundaryPoints = {};
+      this.wall_graph.nodes.forEach((node, index) => {
+        boundaryPoints[`Pt_${index}`] = [node[0], node[1], 0]; // Add z=0 for 3D compatibility
+      });
+      
+      // Close the polygon by repeating first point
+      if (this.wall_graph.nodes.length > 0) {
+        const firstNode = this.wall_graph.nodes[0];
+        boundaryPoints[`Pt_${this.wall_graph.nodes.length}`] = [firstNode[0], firstNode[1], 0];
+      }
+      
+      this.Plan_Boundary = [boundaryPoints];
+    }
+  }
+
+  // Add core boundary (similar to area drawing)
+  addCoreBoundary(vertices) {
+    const boundaryPoints = {};
+    vertices.forEach((vertex, index) => {
+      boundaryPoints[`Pt_${index}`] = [vertex[0], vertex[1], 0];
+    });
+    
+    // Ensure polygon is closed
+    if (vertices.length > 0) {
+      const firstVertex = vertices[0];
+      boundaryPoints[`Pt_${vertices.length}`] = [firstVertex[0], firstVertex[1], 0];
+    }
+    
+    this.Core_Boundary.push(boundaryPoints);
+  }
+
+  // Add column footprint
+  addColumn(vertices) {
+    const columnPoints = {};
+    vertices.forEach((vertex, index) => {
+      columnPoints[`Pt_${index}`] = [vertex[0], vertex[1], 0];
+    });
+    this.Columns.push(columnPoints);
+  }
+
+  // Add beam element
+  addBeam(startPoint, endPoint, height = 900) {
+    this.Beams.push({
+      "Pt_0": [startPoint[0], startPoint[1], height],
+      "Pt_1": [endPoint[0], endPoint[1], height]
+    });
+  }
+
+  // Convert simple area to Temperature_Region
+  addTemperatureRegion(name, type, vertices, properties = {}) {
+    const subregionPoints = {};
+    vertices.forEach((vertex, index) => {
+      subregionPoints[`Pt_${index}`] = [vertex[0], vertex[1]];
+    });
+
+    const region = {
+      id: this._genId('tr'),
+      type: type || "internal", // "perimeter" | "internal"
+      name: name,
+      // UI presentation fields (allow color/alpha editing like legacy areas)
+      color: properties.color || null,
+      alpha: typeof properties.alpha === 'number' ? properties.alpha : 0.3,
+      air_requirement: properties.air_requirement || 7.5,
+      subregions: [subregionPoints],
+      avg_load_per_point: properties.avg_load_per_point || 0,
+      total_load: properties.total_load || 0,
+      total_area: properties.total_area || 0,
+      VAV_number: properties.VAV_number || 1,
+      entry_candidates: properties.entry_candidates || [[]],
+      thermal_control_zones: properties.thermal_control_zones || []
+    };
+
+    this.Temperature_Regions.push(region);
+    return region.id;
+  }
+
+  // Toggle layer visibility
+  toggleLayer(layerName) {
+    if (this.layers.hasOwnProperty(layerName)) {
+      this.layers[layerName] = !this.layers[layerName];
+    }
+  }
+
+  // Set layer visibility
+  setLayerVisibility(layerName, visible) {
+    if (this.layers.hasOwnProperty(layerName)) {
+      this.layers[layerName] = visible;
+    }
+  }
+
   clone() {
     const fp = new FloorPlan(this.name);
     fp.wall_graph = {
@@ -102,8 +227,24 @@ export class FloorPlan {
   }
 
   toJSON() {
+    // Update Plan_Boundary from wall_graph before serialization
+    this.updatePlanBoundaryFromWallGraph();
+    
     return {
+      // Reference schema structure (primary)
       name: this.name,
+      Plan_Boundary: this.Plan_Boundary,
+      Core_Boundary: this.Core_Boundary,
+      Columns: this.Columns,
+      Temperature_Regions: this.Temperature_Regions,
+      Beams: this.Beams,
+      Points: this.Points,
+      Edges: this.Edges,
+      Ducts: this.Ducts,
+      Duct_Plan: this.Duct_Plan,
+      layers: this.layers,
+      
+      // Legacy compatibility (for gradual migration)
       boundaryClosed: this.boundaryClosed,
       wall_graph: {
         nodes: this.wall_graph.nodes.map(v => [...v]),
@@ -125,51 +266,80 @@ export class FloorPlan {
       areas: (this.areas || []).map(a => ({
         label: a.label,
         vertices: a.vertices.map(v => [...v])
-      })),
-      requirements: this.requirements
+      }))
     };
   }
 
 
   static fromJSON(obj) {
-  const fp = new FloorPlan(obj.name);
-  fp.boundaryClosed = obj.boundaryClosed;
-
-  // Prefer wall_graph, fallback to legacy vertices/edges
-  const nodes = obj.wall_graph?.nodes || obj.vertices || [];
-  const edges = obj.wall_graph?.edges || obj.edges || [];
-
-  fp.wall_graph = {
-    nodes: nodes.map(n => [...n]),
-    edges: edges.map(seg => ({
-      v1: [...seg.v1],
-      v2: [...seg.v2],
-      locked: seg.locked
-    }))
-  };
-
-  fp.entrances = (obj.entrances || []).map(ent => {
-    const pos = ent.position || [ent.x, ent.y];
-    return {
-      position: [...pos],
-      edge: {
-        v1: [...ent.edge.v1],
-        v2: [...ent.edge.v2],
-        locked: ent.edge.locked
-      },
-      width: ent.width || 900
+    const fp = new FloorPlan(obj.name);
+    
+    // Load reference schema structure (primary)
+    fp.Plan_Boundary = obj.Plan_Boundary || [];
+    // Load core boundaries (Pt_* keyed objects) and convert units -> pixels
+    fp.Core_Boundary = (obj.Core_Boundary || []).map(coreObj => {
+      const pxPerUnit = savedPxPerUnit || 1;
+      const out = {};
+      Object.entries(coreObj).forEach(([k, v]) => {
+        out[k] = [ (v[0] || 0) * pxPerUnit, (v[1] || 0) * pxPerUnit ];
+      });
+      return out;
+    });
+    fp.Columns = obj.Columns || [];
+    fp.Temperature_Regions = obj.Temperature_Regions || [];
+    fp.Beams = obj.Beams || [];
+    fp.Points = obj.Points || [];
+    fp.Edges = obj.Edges || [];
+    fp.Ducts = obj.Ducts || [];
+    fp.Duct_Plan = obj.Duct_Plan || [];
+    fp.layers = obj.layers || {
+      Plan_Boundary: true,
+      Core_Boundary: true,
+      Columns: true,
+      Temperature_Regions: true,
+      Beams: false,
+      Points: false,
+      Edges: false,
+      Ducts: false,
+      Duct_Plan: false
     };
-  });
+    
+    // Legacy compatibility - maintain for gradual migration
+    fp.boundaryClosed = obj.boundaryClosed || false;
 
-  fp.areas = (obj.areas || []).map(a => ({
-    label: a.label,
-    vertices: a.vertices.map(v => [...v])
-  }));
+    // Prefer wall_graph, fallback to legacy vertices/edges
+    const nodes = obj.wall_graph?.nodes || obj.vertices || [];
+    const edges = obj.wall_graph?.edges || obj.edges || [];
 
-  fp.requirements = obj.requirements || {};
+    fp.wall_graph = {
+      nodes: nodes.map(n => [...n]),
+      edges: edges.map(seg => ({
+        v1: [...seg.v1],
+        v2: [...seg.v2],
+        locked: seg.locked
+      }))
+    };
 
-  return fp;
-}
+    fp.entrances = (obj.entrances || []).map(ent => {
+      const pos = ent.position || [ent.x, ent.y];
+      return {
+        position: [...pos],
+        edge: {
+          v1: [...ent.edge.v1],
+          v2: [...ent.edge.v2],
+          locked: ent.edge.locked
+        },
+        width: ent.width || 900
+      };
+    });
+
+    fp.areas = (obj.areas || []).map(a => ({
+      label: a.label,
+      vertices: a.vertices.map(v => [...v])
+    }));
+
+    return fp;
+  }
 
 setName(newName) {
   this.name = newName;
@@ -208,6 +378,30 @@ export class FloorPlan {
     this.wall_graph = { nodes: [], edges: [] };
     this.areas = [];       // [{ id, label, vertices: [nodeIds...] }]
     this.entrances = [];   // [{ id, position: {x,y}, edgeRef, width }]
+  // Core boundaries stored as objects with Pt_0, Pt_1 ... keys
+  // e.g. { Pt_0: [x,y], Pt_1: [x,y], ... }
+  this.Core_Boundary = [];
+    // Reference-schema collections (ensure defined for serialization)
+    this.Plan_Boundary = [];
+    this.Columns = [];
+    this.Points = [];
+    this.Edges = [];
+    this.Ducts = [];
+    this.Duct_Plan = [];
+    this.Temperature_Regions = [];
+    this.Beams = [];
+    // Layer visibility defaults
+    this.layers = {
+      Plan_Boundary: true,
+      Core_Boundary: true,
+      Columns: true,
+      Temperature_Regions: true,
+      Beams: false,
+      Points: false,
+      Edges: false,
+      Ducts: false,
+      Duct_Plan: false
+    };
   // Seed default requirements so every new floorplan has a sensible default
   // (at minimum one bathroom). This ensures the evaluator and UI always
   // have a baseline to operate on.
@@ -278,19 +472,16 @@ export class FloorPlan {
 
     // Ensure there are at least 3 nodes
     if (nodeIds.length < 3) return;
-
-    // Look for an existing boundary area (use label 'boundary' as canonical)
-    const existing = this.areas.find(a => a && a.label === 'boundary');
-    if (existing) {
-      existing.vertices = [...nodeIds];
-      return existing.id;
+    // Store boundary as a special boundaryArea object rather than a regular
+    // area so the user can add/modify areas independently after drawing
+    // the plan boundary.
+    if (!this.boundaryArea) {
+      const id = this._genId('a');
+      this.boundaryArea = { id, label: 'boundary', vertices: [...nodeIds] };
+      return id;
     }
-
-    // Create a new area representing the boundary
-    const id = this._genId('a');
-    const area = { id, label: 'boundary', vertices: [...nodeIds] };
-    this.areas.unshift(area); // keep boundary first
-    return id;
+    this.boundaryArea.vertices = [...nodeIds];
+    return this.boundaryArea.id;
   }
 
   addEntrance(edgeId, x, y, width = 900) {
@@ -311,6 +502,21 @@ export class FloorPlan {
     return id;
   }
 
+  // Add a core boundary polygon (vertices are arrays [x,y] in pixels)
+  addCoreBoundary(vertices) {
+    const boundaryPoints = {};
+    (vertices || []).forEach((v, i) => {
+      boundaryPoints[`Pt_${i}`] = [v[0], v[1]];
+    });
+    // close polygon by repeating the first point
+    if (vertices && vertices.length > 0) {
+      const first = vertices[0];
+      boundaryPoints[`Pt_${vertices.length}`] = [first[0], first[1]];
+    }
+    this.Core_Boundary.push(boundaryPoints);
+    return this.Core_Boundary.length - 1;
+  }
+
   removeArea(areaId) {
     const idx = this.areas.findIndex(a => a.id === areaId);
     if (idx >= 0) this.areas.splice(idx, 1);
@@ -318,6 +524,17 @@ export class FloorPlan {
 
   clearSelection() {
     this.selectedSegment = null;
+  }
+
+  // Layer helpers
+  toggleLayer(layerName) {
+    if (!this.layers) this.layers = {};
+    if (this.layers.hasOwnProperty(layerName)) this.layers[layerName] = !this.layers[layerName];
+  }
+
+  setLayerVisibility(layerName, visible) {
+    if (!this.layers) this.layers = {};
+    if (this.layers.hasOwnProperty(layerName)) this.layers[layerName] = !!visible;
   }
 
   clone() {
@@ -339,55 +556,88 @@ export class FloorPlan {
   }
 
   toJSON() {
+    const pxPerUnit = this.units?.pxPerUnit || 1;
+
+    // Helper to convert an ordered list of [x,y] pixel coords into a Pt_* keyed object
+    const coordsToPtObj = (coords) => {
+      const out = {};
+      coords.forEach((c, i) => {
+        out[`Pt_${i}`] = [c[0] / pxPerUnit, c[1] / pxPerUnit, 0];
+      });
+      // ensure closed polygon by repeating first point if not already
+      if (coords.length > 0) {
+        const first = coords[0];
+        out[`Pt_${coords.length}`] = [first[0] / pxPerUnit, first[1] / pxPerUnit, 0];
+      }
+      return out;
+    };
+
+    // Plan boundary: prefer Plan_Boundary if present, otherwise use boundaryArea/wall_graph
+    let planBoundaryOut = this.Plan_Boundary || [];
+    if (!planBoundaryOut || planBoundaryOut.length === 0) {
+      if (this.boundaryArea && Array.isArray(this.boundaryArea.vertices) && this.boundaryArea.vertices.length) {
+        // convert boundaryArea vertices (resolve node ids)
+        const mapped = this.boundaryArea.vertices.map(v => {
+          if (typeof v === 'string') {
+            const n = this.wall_graph.nodes.find(n => n.id === v);
+            return n ? [n.x, n.y] : null;
+          }
+          return Array.isArray(v) ? [v[0], v[1]] : null;
+        }).filter(Boolean);
+        planBoundaryOut = [coordsToPtObj(mapped)];
+      } else if (this.wall_graph.nodes && this.wall_graph.nodes.length) {
+        const mapped = this.wall_graph.nodes.map(n => [n.x, n.y]);
+        planBoundaryOut = [coordsToPtObj(mapped)];
+      }
+    }
+
+    // Core boundaries: convert existing Pt_* objects to include z and unit conversion
+    const coreOut = (this.Core_Boundary || []).map(core => {
+      const out = {};
+      Object.entries(core).forEach(([k, v]) => {
+        out[k] = [ (v[0] / pxPerUnit), (v[1] / pxPerUnit), 0 ];
+      });
+      return out;
+    });
+
+    // Columns: ensure unit conversion and z coordinate
+    const columnsOut = (this.Columns || []).map(col => {
+      const out = {};
+      Object.entries(col).forEach(([k, v]) => {
+        out[k] = [ (v[0] / pxPerUnit), (v[1] / pxPerUnit), (v[2] || 0) ];
+      });
+      return out;
+    });
+
+    // Points & Edges (export a simple point list and edge list derived from wall_graph)
+    const pointsOut = (this.wall_graph.nodes || []).map(n => ({ id: n.id, x: n.x / pxPerUnit, y: n.y / pxPerUnit }));
+    const edgesOut = (this.wall_graph.edges || []).map(e => ({ id: e.id || null, v1: e.v1, v2: e.v2, locked: !!e.locked }));
+
+    // Build final object that mirrors the duct_plan.json top-level keys while
+    // still retaining backward-compatible fields like wall_graph and areas.
     return {
+      Plan_Boundary: planBoundaryOut,
+      Core_Boundary: coreOut,
+      Columns: columnsOut,
+      Temperature_Regions: this.Temperature_Regions || [],
+      Beams: this.Beams || [],
+      Points: pointsOut,
+      Edges: edgesOut,
+      Ducts: this.Ducts || [],
+      Duct_Plan: this.Duct_Plan || [],
+      // Preserve legacy/compat fields for the app
       schema_version: this.schema_version,
       units: this.units,
       name: this.name,
       boundaryClosed: this.boundaryClosed,
       wall_graph: {
-        // Serialize node coordinates in the chosen units (not pixels) when
-        // a pxPerUnit scale is available on the FloorPlan. This keeps saved
-        // plans portable across display densities.
-        nodes: this.wall_graph.nodes.map(n => {
-          const pxPerUnit = this.units?.pxPerUnit || 1;
-          // if pxPerUnit is 1 and unit label is 'px', this is effectively px
-          const ux = pxPerUnit ? n.x / pxPerUnit : n.x;
-          const uy = pxPerUnit ? n.y / pxPerUnit : n.y;
-          return { id: n.id, x: ux, y: uy };
-        }),
+        nodes: this.wall_graph.nodes.map(n => ({ id: n.id, x: n.x / pxPerUnit, y: n.y / pxPerUnit })),
         edges: this.wall_graph.edges.map(e => ({ ...e }))
       },
-      entrances: this.entrances.map(ent => {
-        const pxPerUnit = this.units?.pxPerUnit || 1;
-        const ux = pxPerUnit ? ent.position.x / pxPerUnit : ent.position.x;
-        const uy = pxPerUnit ? ent.position.y / pxPerUnit : ent.position.y;
-        return { ...ent, position: { x: ux, y: uy } };
-      }),
-      // Serialize areas preserving the vertex representation the app
-      // uses in-memory. Area vertices may be:
-      //  - a node id string ("n_0")
-      //  - a coordinate array [x, y]
-      //  - a coordinate object { x, y }
-      // We preserve coordinates as arrays when present so areas that were
-      // defined independently of the wall graph survive a save/open roundtrip.
-      areas: (this.areas || []).map(a => ({
-        id: a.id,
-        label: a.label,
-        // preserve color if present
-        color: a.color,
-        alpha: typeof a.alpha === 'number' ? a.alpha : 0.3,
-        vertices: (a.vertices || []).map(v => {
-          const pxPerUnit = this.units?.pxPerUnit || 1;
-          // node id string -> keep as-is
-          if (typeof v === 'string') return v;
-          // array [x,y] in pixels -> convert to units
-          if (Array.isArray(v) && v.length >= 2) return [v[0] / pxPerUnit, v[1] / pxPerUnit];
-          // object {x,y} -> convert to array in units
-          if (v && typeof v.x === 'number' && typeof v.y === 'number') return [v.x / pxPerUnit, v.y / pxPerUnit];
-          // unknown shape -> skip
-          return null;
-        }).filter(v => v !== null)
-      })),
+      entrances: this.entrances.map(ent => ({ ...ent, position: { x: ent.position.x / pxPerUnit, y: ent.position.y / pxPerUnit } })),
+      areas: (this.areas || []).map(a => ({ id: a.id, label: a.label, color: a.color, alpha: a.alpha, vertices: (a.vertices || []).map(v => (typeof v === 'string' ? v : (Array.isArray(v) ? [v[0] / pxPerUnit, v[1] / pxPerUnit] : null))).filter(Boolean) })),
+      boundaryArea: this.boundaryArea ? { id: this.boundaryArea.id, label: 'boundary', vertices: (this.boundaryArea.vertices || []).map(v => (typeof v === 'string' ? v : (Array.isArray(v) ? [v[0] / pxPerUnit, v[1] / pxPerUnit] : null))).filter(Boolean) } : null,
+      layers: this.layers,
       requirements: this.requirements
     };
   }
@@ -404,8 +654,15 @@ export class FloorPlan {
     // must be converted back to pixels for in-memory representation.
     const savedPxPerUnit = obj.units?.pxPerUnit || null;
 
-    if (obj.wall_graph?.nodes?.length && typeof obj.wall_graph.nodes[0] === "object") {
-      // New schema with IDs. Convert coordinates from saved units -> pixels
+    // Reconstruct internal wall_graph. Prefer Points/Edges (duct_plan style),
+    // then explicit wall_graph, then legacy coordinate arrays.
+    if (obj.Points && obj.Points.length) {
+      const pxPerUnit = savedPxPerUnit || 1;
+      const nodes = obj.Points.map((p, i) => ({ id: p.id || `n_${i}`, x: (p.x || p[0] || 0) * pxPerUnit, y: (p.y || p[1] || 0) * pxPerUnit }));
+      const edges = (obj.Edges || []).map((e, i) => ({ id: e.id || `e_${i}`, v1: e.v1, v2: e.v2, locked: !!e.locked }));
+      fp.wall_graph = { nodes, edges };
+    } else if (obj.wall_graph?.nodes?.length && typeof obj.wall_graph.nodes[0] === "object") {
+      // New schema with wall_graph.nodes objects
       fp.wall_graph = {
         nodes: obj.wall_graph.nodes.map(n => ({
           id: n.id,
@@ -416,17 +673,8 @@ export class FloorPlan {
       };
     } else {
       // Legacy schema with coordinate arrays
-      const nodes = (obj.wall_graph?.nodes || obj.vertices || []).map(([x, y], i) => ({
-        id: `n_${i}`,
-        x,
-        y
-      }));
-      const edges = (obj.wall_graph?.edges || obj.edges || []).map((seg, i) => ({
-        id: `e_${i}`,
-        v1: `n_${nodes.findIndex(n => n.x === seg.v1[0] && n.y === seg.v1[1])}`,
-        v2: `n_${nodes.findIndex(n => n.x === seg.v2[0] && n.y === seg.v2[1])}`,
-        locked: seg.locked
-      }));
+      const nodes = (obj.wall_graph?.nodes || obj.vertices || []).map(([x, y], i) => ({ id: `n_${i}`, x, y }));
+      const edges = (obj.wall_graph?.edges || obj.edges || []).map((seg, i) => ({ id: `e_${i}`, v1: `n_${nodes.findIndex(n => n.x === seg.v1[0] && n.y === seg.v1[1])}`, v2: `n_${nodes.findIndex(n => n.x === seg.v2[0] && n.y === seg.v2[1])}`, locked: seg.locked }));
       fp.wall_graph = { nodes, edges };
     }
 
@@ -445,7 +693,7 @@ export class FloorPlan {
     // coordinate vertices (arrays or {x,y}) so areas independent of the
     // wall graph are not lost. When a vertex is a string and references a
     // node id (or legacy n_<index>) we normalize it to the existing node id.
-    fp.areas = (obj.areas || []).map((a, i) => {
+  fp.areas = (obj.areas || []).map((a, i) => {
       const original = (a.vertices || []).slice();
       const mapped = original.map(v => {
         // string -> try to resolve to existing node id (or legacy n_<index>)
@@ -489,13 +737,28 @@ export class FloorPlan {
     // Keep areas that have at least 3 vertices (coordinate or ids).
     .filter(a => a.vertices && a.vertices.length >= 3);
 
-  fp.requirements = obj.requirements || { bathrooms: 1 };
+    // Load explicit boundaryArea if present (converted from saved units -> pixels)
+    if (obj.boundaryArea && Array.isArray(obj.boundaryArea.vertices)) {
+      const pxPerUnit = savedPxPerUnit || 1;
+      const mapped = (obj.boundaryArea.vertices || []).map(v => {
+        if (Array.isArray(v) && v.length >= 2) return [v[0] * pxPerUnit, v[1] * pxPerUnit];
+        return null;
+      }).filter(v => v !== null);
+      // Try to map back to node ids when possible, otherwise keep coords
+      const vertices = mapped.map(([x, y]) => {
+        const found = fp.wall_graph.nodes.find(n => Math.abs(n.x - x) < 0.0001 && Math.abs(n.y - y) < 0.0001);
+        return found ? found.id : [x, y];
+      });
+      fp.boundaryArea = { id: obj.boundaryArea.id || 'boundary_0', label: 'boundary', vertices };
+    }
+
+    fp.requirements = obj.requirements || { bathrooms: 1 };
   // Ensure missing keys fall back to defaults (backwards compatible).
   if (typeof fp.requirements.bathrooms !== 'number') fp.requirements.bathrooms = 1;
     // If the saved plan indicated a closed boundary but did not include
     // an explicit boundary area, create one so the boundary surface is
     // available as an area for measurement and UI listing.
-    if (fp.boundaryClosed && !fp.areas.find(a => a.label === 'boundary')) {
+    if (fp.boundaryClosed && !fp.boundaryArea) {
       fp._updateBoundaryArea();
     }
 

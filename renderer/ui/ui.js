@@ -7,7 +7,6 @@ import { FloorPlan } from '../models/FloorPlan.js'; // adjust path if needed
 import { setScalePixelsPerUnit, getPixelsPerUnit, getUnitLabel } from '../../config.js';
 import { validateFloorPlan } from '../models/validation.js';
 import { renderPrompt } from '../models/promptRenderer.js';
-import { evaluateRequirements } from '../models/requirementsEvaluator.js';
 
 // import { DrawingService, findClosestBoundaryPoint } from '../drawing/drawingService.js';
 
@@ -19,37 +18,6 @@ export const SNAP_TO_EDGE_DIST = 8;    // pixels
 export function bindUI(store, canvas, mouse) {
   const ctx = canvas.getContext('2d');
 
-  // --- Requirements form live binding ---
-  const reqFields = {
-    bedrooms: document.getElementById("bedroomsInput"),
-    bathrooms: document.getElementById("bathroomsInput"),
-    openKitchen: document.getElementById("openKitchenChk"),
-    balcony: document.getElementById("balconyChk"),
-    style: document.getElementById("styleSelect"),
-    notes: document.getElementById("notesInput")
-  };
-
-  function readRequirementsFromForm() {
-    return {
-      bedrooms: parseInt(reqFields.bedrooms.value, 10) || 0,
-      bathrooms: parseInt(reqFields.bathrooms.value, 10) || 0,
-      openKitchen: reqFields.openKitchen.checked,
-      balcony: reqFields.balcony.checked,
-      style: reqFields.style.value,
-      notes: reqFields.notes.value.trim()
-    };
-  }
-
-  // Attach listeners for live updates
-  Object.values(reqFields).forEach(el => {
-    el.addEventListener("input", () => {
-      store.updateRequirements(readRequirementsFromForm());
-    });
-    el.addEventListener("change", () => {
-      store.updateRequirements(readRequirementsFromForm());
-    });
-  });
-
   // Redraw on store change
   store.onChange(() => {
     // console.log("store.mode: " + store.mode);
@@ -59,8 +27,9 @@ export function bindUI(store, canvas, mouse) {
       ghost: mouse,
       constrain: mouse.constrain,
       tempArea: store.tempAreaActive ? store.tempArea : null,
-      // In area mode we should not show or highlight selected segments
-      selectedSegment: store.mode === 'area' ? null : store.active.selectedSegment
+      tempCore: store.tempCoreActive ? store.tempCore : null,
+      // In area/core mode we should not show or highlight selected segments
+      selectedSegment: (store.mode === 'area' || store.mode === 'core') ? null : store.active.selectedSegment
     });
 
     const indicator = document.getElementById('canvasModeIndicator');
@@ -73,33 +42,6 @@ export function bindUI(store, canvas, mouse) {
     if (jsonEl && store.active) {
       jsonEl.textContent = JSON.stringify(store.active.toJSON(), null, 2);
     }
-
-    // Update feasibility panel when requirements or boundary change
-    const feasEl = document.getElementById('feasibilityPanel');
-    if (feasEl && store.active) {
-      try {
-        const report = evaluateRequirements(store.active);
-        const statusEl = document.getElementById('feasibilityStatus');
-        const summaryEl = document.getElementById('feasibilitySummary');
-        if (statusEl && summaryEl) {
-          statusEl.className = 'status ' + (report.feasible ? 'ok' : 'warn');
-          statusEl.textContent = report.feasible ? 'Feasible' : 'Not feasible';
-          summaryEl.textContent = (report.summary || '') + ' ' + ((report.suggestions || []).slice(0,3).join('; '));
-        } else {
-          // Backward compatible: if markup isn't present, fall back to simple text
-          feasEl.textContent = (report.summary || '') + ' ' + ((report.suggestions || []).slice(0,3).join('; '));
-          feasEl.dataset.status = report.feasible ? 'ok' : 'warn';
-        }
-      } catch (err) {
-        const statusEl = document.getElementById('feasibilityStatus');
-        const summaryEl = document.getElementById('feasibilitySummary');
-        if (statusEl) {
-          statusEl.className = 'status unknown';
-          statusEl.textContent = 'Unknown';
-        }
-        if (summaryEl) summaryEl.textContent = 'Feasibility: unavailable';
-      }
-    }
   });
 
   // Mode controls (example buttons)
@@ -108,6 +50,16 @@ export function bindUI(store, canvas, mouse) {
     areaBtn.addEventListener('click', () => {
       store.setMode("area");
       store.tempAreaActive = true;
+      store.notify();
+    });
+  }
+
+  // Add Core mode button
+  const coreBtn = document.getElementById('coreModeBtn');
+  if (coreBtn) {
+    coreBtn.addEventListener('click', () => {
+      store.setMode("core");
+      store.tempCoreActive = true;
       store.notify();
     });
   }
@@ -147,6 +99,12 @@ export function bindUI(store, canvas, mouse) {
     }
   });
 
+  document.getElementById("finishCoreBtn").addEventListener("click", () => {
+    if (store.mode === "core") {
+      commitCore(store);
+    }
+  });
+
   canvas.addEventListener('click', (e) => {
     if (!store.active) return;
 
@@ -181,7 +139,10 @@ export function bindUI(store, canvas, mouse) {
         // be represented as a node id anymore). If not constrained, store
         // the node id so it stays linked to the wall graph.
         const nx = nodeSnap.x, ny = nodeSnap.y;
-        store.tempAreaLastSnap = nodeSnap;
+        // Resolve the actual node id from the index returned by findClosestNode
+        const nodeObj = store.active.wall_graph.nodes[nodeSnap.index];
+        const nodeId = nodeObj ? nodeObj.id : null;
+        store.tempAreaLastSnap = { ...nodeSnap, id: nodeId };
         if (constrain && lastX != null && lastY != null) {
           // Align either horizontally or vertically relative to last
           const dx = Math.abs(nx - lastX);
@@ -198,7 +159,9 @@ export function bindUI(store, canvas, mouse) {
         } else {
           x = nx; y = ny;
           console.log("Snapped to node", nodeSnap);
-          store.tempArea.push(nodeSnap.id);
+          // push the resolved node id so the area stays linked to the wall graph
+          if (nodeId) store.tempArea.push(nodeId);
+          else store.tempArea.push([x, y]);
         }
       } else if (edgeSnap) {
         const ex = edgeSnap.x, ey = edgeSnap.y;
@@ -256,6 +219,80 @@ export function bindUI(store, canvas, mouse) {
       return;
     }
 
+    // CORE MODE: similar to area drawing but for core boundaries
+    if (store.mode === "core") {
+      const rect = canvas.getBoundingClientRect();
+      let x = e.clientX - rect.left;
+      let y = e.clientY - rect.top;
+      // Prefer node snap, then edge projection
+      const nodeSnap = findClosestNode(store.active, { x, y }, SNAP_TO_NODE_DIST);
+      const edgeSnap = nodeSnap ? null : findClosestEdgeProjection(store.active, { x, y }, SNAP_TO_EDGE_DIST);
+
+      // Determine if the user requested constraint (Shift) to force
+      // orthogonal (horizontal/vertical) alignment relative to the
+      // previous tempCore vertex.
+      const constrain = e.shiftKey;
+
+      // Coordinates of the previous temp point (if any)
+      const last = store.tempCore.length ? store.tempCore[store.tempCore.length - 1] : null;
+      const lastX = last ? last[0] : null;
+      const lastY = last ? last[1] : null;
+
+      if (nodeSnap) {
+        const nx = nodeSnap.x, ny = nodeSnap.y;
+        store.tempCoreLastSnap = nodeSnap;
+        if (constrain && lastX != null && lastY != null) {
+          const dx = Math.abs(nx - lastX);
+          const dy = Math.abs(ny - lastY);
+          if (dx > dy) { x = nx; y = lastY; } else { x = lastX; y = ny; }
+          console.log("Core: Snapped to node (constrained)", nodeSnap, "->", [x, y]);
+        } else {
+          x = nx; y = ny;
+          console.log("Core: Snapped to node", nodeSnap);
+        }
+      } else if (edgeSnap) {
+        const ex = edgeSnap.x, ey = edgeSnap.y;
+        store.tempCoreLastSnap = edgeSnap;
+        if (constrain && lastX != null && lastY != null) {
+          const dx = Math.abs(ex - lastX);
+          const dy = Math.abs(ey - lastY);
+          if (dx > dy) { x = ex; y = lastY; } else { x = lastX; y = ey; }
+          console.log("Core: Snapped to edge (constrained)", edgeSnap, "->", [x, y]);
+        } else {
+          x = ex; y = ey;
+          console.log("Core: Snapped to edge projection", edgeSnap);
+        }
+      } else {
+        store.tempCoreLastSnap = null;
+        if (constrain && lastX != null && lastY != null) {
+          const dx = Math.abs(x - lastX);
+          const dy = Math.abs(y - lastY);
+          if (dx > dy) { y = lastY; } else { x = lastX; }
+          console.log('Core: Constrained free point ->', [x, y]);
+        }
+      }
+
+      store.tempCore.push([x, y]);
+      store.tempCoreActive = true;
+
+      // If clicking close to the first temp vertex, close the core boundary
+      if (store.tempCore.length >= 3) {
+        const first = store.tempCore[0];
+        const fx = first[0], fy = first[1];
+        const dx = Math.hypot(x - fx, y - fy);
+        if (dx < SNAP_TO_NODE_DIST) {
+          // Close and commit the core boundary
+          commitCore(store);
+          store.setMode('edit');
+          store.update(store.active);
+          return;
+        }
+      }
+
+      store.notify();
+      return;
+    }
+
     // EDIT MODE: select segment and return
     if (store.mode === "edit") {
       const seg = findClosestSegment(store.active, { x, y });
@@ -270,17 +307,15 @@ export function bindUI(store, canvas, mouse) {
       return;
     }
 
-    // ENTRANCE MODE
+    // ENTRANCE MODE - Now supports multiple entrances
     if (store.active.boundaryClosed && store.mode === "entrance") {
-      if (store.active.entrances.length === 0) {
-        const closest = DrawingService.findClosestBoundaryPoint(store.active, { x, y });
-        if (closest) {
-          store.active.addEntrance(closest.edgeId, closest.x, closest.y);
-          store.update(store.active);
-          console.log("Entrance added at", closest);
-          store.setMode("edit");
-          console.log("Switched to edit mode");
-        }
+      const closest = DrawingService.findClosestBoundaryPoint(store.active, { x, y });
+      if (closest) {
+        store.active.addEntrance(closest.edgeId, closest.x, closest.y);
+        store.update(store.active);
+        console.log("Entrance added at", closest);
+        // Don't auto-switch to edit mode, allow adding more entrances
+        console.log(`Total entrances: ${store.active.entrances.length}`);
       }
       return;
     }
@@ -346,15 +381,38 @@ export function bindUI(store, canvas, mouse) {
       commitArea(store);
       refreshAreasList(store);
     }
+    // Core mode keyboard support
+    if (store.mode === "core" && e.key === "Enter") {
+      commitCore(store);
+    }
     // Optional: Esc to cancel
     if (store.mode === "area" && e.key === "Escape") {
       store.resetTempArea();
+    }
+    if (store.mode === "core" && e.key === "Escape") {
+      store.resetTempCore();
+    }
+    if (store.mode === "entrance" && e.key === "Escape") {
+      store.setMode("edit");
+      console.log("Exited entrance mode");
     }
   });
 
   canvas.addEventListener('dblclick', () => {
     if (store.mode === "area") {
       commitArea(store);
+    }
+    if (store.mode === "core") {
+      commitCore(store);
+    }
+  });
+
+  // Right-click to exit entrance mode
+  canvas.addEventListener('contextmenu', (e) => {
+    if (store.mode === "entrance") {
+      e.preventDefault(); // Prevent context menu
+      store.setMode("edit");
+      console.log("Exited entrance mode (right-click)");
     }
   });
 
@@ -368,6 +426,49 @@ export function bindUI(store, canvas, mouse) {
       console.log("Canvas cleared, new floorplan started");
     });
   }
+
+  // ═══════════════════════════════════════════════════════════
+  // LAYER TOGGLE CONTROLS
+  // ═══════════════════════════════════════════════════════════
+  
+  const layerCheckboxes = {
+    planBoundaryLayer: 'Plan_Boundary',
+    coreBoundaryLayer: 'Core_Boundary',
+    columnsLayer: 'Columns',
+    temperatureRegionsLayer: 'Temperature_Regions',
+    beamsLayer: 'Beams',
+    pointsLayer: 'Points',
+    edgesLayer: 'Edges',
+    ductsLayer: 'Ducts',
+    ductPlanLayer: 'Duct_Plan'
+  };
+
+  Object.entries(layerCheckboxes).forEach(([checkboxId, layerName]) => {
+    const checkbox = document.getElementById(checkboxId);
+    if (checkbox) {
+      // Set initial state - use default if store.active is null
+      checkbox.checked = store.active?.layers?.[layerName] ?? (layerName === 'Plan_Boundary' || layerName === 'Core_Boundary' || layerName === 'Columns' || layerName === 'Temperature_Regions');
+      
+      // Add event listener
+      checkbox.addEventListener('change', () => {
+        if (store.active) {
+          store.active.setLayerVisibility(layerName, checkbox.checked);
+          store.notify(); // Trigger re-render
+          console.log(`Layer ${layerName} ${checkbox.checked ? 'enabled' : 'disabled'}`);
+        }
+      });
+    }
+  });
+
+  // Update layer checkboxes when store changes (e.g., after loading a file)
+  store.onChange(() => {
+    Object.entries(layerCheckboxes).forEach(([checkboxId, layerName]) => {
+      const checkbox = document.getElementById(checkboxId);
+      if (checkbox && store.active && store.active.layers) {
+        checkbox.checked = store.active.layers[layerName];
+      }
+    });
+  });
 
   // Save floorplan: serialise and send to main via preload API
   const saveFloorplanBtn = document.getElementById("saveFloorplanBtn");
@@ -598,20 +699,51 @@ export function bindUI(store, canvas, mouse) {
   if (applyBtn && colorPicker) {
     applyBtn.addEventListener('click', () => {
       if (!store.active) return;
-      const sel = store.selectedAreaId || (store.active.areas.length ? store.active.areas[0].id : null);
+      // Resolve selected area id across boundaryArea, Temperature_Regions, and legacy areas
+      const fallbackId = store.active.Temperature_Regions && store.active.Temperature_Regions.length ? store.active.Temperature_Regions[0].id : (store.active.areas && store.active.areas.length ? store.active.areas[0].id : null);
+      const sel = store.selectedAreaId || fallbackId;
       if (!sel) return;
+
+      // try boundaryArea
+      if (store.active.boundaryArea && store.active.boundaryArea.id === sel) {
+        // boundary area has no editable color/alpha for now
+        return;
+      }
+
+      // try Temperature_Regions
+      let region = (store.active.Temperature_Regions || []).find(r => r.id === sel);
+      if (region) {
+        const alphaInput = document.getElementById('areaAlphaRange');
+        const alphaValueInput = document.getElementById('areaAlphaValue');
+        const airInput = document.getElementById('areaAirReq');
+        const labelInput = document.getElementById('areaLabelInput');
+        const alpha = alphaInput ? parseFloat(alphaInput.value) : (region.alpha || 0.3);
+        region.color = colorPicker.value;
+        region.alpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 0.3;
+        if (labelInput && labelInput.value) region.name = labelInput.value;
+        if (airInput) region.air_requirement = Number.isFinite(parseFloat(airInput.value)) ? parseFloat(airInput.value) : region.air_requirement || 7.5;
+        if (alphaValueInput) alphaValueInput.value = region.alpha.toFixed(2);
+        store.update(store.active);
+        refreshAreasList(store);
+        return;
+      }
+
+      // fallback to legacy areas
       const area = store.active.areas.find(a => a.id === sel);
-      if (!area) return;
-      const alphaInput = document.getElementById('areaAlphaRange');
-      const alphaValueInput = document.getElementById('areaAlphaValue');
-      const alpha = alphaInput ? parseFloat(alphaInput.value) : (area.alpha || 0.3);
-      // ensure numeric range
-      area.color = colorPicker.value;
-      area.alpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 0.3;
-      // sync numeric input display
-      if (alphaValueInput) alphaValueInput.value = area.alpha.toFixed(2);
-      store.update(store.active);
-      refreshAreasList(store);
+      if (area) {
+        const alphaInput = document.getElementById('areaAlphaRange');
+        const alphaValueInput = document.getElementById('areaAlphaValue');
+        const airInput = document.getElementById('areaAirReq');
+        const labelInput = document.getElementById('areaLabelInput');
+        const alpha = alphaInput ? parseFloat(alphaInput.value) : (area.alpha || 0.3);
+        area.color = colorPicker.value;
+        area.alpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 0.3;
+        if (labelInput && labelInput.value) area.label = labelInput.value;
+        if (airInput) area.air_requirement = Number.isFinite(parseFloat(airInput.value)) ? parseFloat(airInput.value) : area.air_requirement || 7.5;
+        if (alphaValueInput) alphaValueInput.value = area.alpha.toFixed(2);
+        store.update(store.active);
+        refreshAreasList(store);
+      }
     });
   }
 
@@ -643,7 +775,48 @@ function commitArea(store) {
     return [x, y];
   }).filter(v => v !== null);
 
-  const newId = store.active.addArea(label, mapped);
+  // Resolve mapped entries to coordinates for Temperature_Regions
+  const resolvedCoords = mapped.map(v => {
+    if (typeof v === 'string') {
+      const n = store.active.wall_graph.nodes.find(n => n.id === v);
+      return n ? [n.x, n.y] : null;
+    }
+    return Array.isArray(v) && v.length >= 2 ? [v[0], v[1]] : null;
+  }).filter(v => v !== null);
+
+  let newId = null;
+  // Prefer the model method when available, otherwise fall back to
+  // creating a Temperature_Regions entry directly on the active object
+  // (for cases where `store.active` is a plain object without methods).
+  if (store.active && typeof store.active.addTemperatureRegion === 'function') {
+    newId = store.active.addTemperatureRegion(label, 'internal', resolvedCoords, { color: null, alpha: 0.3 });
+  } else {
+    // create Pt_* keyed subregion from resolvedCoords
+    const subregion = {};
+    resolvedCoords.forEach((c, i) => { subregion[`Pt_${i}`] = [c[0], c[1]]; });
+    if (resolvedCoords.length) subregion[`Pt_${resolvedCoords.length}`] = [resolvedCoords[0][0], resolvedCoords[0][1]];
+    // generate an id
+    const genId = (pref) => `${pref || 'tr'}_${Date.now()}_${Math.floor(Math.random()*1000)}`;
+    const id = genId('tr');
+    const region = {
+      id,
+      type: 'internal',
+      name: label,
+      color: null,
+      alpha: 0.3,
+      air_requirement: 7.5,
+      subregions: [subregion],
+      avg_load_per_point: 0,
+      total_load: 0,
+      total_area: 0,
+      VAV_number: 1,
+      entry_candidates: [[]],
+      thermal_control_zones: []
+    };
+    if (!store.active.Temperature_Regions) store.active.Temperature_Regions = [];
+    store.active.Temperature_Regions.push(region);
+    newId = id;
+  }
   // Auto-select the newly created area so the user can change its color immediately
   store.selectedAreaId = newId;
   store.update(store.active);       // commit to history
@@ -655,31 +828,43 @@ function commitArea(store) {
 }
 
 function refreshAreasList(store) {
-  const listEl = document.getElementById("areasList");
+  const listEl = document.getElementById('areasList');
   if (!listEl) return;
-  listEl.innerHTML = "";
-  store.active.areas.forEach(area => {
-    const li = document.createElement("li");
-    // make the list item clickable to select the area
+  listEl.innerHTML = '';
+
+  // Build combined list: boundaryArea, Temperature_Regions, then legacy areas
+  const items = [];
+  if (store.active.boundaryArea) items.push({ __type: 'boundary', id: store.active.boundaryArea.id, label: store.active.boundaryArea.label, source: store.active.boundaryArea });
+  (store.active.Temperature_Regions || []).forEach(r => items.push({ __type: 'temp', id: r.id, label: r.name || `temp_${r.id}`, color: r.color, alpha: r.alpha, source: r }));
+  (store.active.areas || []).forEach(a => items.push({ __type: 'legacy', id: a.id, label: a.label, color: a.color, alpha: a.alpha, source: a }));
+
+  items.forEach(item => {
+    const li = document.createElement('li');
     const labelSpan = document.createElement('span');
-    labelSpan.textContent = area.label;
+    labelSpan.textContent = item.label;
     labelSpan.style.cursor = 'pointer';
     labelSpan.onclick = () => {
-      store.selectedAreaId = area.id;
-      // reflect selection in the UI (e.g. set color picker)
+      store.selectedAreaId = item.id;
       const picker = document.getElementById('areaColorPicker');
-      if (picker) picker.value = area.color || '#c86464';
+      if (picker) picker.value = item.color || '#c86464';
       const alphaInput = document.getElementById('areaAlphaRange');
       const alphaValueInput = document.getElementById('areaAlphaValue');
-      if (alphaInput) alphaInput.value = typeof area.alpha === 'number' ? area.alpha : 0.3;
-      if (alphaValueInput) alphaValueInput.value = typeof area.alpha === 'number' ? area.alpha.toFixed(2) : '0.30';
-      // highlight the selected list item
+      const labelInput = document.getElementById('areaLabelInput');
+      const airInput = document.getElementById('areaAirReq');
+      if (labelInput) labelInput.value = item.label || '';
+      // for Temperature_Regions the name is stored in `source.name`
+      if (item.__type === 'temp' && item.source && item.source.name) {
+        if (labelInput) labelInput.value = item.source.name;
+      }
+      if (picker) picker.value = item.color || '#c86464';
+      if (alphaInput) alphaInput.value = typeof item.alpha === 'number' ? item.alpha : 0.3;
+      if (alphaValueInput) alphaValueInput.value = typeof item.alpha === 'number' ? item.alpha.toFixed(2) : '0.30';
+      if (airInput) airInput.value = (item.source && typeof item.source.air_requirement === 'number') ? String(item.source.air_requirement) : '7.5';
       Array.from(listEl.children).forEach(ch => ch.classList.remove('selected'));
       li.classList.add('selected');
     };
     li.appendChild(labelSpan);
 
-    // small swatch showing current color
     const sw = document.createElement('span');
     sw.style.display = 'inline-block';
     sw.style.width = '14px';
@@ -687,21 +872,18 @@ function refreshAreasList(store) {
     sw.style.marginLeft = '8px';
     sw.style.verticalAlign = 'middle';
     sw.style.border = '1px solid rgba(0,0,0,0.1)';
-    // prefer to show color with alpha if available
-    if (area.color && typeof area.alpha === 'number') {
-      // convert hex to rgba for display
-      sw.style.background = area.color;
-      sw.style.opacity = String(area.alpha);
+    if (item.color && typeof item.alpha === 'number') {
+      sw.style.background = item.color;
+      sw.style.opacity = String(item.alpha);
     } else {
-      sw.style.background = area.color || '';
+      sw.style.background = item.color || '';
       sw.style.opacity = '';
     }
     li.appendChild(sw);
-  // Optional: delete button
-  const del = document.createElement("button");
-  del.textContent = "x";
-    // Do not allow deleting the canonical boundary area from the UI
-    if (area.label === 'boundary') {
+
+    const del = document.createElement('button');
+    del.textContent = 'x';
+    if (item.__type === 'boundary') {
       del.disabled = true;
       del.title = 'Boundary area cannot be deleted';
       li.style.fontWeight = '600';
@@ -712,7 +894,13 @@ function refreshAreasList(store) {
       li.appendChild(badge);
     } else {
       del.onclick = () => {
-        store.active.removeArea(area.id);
+        if (item.__type === 'temp') {
+          const idx = (store.active.Temperature_Regions || []).findIndex(r => r.id === item.id);
+          if (idx >= 0) store.active.Temperature_Regions.splice(idx, 1);
+        } else if (item.__type === 'legacy') {
+          const idx = (store.active.areas || []).findIndex(a => a.id === item.id);
+          if (idx >= 0) store.active.areas.splice(idx, 1);
+        }
         store.update(store.active);
         refreshAreasList(store);
       };
@@ -720,6 +908,24 @@ function refreshAreasList(store) {
     li.appendChild(del);
     listEl.appendChild(li);
   });
+}
+
+// Helper: commit the core boundary, add to model, and reset temp state
+function commitCore(store) {
+  console.log("commit core has been called");
+  if (store.tempCore.length < 3) return; // need at least a triangle
+
+  // Convert temp core coordinates to core boundary format
+  const coreVertices = store.tempCore.map(v => [v[0], v[1]]);
+  
+  store.active.addCoreBoundary(coreVertices);
+  store.update(store.active);       // commit to history
+  store.tempCore = [];
+  store.tempCoreActive = false;
+
+  // Optionally switch back to edit mode
+  store.setMode("edit");
+  console.log("Core boundary added successfully");
 }
 
   // (moved into bindUI where `store` is in scope)

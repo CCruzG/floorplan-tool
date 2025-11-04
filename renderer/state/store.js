@@ -7,13 +7,19 @@ export class FloorPlanStore {
     this.active = null;
     this.history = new Map(); // name → History
     this.listeners = [];
-    this.mode = "draw" //draw | entrance | edit | area
+    this.mode = "draw" // draw | entrance | edit | area | core | column | beam
 
     // Temporary UI state (not persisted to history)
     this.dragStart = null;       // { x, y } when a drag begins
     this.tempArea = [];
-    this.tempActiveArea = false;
+    this.tempAreaActive = false;
     this.tempAreaLastSnap = null;  // { type: "node"|"edge", index, x, y } or null
+    
+    // New temporary states for reference schema elements
+    this.tempCore = [];
+    this.tempCoreActive = false;
+    this.tempColumn = [];
+    this.tempColumnActive = false;
   }
 
   add(fp) {
@@ -31,12 +37,13 @@ export class FloorPlanStore {
 
   setMode(mode) {
     this.mode = mode;
-    if (mode !== "area") {
-      // this.tempArea = [];
+    // When entering area mode we should clear any previous tempArea and
+    // activate the tempArea state so the renderer shows the area ghost.
+    if (mode === "area") {
+      this.tempArea = [];
       this.tempAreaActive = true;
     } else {
-      this.tempArea = [];
-      this.tempActiveArea = false;
+      this.tempAreaActive = false;
     }
     this.notify();
   }
@@ -44,6 +51,19 @@ export class FloorPlanStore {
   resetTempArea() {
     this.tempArea = [];
     this.tempAreaActive = false;
+    this.notify();
+  }
+
+  // New methods for reference schema temporary states
+  resetTempCore() {
+    this.tempCore = [];
+    this.tempCoreActive = false;
+    this.notify();
+  }
+
+  resetTempColumn() {
+    this.tempColumn = [];
+    this.tempColumnActive = false;
     this.notify();
   }
 
