@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="UTF-8">
-  <title>Floorplan Prototype</title>
+  <title>Services Optimisation Tool</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 
@@ -20,10 +20,10 @@
     <!-- <button id="saveReqBtn">Save Requirements</button> -->
     <button id="openFloorplanBtn">Open Floorplan</button>
     <button id="saveFloorplanBtn">Save Floorplan</button>
-    <button id="btn-refine-ai">Refine with AI</button>
-    <label style="margin-left:12px;">
+    <button id="optimiseBtn">optimise</button>
+    <label style="margin-left:12px; color:#fff; font-family: monospace; font-size:10px;">
       Canvas width:
-      <input id="canvasWidthValue" type="number" value="18" min="0.01" step="0.01" style="width:90px; margin-left:6px" />
+      <input id="canvasWidthValue" type="number" value="50" min="0.01" step="0.01" style="width:90px; margin-left:6px" />
       <select id="canvasUnitSelect" style="margin-left:6px">
         <option value="mm">mm</option>
         <option value="cm">cm</option>
@@ -97,7 +97,9 @@
         <h3>Layers</h3>
         <div class="layer-controls">
           <label><input type="checkbox" id="planBoundaryLayer" checked> Plan Boundary</label>
+          <label><input type="checkbox" id="boundaryAreaLayer" checked> Boundary Area</label>
           <label><input type="checkbox" id="coreBoundaryLayer" checked> Core Boundary</label>
+          <label><input type="checkbox" id="coreAreaLayer" checked> Core Area</label>
           <label><input type="checkbox" id="columnsLayer" checked> Columns</label>
           <label><input type="checkbox" id="temperatureRegionsLayer" checked> Temperature Regions</label>
           <label><input type="checkbox" id="beamsLayer"> Beams</label>

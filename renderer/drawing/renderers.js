@@ -34,14 +34,54 @@ export function drawEdgeWithDimension(ctx, fp, edge) {
   ctx.restore();
 }
 
-export function drawAreas(ctx, fp) {
-  // Build a unified list of area-like objects: boundaryArea, Temperature_Regions, then legacy areas
-  const unified = [];
-
-  // boundaryArea (if present) - its vertices may be node ids
-  if (fp.boundaryArea) {
-    unified.push({ label: fp.boundaryArea.label || 'boundary', vertices: fp.boundaryArea.vertices, color: fp.boundaryArea.color, alpha: fp.boundaryArea.alpha });
+export function drawBoundaryArea(ctx, fp) {
+  if (!fp.boundaryArea) return;
+  
+  const area = fp.boundaryArea;
+  const ptsRaw = area.vertices || [];
+  if (ptsRaw.length === 0) return;
+  
+  // Normalize vertices (may be node ids or coordinate pairs)
+  const resolved = ptsRaw.map(v => {
+    if (typeof v === 'string') {
+      const n = getNodeById(fp.wall_graph.nodes, v);
+      return n ? [n.x, n.y] : null;
+    }
+    if (Array.isArray(v) && v.length >= 2) return [v[0], v[1]];
+    if (v && typeof v.x === 'number' && typeof v.y === 'number') return [v.x, v.y];
+    return null;
+  }).filter(Boolean);
+  
+  if (resolved.length === 0) return;
+  
+  ctx.save();
+  ctx.beginPath();
+  resolved.forEach(([x, y], i) => {
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.closePath();
+  
+  const palette = areaColour(area.label || 'boundary');
+  let fill = palette.fill || 'rgba(120,120,120,0.15)';
+  if (area.color) {
+    const alpha = typeof area.alpha === 'number' ? area.alpha : 0.3;
+    if (/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/.test(area.color)) {
+      fill = hexToRgba(area.color, alpha);
+    } else {
+      fill = area.color;
+      ctx.globalAlpha = alpha;
+    }
   }
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+export function drawAreas(ctx, fp) {
+  // Build a unified list of area-like objects: Temperature_Regions and legacy areas
+  const unified = [];
 
   // Temperature_Regions: convert Pt_* subregions to coordinate arrays
   (fp.Temperature_Regions || []).forEach(region => {
@@ -307,13 +347,13 @@ export function areaColour(label) {
   };
   // Special casing for the canonical boundary area so it is visually
   // distinct and users understand it's the plan boundary (non-deletable).
-  if (label === 'boundary') return { fill: 'rgba(0,0,0,0.06)', stroke: '#333', strokeWidth: 2, dashed: false };
+  if (label === 'boundary') return { fill: 'rgba(46,204,113,0.06)', stroke: '#2ecc71', strokeWidth: 2, dashed: false };
   return map[label] || { fill: "rgba(120,120,120,0.2)", stroke: "#666" };
 }
 
 export function drawWalls(ctx, fp, options = {}) {
-  ctx.strokeStyle = "#222";
-  ctx.lineWidth = 2;
+  ctx.save();
+  
   fp.wall_graph.edges.forEach((edge, i) => {
     const n1 = getNodeById(fp.wall_graph.nodes, edge.v1);
     const n2 = getNodeById(fp.wall_graph.nodes, edge.v2);
@@ -355,15 +395,15 @@ export function drawWalls(ctx, fp, options = {}) {
         const len = edgeLength(fp, edge);
         const mid = edgeMidpoint(fp, edge);
 
-        ctx.save();
         ctx.fillStyle = "#000";
         ctx.font = "11px sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(formatLen(len), mid.x, mid.y);
-        ctx.restore();
     }
   });
+  
+  ctx.restore();
 }
 
 export function drawVertices(ctx, fp) {
@@ -373,6 +413,208 @@ export function drawVertices(ctx, fp) {
     ctx.arc(node.x, node.y, 3, 0, Math.PI * 2);
     ctx.fill();
   });
+}
+
+// Draw the boundary polygon outline and vertices (if present).
+export function drawBoundaryVertices(ctx, fp) {
+  if (!fp || !fp.boundaryArea || !Array.isArray(fp.boundaryArea.vertices)) return;
+  
+  // Resolve all vertices to coordinate pairs first
+  const resolvedVertices = [];
+  fp.boundaryArea.vertices.forEach(v => {
+    let x = null, y = null;
+    if (typeof v === 'string') {
+      const n = getNodeById(fp.wall_graph.nodes, v);
+      if (n) { x = n.x; y = n.y; }
+    } else if (Array.isArray(v) && v.length >= 2) {
+      x = v[0]; y = v[1];
+    }
+    if (x != null && y != null) {
+      resolvedVertices.push([x, y]);
+    }
+  });
+  
+  if (resolvedVertices.length === 0) return;
+
+  // If a view transform was applied (fp._view), the canvas context will
+  // already be scaled. Drawing fixed-size UI markers in that transformed
+  // space results in extremely small on-screen radii (marker_radius * scale).
+  // To keep markers a readable device-pixel size, compute screen-space
+  // positions from the stored view and draw the markers using the identity
+  // transform (so radius is in device pixels).
+  const useView = fp._view && typeof fp._view.scale === 'number';
+  const pxRadius = 6; // marker radius in device pixels
+
+  if (useView) {
+    // Draw in screen space: reset transform and compute screen coords
+    ctx.save();
+    // temporarily reset transform so we draw in device coordinates
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    
+    const s = fp._view.scale;
+    const ox = fp._view.offsetX || 0;
+    const oy = fp._view.offsetY || 0;
+    
+    // Convert world coordinates to screen coordinates
+    const screenVertices = resolvedVertices.map(([wx, wy]) => [
+      wx * s + ox,
+      wy * s + oy
+    ]);
+    
+    // Draw polygon outline
+    if (screenVertices.length > 2) {
+      ctx.beginPath();
+      screenVertices.forEach(([sx, sy], i) => {
+        if (i === 0) ctx.moveTo(sx, sy);
+        else ctx.lineTo(sx, sy);
+      });
+      ctx.closePath();
+      ctx.strokeStyle = '#2ecc71';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    
+    // Draw vertex markers
+    ctx.fillStyle = '#2ecc71';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    screenVertices.forEach(([sx, sy]) => {
+      ctx.beginPath();
+      ctx.arc(sx, sy, pxRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+    
+    ctx.restore();
+    return;
+  }
+
+  // No view transform: draw in world coordinates as before.
+  ctx.save();
+  
+  // Draw polygon outline
+  if (resolvedVertices.length > 2) {
+    ctx.beginPath();
+    resolvedVertices.forEach(([x, y], i) => {
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.strokeStyle = '#2ecc71';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  
+  // Draw vertex markers
+  ctx.fillStyle = '#2ecc71';
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1;
+  resolvedVertices.forEach(([x, y]) => {
+    ctx.beginPath();
+    ctx.arc(x, y, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  });
+  
+  ctx.restore();
+}
+
+// Draw the core boundary polygon outline and vertices (if present).
+export function drawCoreVertices(ctx, fp) {
+  if (!fp || !fp.coreArea || !Array.isArray(fp.coreArea.vertices)) return;
+  
+  // Resolve all vertices to coordinate pairs first
+  const resolvedVertices = [];
+  fp.coreArea.vertices.forEach(v => {
+    let x = null, y = null;
+    if (typeof v === 'string') {
+      const n = getNodeById(fp.wall_graph.nodes, v);
+      if (n) { x = n.x; y = n.y; }
+    } else if (Array.isArray(v) && v.length >= 2) {
+      x = v[0]; y = v[1];
+    }
+    if (x != null && y != null) {
+      resolvedVertices.push([x, y]);
+    }
+  });
+  
+  if (resolvedVertices.length === 0) return;
+
+  const useView = fp._view && typeof fp._view.scale === 'number';
+  const pxRadius = 5; // slightly smaller radius for core vertices
+
+  if (useView) {
+    // Draw in screen space: reset transform and compute screen coords
+    ctx.save();
+    // temporarily reset transform so we draw in device coordinates
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    
+    const s = fp._view.scale;
+    const ox = fp._view.offsetX || 0;
+    const oy = fp._view.offsetY || 0;
+    
+    // Convert world coordinates to screen coordinates
+    const screenVertices = resolvedVertices.map(([wx, wy]) => [
+      wx * s + ox,
+      wy * s + oy
+    ]);
+    
+    // Draw polygon outline (use a different color for core)
+    if (screenVertices.length > 2) {
+      ctx.beginPath();
+      screenVertices.forEach(([sx, sy], i) => {
+        if (i === 0) ctx.moveTo(sx, sy);
+        else ctx.lineTo(sx, sy);
+      });
+      ctx.closePath();
+      ctx.strokeStyle = '#e74c3c'; // red color for core
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    
+    // Draw vertex markers
+    ctx.fillStyle = '#e74c3c';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    screenVertices.forEach(([sx, sy]) => {
+      ctx.beginPath();
+      ctx.arc(sx, sy, pxRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+    
+    ctx.restore();
+    return;
+  }
+
+  // No view transform: draw in world coordinates as before.
+  ctx.save();
+  
+  // Draw polygon outline
+  if (resolvedVertices.length > 2) {
+    ctx.beginPath();
+    resolvedVertices.forEach(([x, y], i) => {
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.strokeStyle = '#e74c3c'; // red color for core
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  
+  // Draw vertex markers
+  ctx.fillStyle = '#e74c3c';
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1;
+  resolvedVertices.forEach(([x, y]) => {
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  });
+  
+  ctx.restore();
 }
 
 export function drawHoverDimensions(ctx, fp, options) {
@@ -608,13 +850,11 @@ export function drawProjectionGuides(ctx, fp, mouse) {
 // NEW REFERENCE SCHEMA RENDERING FUNCTIONS
 // ═══════════════════════════════════════════════════════════
 
-export function drawCoreBoundaries(ctx, fp) {
+export function drawCoreAreas(ctx, fp) {
   if (!fp.Core_Boundary || fp.Core_Boundary.length === 0) return;
   
   ctx.save();
-  ctx.strokeStyle = "#ff6b6b"; // Red color for core boundaries
-  ctx.lineWidth = 2;
-  ctx.fillStyle = "rgba(255, 107, 107, 0.1)"; // Light red fill
+  ctx.fillStyle = "rgba(255, 107, 107, 0.15)"; // Light red fill for core areas
   
   fp.Core_Boundary.forEach(core => {
     const points = Object.values(core);
@@ -631,6 +871,32 @@ export function drawCoreBoundaries(ctx, fp) {
     
     ctx.closePath();
     ctx.fill();
+  });
+  
+  ctx.restore();
+}
+
+export function drawCoreBoundaries(ctx, fp) {
+  if (!fp.Core_Boundary || fp.Core_Boundary.length === 0) return;
+  
+  ctx.save();
+  ctx.strokeStyle = "#ff6b6b"; // Red color for core boundaries
+  ctx.lineWidth = 2;
+  
+  fp.Core_Boundary.forEach(core => {
+    const points = Object.values(core);
+    if (points.length < 3) return;
+    
+    ctx.beginPath();
+    const [startX, startY] = points[0];
+    ctx.moveTo(startX, startY);
+    
+    for (let i = 1; i < points.length; i++) {
+      const [x, y] = points[i];
+      ctx.lineTo(x, y);
+    }
+    
+    ctx.closePath();
     ctx.stroke();
   });
   
@@ -656,11 +922,18 @@ export function drawCoreGhost(ctx, fp, tempCore, mouse, constrain = false) {
     ctx.lineTo(x, y);
   }
 
+  // Check for alignment snap first (takes precedence when not using Shift constraint)
+  let alignmentSnap = null;
+  if (!constrain && mouse) {
+    alignmentSnap = getAlignmentSnap(fp, tempCore, mouse, 15);
+  }
+
   // compute the target point to draw to: if orthogonal locking is
   // active, compute a constrained cursor aligned to the previous point
   let targetX = mouse?.x ?? null;
   let targetY = mouse?.y ?? null;
   let constrainedPoint = null;
+  
   if (constrain && mouse && tempCore.length) {
     const last = tempCore[tempCore.length - 1];
     if (last) {
@@ -679,6 +952,10 @@ export function drawCoreGhost(ctx, fp, tempCore, mouse, constrain = false) {
       }
       constrainedPoint = [targetX, targetY];
     }
+  } else if (alignmentSnap) {
+    // Apply alignment snap when not using Shift constraint
+    targetX = alignmentSnap.x;
+    targetY = alignmentSnap.y;
   }
 
   // Draw line to target (mouse or constrained)
@@ -722,6 +999,158 @@ export function drawCoreGhost(ctx, fp, tempCore, mouse, constrain = false) {
   ctx.restore();
 }
 
+// Helper function to calculate snapped coordinates based on alignment guides
+export function getAlignmentSnap(fp, tempCore, mouse, snapThreshold = 15) {
+  if (!tempCore || tempCore.length === 0 || !mouse) return null;
+
+  // Collect all reference vertices: boundary nodes + existing core vertices
+  const referenceVertices = [];
+  
+  // Add boundary vertices (wall_graph nodes)
+  if (fp && fp.wall_graph && fp.wall_graph.nodes) {
+    fp.wall_graph.nodes.forEach(node => {
+      referenceVertices.push({ x: node.x, y: node.y, type: 'boundary' });
+    });
+  }
+  
+  // Add existing core vertices
+  tempCore.forEach(vertex => {
+    const [vx, vy] = vertex;
+    referenceVertices.push({ x: vx, y: vy, type: 'core' });
+  });
+
+  // Find the closest alignment (horizontal or vertical) to any reference vertex
+  let closestDist = Infinity;
+  let snapX = null;
+  let snapY = null;
+  let alignedVertex = null;
+
+  // Check alignment with all reference vertices
+  referenceVertices.forEach(vertex => {
+    const { x: vx, y: vy } = vertex;
+    
+    // Check horizontal alignment (same Y)
+    const distY = Math.abs(mouse.y - vy);
+    if (distY < snapThreshold && distY < closestDist) {
+      closestDist = distY;
+      snapY = vy;
+      snapX = null;
+      alignedVertex = vertex;
+    }
+    
+    // Check vertical alignment (same X)
+    const distX = Math.abs(mouse.x - vx);
+    if (distX < snapThreshold && distX < closestDist) {
+      closestDist = distX;
+      snapX = vx;
+      snapY = null;
+      alignedVertex = vertex;
+    }
+  });
+
+  if (snapX !== null || snapY !== null) {
+    return {
+      x: snapX !== null ? snapX : mouse.x,
+      y: snapY !== null ? snapY : mouse.y,
+      alignedVertex,
+      isHorizontal: snapY !== null,
+      isVertical: snapX !== null
+    };
+  }
+
+  return null;
+}
+
+// Draw projection guides for core drawing mode (horizontal/vertical alignment lines)
+export function drawCoreProjectionGuides(ctx, fp, tempCore, mouse) {
+  if (!tempCore || tempCore.length === 0 || !mouse) return;
+  
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 107, 107, 0.3)"; // Light red for guides
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+
+  // Collect all reference vertices: boundary nodes + existing core vertices
+  const referenceVertices = [];
+  
+  // Add boundary vertices (wall_graph nodes)
+  if (fp && fp.wall_graph && fp.wall_graph.nodes) {
+    fp.wall_graph.nodes.forEach(node => {
+      referenceVertices.push({ x: node.x, y: node.y, type: 'boundary' });
+    });
+  }
+  
+  // Add existing core vertices
+  tempCore.forEach(vertex => {
+    const [vx, vy] = vertex;
+    referenceVertices.push({ x: vx, y: vy, type: 'core' });
+  });
+
+  // Find the closest alignment (horizontal or vertical) to any reference vertex
+  let closestDist = Infinity;
+  let closestX = null;
+  let closestY = null;
+  let alignedVertex = null;
+  const snapThreshold = 15; // pixels - how close mouse needs to be to show guide
+
+  // Check alignment with all reference vertices
+  referenceVertices.forEach(vertex => {
+    const { x: vx, y: vy } = vertex;
+    
+    // Check horizontal alignment (same Y)
+    const distY = Math.abs(mouse.y - vy);
+    if (distY < snapThreshold && distY < closestDist) {
+      closestDist = distY;
+      closestY = vy;
+      closestX = null; // Clear X when we find closer Y
+      alignedVertex = vertex;
+    }
+    
+    // Check vertical alignment (same X)
+    const distX = Math.abs(mouse.x - vx);
+    if (distX < snapThreshold && distX < closestDist) {
+      closestDist = distX;
+      closestX = vx;
+      closestY = null; // Clear Y when we find closer X
+      alignedVertex = vertex;
+    }
+  });
+
+  // Draw the closest guide line
+  if (closestX !== null && alignedVertex) {
+    // Draw vertical guide
+    ctx.beginPath();
+    ctx.moveTo(closestX, 0);
+    ctx.lineTo(closestX, ctx.canvas.height);
+    ctx.stroke();
+    
+    // Highlight the aligned vertex with color based on type
+    const color = alignedVertex.type === 'boundary' ? "rgba(46, 204, 113, 0.6)" : "rgba(255, 107, 107, 0.5)";
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(alignedVertex.x, alignedVertex.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  
+  if (closestY !== null && alignedVertex) {
+    // Draw horizontal guide
+    ctx.beginPath();
+    ctx.moveTo(0, closestY);
+    ctx.lineTo(ctx.canvas.width, closestY);
+    ctx.stroke();
+    
+    // Highlight the aligned vertex with color based on type
+    const color = alignedVertex.type === 'boundary' ? "rgba(46, 204, 113, 0.6)" : "rgba(255, 107, 107, 0.5)";
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(alignedVertex.x, alignedVertex.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 export function drawColumns(ctx, fp) {
   if (!fp.Columns || fp.Columns.length === 0) return;
   
@@ -751,15 +1180,114 @@ export function drawColumns(ctx, fp) {
   ctx.restore();
 }
 
+// Draw column polygons and vertices (if present).
+export function drawColumnsVertices(ctx, fp) {
+  if (!fp || !fp.columnsData || !Array.isArray(fp.columnsData)) return;
+  
+  const useView = fp._view && typeof fp._view.scale === 'number';
+  const pxRadius = 3; // smaller radius for column vertices
+
+  if (useView) {
+    // Draw in screen space: reset transform and compute screen coords
+    ctx.save();
+    // temporarily reset transform so we draw in device coordinates
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    
+    const s = fp._view.scale;
+    const ox = fp._view.offsetX || 0;
+    const oy = fp._view.offsetY || 0;
+    
+    fp.columnsData.forEach(column => {
+      if (!Array.isArray(column.vertices)) return;
+      
+      // Convert world coordinates to screen coordinates
+      const screenVertices = column.vertices.map(([wx, wy]) => [
+        wx * s + ox,
+        wy * s + oy
+      ]);
+      
+      if (screenVertices.length === 0) return;
+      
+      // Draw filled polygon for column
+      if (screenVertices.length > 2) {
+        ctx.beginPath();
+        screenVertices.forEach(([sx, sy], i) => {
+          if (i === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+        });
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(128, 128, 128, 0.6)'; // gray fill for columns
+        ctx.fill();
+        ctx.strokeStyle = '#666666'; // darker gray outline
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      
+      // Draw vertex markers
+      ctx.fillStyle = '#666666';
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      screenVertices.forEach(([sx, sy]) => {
+        ctx.beginPath();
+        ctx.arc(sx, sy, pxRadius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      });
+    });
+    
+    ctx.restore();
+    return;
+  }
+
+  // No view transform: draw in world coordinates as before.
+  ctx.save();
+  
+  fp.columnsData.forEach(column => {
+    if (!Array.isArray(column.vertices)) return;
+    
+    // Draw filled polygon for column
+    if (column.vertices.length > 2) {
+      ctx.beginPath();
+      column.vertices.forEach(([x, y], i) => {
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(128, 128, 128, 0.6)'; // gray fill for columns
+      ctx.fill();
+      ctx.strokeStyle = '#666666'; // darker gray outline
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    
+    // Draw vertex markers
+    ctx.fillStyle = '#666666';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    column.vertices.forEach(([x, y]) => {
+      ctx.beginPath();
+      ctx.arc(x, y, 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+  });
+  
+  ctx.restore();
+}
+
 // export default object for convenience
 export default {
   isNearFirstNode,
   drawEdgeWithDimension,
+  drawBoundaryArea,
   drawAreas,
   drawAreaGhost,
   areaColour,
   drawWalls,
   drawVertices,
+  drawBoundaryVertices,
+  drawCoreVertices,
+  drawColumnsVertices,
   drawHoverDimensions,
   drawHoverTooltip,
   drawGhost,
@@ -767,6 +1295,9 @@ export default {
   drawEntrances,
   findClosestBoundaryPoint,
   drawProjectionGuides,
+  drawCoreProjectionGuides,
+  getAlignmentSnap,
+  drawCoreAreas,
   drawCoreBoundaries,
   drawCoreGhost,
   drawColumns

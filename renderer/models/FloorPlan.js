@@ -17,6 +17,7 @@ export class FloorPlan {
     // Layer visibility controls
     this.layers = {
       Plan_Boundary: true,
+      Boundary_Area: true,
       Core_Boundary: true,
       Columns: true,
       Temperature_Regions: true,
@@ -189,9 +190,9 @@ export class FloorPlan {
 
   // Set layer visibility
   setLayerVisibility(layerName, visible) {
-    if (this.layers.hasOwnProperty(layerName)) {
-      this.layers[layerName] = visible;
-    }
+    if (!this.layers) this.layers = {};
+    this.layers[layerName] = visible;
+    console.log(`FloorPlan.setLayerVisibility: ${layerName} = ${visible}`, this.layers);
   }
 
   clone() {
@@ -271,7 +272,7 @@ export class FloorPlan {
   }
 
 
-  static fromJSON(obj) {
+  static fromJSON(obj, options = {}) {
     const fp = new FloorPlan(obj.name);
     
     // Load reference schema structure (primary)
@@ -393,7 +394,9 @@ export class FloorPlan {
     // Layer visibility defaults
     this.layers = {
       Plan_Boundary: true,
+      Boundary_Area: true,
       Core_Boundary: true,
+      Core_Area: true,
       Columns: true,
       Temperature_Regions: true,
       Beams: false,
@@ -534,7 +537,8 @@ export class FloorPlan {
 
   setLayerVisibility(layerName, visible) {
     if (!this.layers) this.layers = {};
-    if (this.layers.hasOwnProperty(layerName)) this.layers[layerName] = !!visible;
+    this.layers[layerName] = visible;
+    console.log(`FloorPlan.setLayerVisibility: ${layerName} = ${visible}`, this.layers);
   }
 
   clone() {
@@ -642,11 +646,26 @@ export class FloorPlan {
     };
   }
 
-  static fromJSON(obj) {
+  static fromJSON(obj, options = {}) {
     const fp = new FloorPlan(obj.name);
     fp.schema_version = obj.schema_version || "0.9.0";
     fp.units = obj.units || { length: "mm" };
     fp.boundaryClosed = obj.boundaryClosed || false;
+
+    // Restore layer visibility settings
+    fp.layers = obj.layers || {
+      Plan_Boundary: true,
+      Boundary_Area: true,
+      Core_Boundary: true,
+      Core_Area: true,
+      Columns: true,
+      Temperature_Regions: true,
+      Beams: false,
+      Points: false,
+      Edges: false,
+      Ducts: false,
+      Duct_Plan: false
+    };
 
     // Handle legacy vs new schema
     // Determine pxPerUnit from saved units (if present). If a saved plan
@@ -677,6 +696,97 @@ export class FloorPlan {
       const edges = (obj.wall_graph?.edges || obj.edges || []).map((seg, i) => ({ id: `e_${i}`, v1: `n_${nodes.findIndex(n => n.x === seg.v1[0] && n.y === seg.v1[1])}`, v2: `n_${nodes.findIndex(n => n.x === seg.v2[0] && n.y === seg.v2[1])}`, locked: seg.locked }));
       fp.wall_graph = { nodes, edges };
     }
+
+    // Deduplicate / canonicalize nodes (merge nearby points). The caller
+    // may provide `dedupeEpsilon` in the saved JSON to control the merge
+    // tolerance. If epsilon === 0 we require exact equality.
+  const DEDUPE_EPS = (typeof options.dedupeEpsilon === 'number') ? options.dedupeEpsilon : (typeof obj.dedupeEpsilon === 'number' ? obj.dedupeEpsilon : 0.0001);
+    const epsSq = DEDUPE_EPS * DEDUPE_EPS;
+    const oldNodes = fp.wall_graph.nodes || [];
+    const canonical = [];
+    const oldToNew = {}; // map old id -> canonical id
+
+    const findCanonical = (x, y) => {
+      for (let i = 0; i < canonical.length; i++) {
+        const p = canonical[i];
+        if (DEDUPE_EPS === 0) {
+          if (p.x === x && p.y === y) return p;
+        } else {
+          const dx = p.x - x;
+          const dy = p.y - y;
+          if ((dx * dx + dy * dy) <= epsSq) return p;
+        }
+      }
+      return null;
+    };
+
+    // Seed canonical list by iterating old nodes and merging as needed.
+    oldNodes.forEach(n => {
+      const x = n.x;
+      const y = n.y;
+      const found = findCanonical(x, y);
+      if (found) {
+        oldToNew[n.id] = found.id;
+      } else {
+        // preserve the original id where possible for readability
+        const newId = n.id || fp._genId('n');
+        const entry = { id: newId, x, y };
+        canonical.push(entry);
+        oldToNew[n.id] = newId;
+      }
+    });
+
+    // Replace fp.Points and normalize wall_graph.nodes to canonical set
+    fp.Points = canonical.map(p => ({ id: p.id, x: p.x, y: p.y }));
+    fp.wall_graph.nodes = canonical.map(p => ({ id: p.id, x: p.x, y: p.y }));
+
+    // Remap edges to canonical node ids. If an edge referenced coordinates
+    // or an unknown id, attempt to resolve by nearest canonical point (or
+    // create a new canonical point if necessary).
+    const canonicalEdges = [];
+    (fp.wall_graph.edges || []).forEach(e => {
+      const resolveRef = (v) => {
+        // string id
+        if (typeof v === 'string') {
+          if (oldToNew[v]) return oldToNew[v];
+          // maybe it already matches a canonical id
+          if (fp.Points.find(p => p.id === v)) return v;
+          return null;
+        }
+        // array coords [x,y]
+        if (Array.isArray(v) && v.length >= 2) {
+          const [x, y] = v;
+          const found = findCanonical(x, y);
+          if (found) return found.id;
+          // create new canonical point
+          const nid = fp._genId('n');
+          const entry = { id: nid, x, y };
+          canonical.push(entry);
+          fp.Points.push({ id: nid, x, y });
+          fp.wall_graph.nodes.push({ id: nid, x, y });
+          return nid;
+        }
+        // object with {x,y}
+        if (v && typeof v.x === 'number' && typeof v.y === 'number') {
+          const found = findCanonical(v.x, v.y);
+          if (found) return found.id;
+          const nid = fp._genId('n');
+          const entry = { id: nid, x: v.x, y: v.y };
+          canonical.push(entry);
+          fp.Points.push({ id: nid, x: v.x, y: v.y });
+          fp.wall_graph.nodes.push({ id: nid, x: v.x, y: v.y });
+          return nid;
+        }
+        return null;
+      };
+
+      const v1 = resolveRef(e.v1);
+      const v2 = resolveRef(e.v2);
+      if (v1 && v2 && v1 !== v2) {
+        canonicalEdges.push({ id: e.id || fp._genId('e'), v1, v2, locked: !!e.locked });
+      }
+    });
+    fp.wall_graph.edges = canonicalEdges;
 
     fp.entrances = (obj.entrances || []).map((ent, i) => {
       const pos = ent.position ? ent.position : (ent.position ? { x: ent.position[0], y: ent.position[1] } : { x: 0, y: 0 });
@@ -736,6 +846,182 @@ export class FloorPlan {
     })
     // Keep areas that have at least 3 vertices (coordinate or ids).
     .filter(a => a.vertices && a.vertices.length >= 3);
+
+    // Migrate legacy areas into Temperature_Regions when loading older files.
+    // If the saved JSON already contains Temperature_Regions prefer those,
+    // otherwise convert the legacy `areas` array into the new structure so
+    // the UI and renderers can immediately show regions.
+    fp.Temperature_Regions = obj.Temperature_Regions || [];
+    if ((!fp.Temperature_Regions || fp.Temperature_Regions.length === 0) && fp.areas && fp.areas.length) {
+      fp.Temperature_Regions = fp.areas.map(a => {
+        const subregion = {};
+        (a.vertices || []).forEach((v, i) => {
+          let coord = null;
+          if (typeof v === 'string') {
+            // try resolving node id -> coordinates
+            const node = fp.wall_graph.nodes.find(n => n.id === v);
+            if (node) coord = [node.x, node.y];
+          } else if (Array.isArray(v) && v.length >= 2) {
+            coord = [v[0], v[1]];
+          } else if (v && typeof v.x === 'number' && typeof v.y === 'number') {
+            coord = [v.x, v.y];
+          }
+          if (coord) subregion[`Pt_${i}`] = coord;
+        });
+
+        // ensure closed polygon by repeating the first point
+        if ((a.vertices || []).length > 0) {
+          const first = a.vertices[0];
+          let firstCoord = null;
+          if (typeof first === 'string') {
+            const node = fp.wall_graph.nodes.find(n => n.id === first);
+            if (node) firstCoord = [node.x, node.y];
+          } else if (Array.isArray(first) && first.length >= 2) {
+            firstCoord = [first[0], first[1]];
+          } else if (first && typeof first.x === 'number' && typeof first.y === 'number') {
+            firstCoord = [first.x, first.y];
+          }
+          if (firstCoord) subregion[`Pt_${(a.vertices || []).length}`] = firstCoord;
+        }
+
+        return {
+          id: a.id || fp._genId('tr'),
+          name: a.label || a.id || 'region',
+          type: a.type || 'internal',
+          color: a.color || null,
+          alpha: typeof a.alpha === 'number' ? a.alpha : 0.3,
+          air_requirement: a.air_requirement || 7.5,
+          subregions: [subregion]
+        };
+      });
+    }
+
+    // Normalize Plan_Boundary polygons and Temperature_Regions subregion
+    // coordinates to the canonical points produced above. This removes
+    // duplicate coordinates and ensures visual consistency.
+    const pxConv = savedPxPerUnit || 1;
+    // Normalize Plan_Boundary (Pt_* keyed objects)
+    fp.Plan_Boundary = (fp.Plan_Boundary || []).map(polyObj => {
+      const keys = Object.keys(polyObj).sort((a, b) => {
+        const ai = parseInt(a.split('_')[1] || '0', 10);
+        const bi = parseInt(b.split('_')[1] || '0', 10);
+        return ai - bi;
+      });
+      const coords = keys.map(k => polyObj[k]).filter(Boolean).map(v => [ (v[0] || 0) * pxConv, (v[1] || 0) * pxConv ]);
+      const out = {};
+      coords.forEach((c, i) => {
+        const found = findCanonical(c[0], c[1]);
+        const use = found ? [found.x, found.y, (c[2] || 0)] : [c[0], c[1], (c[2] || 0)];
+        out[`Pt_${i}`] = use;
+      });
+      // ensure closed: repeat first point once at end
+      if (coords.length > 0) {
+        const first = coords[0];
+        const found = findCanonical(first[0], first[1]);
+        const use = found ? [found.x, found.y, (first[2] || 0)] : [first[0], first[1], (first[2] || 0)];
+        out[`Pt_${coords.length}`] = use;
+      }
+      return out;
+    });
+
+    // Normalize Temperature_Regions subregions coordinates
+    (fp.Temperature_Regions || []).forEach(region => {
+      region.subregions = (region.subregions || []).map(sub => {
+        // if sub is Pt_* keyed object
+        const keys = Object.keys(sub || {}).sort((a, b) => {
+          const ai = parseInt(a.split('_')[1] || '0', 10);
+          const bi = parseInt(b.split('_')[1] || '0', 10);
+          return ai - bi;
+        });
+        const coords = keys.map(k => sub[k]).filter(Boolean).map(v => [v[0], v[1]]);
+        const out = {};
+        coords.forEach((c, i) => {
+          const found = findCanonical(c[0], c[1]);
+          const use = found ? [found.x, found.y] : [c[0], c[1]];
+          out[`Pt_${i}`] = use;
+        });
+        if (coords.length > 0) {
+          const first = coords[0];
+          const found = findCanonical(first[0], first[1]);
+          const use = found ? [found.x, found.y] : [first[0], first[1]];
+          out[`Pt_${coords.length}`] = use;
+        }
+        return out;
+      });
+    });
+
+    // If no explicit boundaryArea was provided, and we have a Plan_Boundary
+    // convert the first Plan_Boundary polygon into a boundaryArea so the
+    // existing renderer (which draws boundaryArea) can display it directly.
+    if (!fp.boundaryArea && fp.Plan_Boundary && fp.Plan_Boundary.length > 0) {
+      const poly = fp.Plan_Boundary[0] || {};
+      const keys = Object.keys(poly).sort((a, b) => {
+        const ai = parseInt(a.split('_')[1] || '0', 10);
+        const bi = parseInt(b.split('_')[1] || '0', 10);
+        return ai - bi;
+      });
+      const verts = keys.map(k => poly[k]).filter(Boolean).map(v => {
+        const x = v[0]; const y = v[1];
+        const found = findCanonical(x, y);
+        return found ? found.id : [x, y];
+      }).filter(Boolean);
+      if (verts.length) {
+        fp.boundaryArea = { id: fp.boundaryArea?.id || 'boundary_0', label: 'boundary', vertices: verts };
+      }
+    }
+
+      // Canonicalize Columns: convert Pt_* keyed footprint objects into
+      // { id, vertices: [pointId,...] } where vertices reference canonical
+      // point ids. This reduces duplicate coordinates and enables reuse.
+      fp.Columns = (fp.Columns || []).map((col, ci) => {
+        // if already in canonical form (has vertices array), keep
+        if (Array.isArray(col.vertices) && col.vertices.length) {
+          return { id: col.id || `col_${ci}`, vertices: col.vertices };
+        }
+        // otherwise assume Pt_* keyed object
+        const keys = Object.keys(col || {}).sort((a, b) => {
+          const ai = parseInt(a.split('_')[1] || '0', 10);
+          const bi = parseInt(b.split('_')[1] || '0', 10);
+          return ai - bi;
+        });
+        const verts = keys.map(k => col[k]).filter(Boolean).map(v => [v[0], v[1]]);
+        const vertexIds = verts.map(c => {
+          const found = findCanonical(c[0], c[1]);
+          if (found) return found.id;
+          // create new canonical point
+          const nid = fp._genId('n');
+          const entry = { id: nid, x: c[0], y: c[1] };
+          canonical.push(entry);
+          fp.Points.push({ id: nid, x: c[0], y: c[1] });
+          fp.wall_graph.nodes.push({ id: nid, x: c[0], y: c[1] });
+          return nid;
+        }).filter(Boolean);
+        return { id: col.id || `col_${ci}`, vertices: vertexIds };
+      });
+
+      // Canonicalize Beams: convert Pt_0/Pt_1 keyed objects into
+      // { id, p0: pointId, p1: pointId, height }
+      fp.Beams = (fp.Beams || []).map((b, bi) => {
+        if (b.p0 && b.p1) return { id: b.id || `beam_${bi}`, p0: b.p0, p1: b.p1, height: b.height || b.h || 0 };
+        const p0 = b.Pt_0 || b.Pt0 || null;
+        const p1 = b.Pt_1 || b.Pt1 || null;
+        const toId = (pt) => {
+          if (!pt) return null;
+          const x = pt[0];
+          const y = pt[1];
+          const found = findCanonical(x, y);
+          if (found) return found.id;
+          const nid = fp._genId('n');
+          const entry = { id: nid, x, y };
+          canonical.push(entry);
+          fp.Points.push({ id: nid, x, y });
+          fp.wall_graph.nodes.push({ id: nid, x, y });
+          return nid;
+        };
+        const id0 = toId(p0);
+        const id1 = toId(p1);
+        return { id: b.id || `beam_${bi}`, p0: id0, p1: id1, height: b.Pt_0 && b.Pt_0[2] ? b.Pt_0[2] : (b.height || 0) };
+      });
 
     // Load explicit boundaryArea if present (converted from saved units -> pixels)
     if (obj.boundaryArea && Array.isArray(obj.boundaryArea.vertices)) {

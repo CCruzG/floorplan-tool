@@ -17,6 +17,8 @@ export const SNAP_TO_EDGE_DIST = 8;    // pixels
 
 export function bindUI(store, canvas, mouse) {
   const ctx = canvas.getContext('2d');
+  // initialize UI layer controls (hook into the active store)
+  if (typeof setupLayerControls === 'function') setupLayerControls(store);
 
   // Redraw on store change
   store.onChange(() => {
@@ -61,6 +63,22 @@ export function bindUI(store, canvas, mouse) {
       store.setMode("core");
       store.tempCoreActive = true;
       store.notify();
+    });
+  }
+
+  // Lock button - toggle lock on selected segment
+  const lockBtn = document.getElementById('lockBtn');
+  if (lockBtn) {
+    lockBtn.addEventListener('click', () => {
+      if (store.mode === "edit") {
+        const seg = store.active.selectedSegment;
+        if (seg != null) {
+          const edge = store.active.wall_graph.edges[seg];
+          edge.locked = !edge.locked;
+          store.update(store.active);
+          console.log("Segment lock toggled", store.active.wall_graph.edges[seg].locked);
+        }
+      }
     });
   }
 
@@ -433,7 +451,9 @@ export function bindUI(store, canvas, mouse) {
   
   const layerCheckboxes = {
     planBoundaryLayer: 'Plan_Boundary',
+    boundaryAreaLayer: 'Boundary_Area',
     coreBoundaryLayer: 'Core_Boundary',
+    coreAreaLayer: 'Core_Area',
     columnsLayer: 'Columns',
     temperatureRegionsLayer: 'Temperature_Regions',
     beamsLayer: 'Beams',
@@ -447,14 +467,20 @@ export function bindUI(store, canvas, mouse) {
     const checkbox = document.getElementById(checkboxId);
     if (checkbox) {
       // Set initial state - use default if store.active is null
-      checkbox.checked = store.active?.layers?.[layerName] ?? (layerName === 'Plan_Boundary' || layerName === 'Core_Boundary' || layerName === 'Columns' || layerName === 'Temperature_Regions');
+      checkbox.checked = store.active?.layers?.[layerName] ?? (layerName === 'Plan_Boundary' || layerName === 'Boundary_Area' || layerName === 'Core_Boundary' || layerName === 'Core_Area' || layerName === 'Columns' || layerName === 'Temperature_Regions');
       
       // Add event listener
       checkbox.addEventListener('change', () => {
         if (store.active) {
+          console.log(`Before: Layer ${layerName} = ${store.active.layers?.[layerName]}`);
           store.active.setLayerVisibility(layerName, checkbox.checked);
+          console.log(`After: Layer ${layerName} = ${store.active.layers?.[layerName]}, checkbox = ${checkbox.checked}`);
+          
+          // Mark this checkbox as the one that triggered the change
+          checkbox._justChanged = true;
           store.notify(); // Trigger re-render
-          console.log(`Layer ${layerName} ${checkbox.checked ? 'enabled' : 'disabled'}`);
+          // Clear the flag after a short delay
+          setTimeout(() => { checkbox._justChanged = false; }, 10);
         }
       });
     }
@@ -464,7 +490,8 @@ export function bindUI(store, canvas, mouse) {
   store.onChange(() => {
     Object.entries(layerCheckboxes).forEach(([checkboxId, layerName]) => {
       const checkbox = document.getElementById(checkboxId);
-      if (checkbox && store.active && store.active.layers) {
+      // Skip updating if this checkbox just triggered the change
+      if (checkbox && !checkbox._justChanged && store.active && store.active.layers && layerName in store.active.layers) {
         checkbox.checked = store.active.layers[layerName];
       }
     });
@@ -500,6 +527,150 @@ export function bindUI(store, canvas, mouse) {
         const result = await window.electronAPI.openFloorplan();
         if (result?.success) {
           const fp = FloorPlan.fromJSON(result.data);
+          // If the loaded file contains a Plan_Boundary (raw Pt_* keyed objects),
+          // create a boundaryArea so the renderer (which draws boundaryArea) will
+          // display the plan boundary immediately. This is a forgiving, schema-
+          // agnostic approach to visualise legacy duct_plan.json files "as-is".
+          try {
+            const raw = result.data;
+            if (!fp.boundaryArea && raw.Plan_Boundary && Array.isArray(raw.Plan_Boundary) && raw.Plan_Boundary.length) {
+              // Normalize Plan_Boundary coordinates (assumed to be in mm) into
+              // a 0..50000 coordinate space so large real-world values render
+              // sensibly on the canvas. We preserve aspect ratio by scaling
+              // uniformly to fit the largest dimension into 50000.
+              const poly = raw.Plan_Boundary[0];
+              const keys = Object.keys(poly || {}).sort((a, b) => {
+                const ai = parseInt(a.split('_')[1] || '0', 10);
+                const bi = parseInt(b.split('_')[1] || '0', 10);
+                return ai - bi;
+              });
+              // Read raw coords (units as stored in the file, e.g., mm)
+              const rawCoords = keys.map(k => poly[k]).filter(Boolean).map(v => [ Number(v[0] || 0), Number(v[1] || 0) ]).filter(c => !Number.isNaN(c[0]) && !Number.isNaN(c[1]));
+              
+              // Also extract Core_Boundary if present
+              let rawCoreCoords = [];
+              if (raw.Core_Boundary && Array.isArray(raw.Core_Boundary) && raw.Core_Boundary.length) {
+                const corePoly = raw.Core_Boundary[0];
+                const coreKeys = Object.keys(corePoly || {}).sort((a, b) => {
+                  const ai = parseInt(a.split('_')[1] || '0', 10);
+                  const bi = parseInt(b.split('_')[1] || '0', 10);
+                  return ai - bi;
+                });
+                rawCoreCoords = coreKeys.map(k => corePoly[k]).filter(Boolean).map(v => [ Number(v[0] || 0), Number(v[1] || 0) ]).filter(c => !Number.isNaN(c[0]) && !Number.isNaN(c[1]));
+              }
+
+              // Also extract Columns if present
+              let rawColumnsData = [];
+              if (raw.Columns && Array.isArray(raw.Columns)) {
+                rawColumnsData = raw.Columns.map(column => {
+                  const keys = Object.keys(column || {}).sort((a, b) => {
+                    const ai = parseInt(a.split('_')[1] || '0', 10);
+                    const bi = parseInt(b.split('_')[1] || '0', 10);
+                    return ai - bi;
+                  });
+                  return keys.map(k => column[k]).filter(Boolean).map(v => [ Number(v[0] || 0), Number(v[1] || 0) ]).filter(c => !Number.isNaN(c[0]) && !Number.isNaN(c[1]));
+                }).filter(columnCoords => columnCoords.length > 0);
+              }
+              
+              if (rawCoords.length) {
+                // Compute combined bounding box for plan, core boundaries, and columns
+                const allCoords = [...rawCoords, ...rawCoreCoords];
+                rawColumnsData.forEach(columnCoords => allCoords.push(...columnCoords));
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                allCoords.forEach(([x, y]) => {
+                  if (x < minX) minX = x; if (y < minY) minY = y;
+                  if (x > maxX) maxX = x; if (y > maxY) maxY = y;
+                });
+                const width = Math.max(0, maxX - minX);
+                const height = Math.max(0, maxY - minY);
+                const maxDim = Math.max(width, height, 1);
+                const scale = 50000 / maxDim;
+                
+                // Normalize plan boundary coords in [0,50000]
+                const verts = rawCoords.map(([x, y]) => {
+                  const nx = (x - minX) * scale;
+                  const ny = (y - minY) * scale;
+                  return [nx, ny];
+                });
+                
+                // Normalize core boundary coords in [0,50000]
+                const coreVerts = rawCoreCoords.map(([x, y]) => {
+                  const nx = (x - minX) * scale;
+                  const ny = (y - minY) * scale;
+                  return [nx, ny];
+                });
+
+                // Normalize columns coords in [0,50000]
+                const normalizedColumns = rawColumnsData.map(columnCoords => 
+                  columnCoords.map(([x, y]) => {
+                    const nx = (x - minX) * scale;
+                    const ny = (y - minY) * scale;
+                    return [nx, ny];
+                  })
+                );
+                
+                if (verts.length) {
+                  fp.boundaryArea = { id: fp.boundaryArea?.id || 'boundary_0', label: 'boundary', vertices: verts };
+                  
+                  // Add normalized core boundary if present
+                  if (coreVerts.length) {
+                    fp.coreArea = { id: 'core_0', label: 'core', vertices: coreVerts };
+                    console.log('Core boundary loaded with', coreVerts.length, 'vertices:', coreVerts);
+                  }
+
+                  // Add normalized columns if present
+                  if (normalizedColumns.length) {
+                    fp.columnsData = normalizedColumns.map((columnVerts, i) => ({
+                      id: `column_${i}`,
+                      label: `Column ${i + 1}`,
+                      vertices: columnVerts
+                    }));
+                    console.log('Columns loaded:', fp.columnsData.length, 'columns');
+                  }
+
+                  // Initialize layer visibility controls
+                  fp.layers = {
+                    planBoundary: true,
+                    coreBoundary: true,
+                    columns: true
+                  };
+                  
+                  // Request that the renderer show only the boundary vertices
+                  // for this imported plan (minimal visualisation mode).
+                  fp._renderOnlyBoundaryVertices = true;
+
+                  // Compute a view transform so the normalized boundaries fit the
+                  // canvas. Store in the floorplan so the renderer can apply it.
+                  try {
+                    const bbMinX = 0; // normalized coords start at 0
+                    const bbMinY = 0;
+                    // Get the actual max from the normalized coordinates
+                    const allNormalizedCoords = [...verts, ...coreVerts];
+                    normalizedColumns.forEach(columnVerts => allNormalizedCoords.push(...columnVerts));
+                    const bbMaxX = allNormalizedCoords.length > 0 ? Math.max(...allNormalizedCoords.map(v => v[0])) : 0;
+                    const bbMaxY = allNormalizedCoords.length > 0 ? Math.max(...allNormalizedCoords.map(v => v[1])) : 0;
+                    const bbW = Math.max(1, bbMaxX - bbMinX);
+                    const bbH = Math.max(1, bbMaxY - bbMinY);
+                    const margin = 0.9; // keep 10% padding
+                    const scaleX = canvas.width / bbW;
+                    const scaleY = canvas.height / bbH;
+                    const viewScale = Math.min(scaleX, scaleY) * margin;
+                    const offsetX = (canvas.width - (bbW * viewScale)) / 2 - (bbMinX * viewScale);
+                    const offsetY = (canvas.height - (bbH * viewScale)) / 2 - (bbMinY * viewScale);
+                    fp._view = { scale: viewScale, offsetX, offsetY };
+                    console.log('View transform:', fp._view);
+                    console.log('Canvas size:', canvas.width, 'x', canvas.height);
+                    console.log('Bounding box:', { bbMinX, bbMinY, bbMaxX, bbMaxY, bbW, bbH });
+                  } catch (err) {
+                    console.warn('Failed to compute view transform for boundary-only view', err);
+                    fp._view = null;
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            console.warn('Failed to create boundaryArea from Plan_Boundary', err);
+          }
           store.add(fp);          // set as active + push to history
           store.setActive(fp);    // triggers notify()
 
@@ -519,14 +690,21 @@ export function bindUI(store, canvas, mouse) {
           }
           store.setMode("edit");
 
-          // Repopulate requirements form
+          // Repopulate requirements form (guard each element in case UI panel
+          // is not present in a minimal embed or during tests)
           const req = fp.requirements || {};
-          document.getElementById("bedroomsInput").value = req.bedrooms || 0;
-          document.getElementById("bathroomsInput").value = req.bathrooms || 0;
-          document.getElementById("openKitchenChk").checked = !!req.openKitchen;
-          document.getElementById("balconyChk").checked = !!req.balcony;
-          document.getElementById("styleSelect").value = req.style || "";
-          document.getElementById("notesInput").value = req.notes || "";
+          const bedroomsEl = document.getElementById("bedroomsInput");
+          if (bedroomsEl) bedroomsEl.value = req.bedrooms || 0;
+          const bathroomsEl = document.getElementById("bathroomsInput");
+          if (bathroomsEl) bathroomsEl.value = req.bathrooms || 0;
+          const openKitchenEl = document.getElementById("openKitchenChk");
+          if (openKitchenEl) openKitchenEl.checked = !!req.openKitchen;
+          const balconyEl = document.getElementById("balconyChk");
+          if (balconyEl) balconyEl.checked = !!req.balcony;
+          const styleEl = document.getElementById("styleSelect");
+          if (styleEl) styleEl.value = req.style || "";
+          const notesEl = document.getElementById("notesInput");
+          if (notesEl) notesEl.value = req.notes || "";
         }
       } catch (err) {
         console.error("Open error:", err);
@@ -552,13 +730,14 @@ export function bindUI(store, canvas, mouse) {
     });
   }
 
-  const btnRefine = document.getElementById('btn-refine-ai');
+  const btnOptimise = document.getElementById('optimiseBtn');
   const aiDebug = document.getElementById('ai-debug');
   const aiError = document.getElementById('ai-error');
 
-  btnRefine.addEventListener('click', async () => {
-    const fp = store.active;
-    if (!fp) return;
+  if (btnOptimise) {
+    btnOptimise.addEventListener('click', async () => {
+      const fp = store.active;
+      if (!fp) return;
 
     // 1) Serialize
     const planJson = fp.toJSON();
@@ -692,6 +871,7 @@ export function bindUI(store, canvas, mouse) {
     }
 
   });
+  }
 
   // Wire color picker apply button (inside bindUI so `store` is available)
   const applyBtn = document.getElementById('applyAreaColorBtn');
@@ -928,5 +1108,41 @@ function commitCore(store) {
   console.log("Core boundary added successfully");
 }
 
-  // (moved into bindUI where `store` is in scope)
+  // Layer control functionality (exposed as a setup function so it can be
+  // initialized from within `bindUI` where the `store` parameter exists).
+  function setupLayerControls(store) {
+    const layerControls = {
+      planBoundaryLayer: 'planBoundary',
+      coreBoundaryLayer: 'coreBoundary', 
+      columnsLayer: 'columns',
+      temperatureRegionsLayer: 'Temperature_Regions',
+      beamsLayer: 'beams',
+      pointsLayer: 'points',
+      edgesLayer: 'edges',
+      ductsLayer: 'ducts',
+      ductPlanLayer: 'ductPlan'
+    };
 
+    Object.entries(layerControls).forEach(([elementId, layerKey]) => {
+      const checkbox = document.getElementById(elementId);
+      if (checkbox) {
+        checkbox.addEventListener('change', () => {
+          const fp = store.active;
+          if (fp) {
+            if (!fp.layers) fp.layers = {};
+            fp.layers[layerKey] = checkbox.checked;
+            // Trigger re-render
+            store.notify();
+          }
+        });
+
+        // Initialize checkbox state when plan changes
+        store.onChange(() => {
+          const fp = store.active;
+          if (fp && fp.layers && fp.layers.hasOwnProperty(layerKey)) {
+            checkbox.checked = fp.layers[layerKey];
+          }
+        });
+      }
+    });
+  }
