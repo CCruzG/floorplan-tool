@@ -14,11 +14,372 @@ import { renderPrompt } from '../models/promptRenderer.js';
 export const SNAP_TO_NODE_DIST = 10;   // pixels
 export const SNAP_TO_EDGE_DIST = 8;    // pixels
 
+function snapTo45(lastX, lastY, x, y) {
+  const dx = x - lastX;
+  const dy = y - lastY;
+  const r = Math.hypot(dx, dy);
+  if (r === 0) return { x, y };
+  const angle = Math.atan2(dy, dx);
+  const snapAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+  return {
+    x: lastX + r * Math.cos(snapAngle),
+    y: lastY + r * Math.sin(snapAngle)
+  };
+}
+
+// Shared canvas grid display + snap settings (updated by the Canvas Grid panel)
+const gridSettings = {
+  snapEnabled: true,
+  spacingOverride: 2, // plan units; null = auto-compute
+  lineOpacity: 0.5,
+};
+
+// Returns the canvas-pixel spacing of one grid cell. Respects a manual
+// spacingOverride from gridSettings; otherwise rounds to a "nice" interval
+// targeting ~40 px visual spacing.
+function _gridIntervalPx(fp) {
+  const pxPerUnit = fp?.units?.pxPerUnit || 1;
+  if (gridSettings.spacingOverride > 0) {
+    return gridSettings.spacingOverride * pxPerUnit;
+  }
+  const raw = 40 / pxPerUnit;
+  if (!isFinite(raw) || raw <= 0) return 40;
+  const mag  = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const nice = norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10;
+  return nice * mag * pxPerUnit;
+}
+// Hard-snap a canvas coordinate to the nearest grid line.
+function _snapGrid(coord, intervalPx) {
+  return Math.round(coord / intervalPx) * intervalPx;
+}
+
+/**
+ * Refresh the #inspectorPanel to show the currently selected element’s
+ * properties, or an empty-state message when nothing is selected.
+ */
+function refreshInspector(fp, store) {
+  const panel = document.getElementById('inspectorPanel');
+  if (!panel) return;
+
+  // ── Grid Point inspector ────────────────────────────────────────────────
+  const selPts = fp?.selectedPoints;
+  if (selPts?.size > 0) {
+    const selected = (fp.Points || []).filter(p => selPts.has(p.id));
+    if (selected.length === 0) { panel.innerHTML = '<p class="inspector-empty">NOTHING SELECTED</p>'; return; }
+    const pxPerUnit = fp.units?.pxPerUnit || 1;
+    const unitLabel = fp.units?.length || 'mm';
+    const fmt = v => (v / pxPerUnit).toFixed(4);
+
+    if (selected.length === 1) {
+      const pt = selected[0];
+      panel.innerHTML = [
+        `<div class="inspector-header"><span class="inspector-kind">Grid Point</span></div>`,
+        `<div class="inspector-body">`,
+        `<div class="inspector-row"><span class="inspector-label">X</span><span class="inspector-value">${fmt(pt.x)}&nbsp;${unitLabel}</span></div>`,
+        `<div class="inspector-row"><span class="inspector-label">Y</span><span class="inspector-value">${fmt(pt.y)}&nbsp;${unitLabel}</span></div>`,
+        `<div class="inspector-row"><span class="inspector-label">Column</span><input id="insp-pt-column" type="checkbox"${pt.column !== false ? ' checked' : ''}></div>`,
+        `<div class="inspector-row"><span class="inspector-label">Mechanical</span><input id="insp-pt-mechanical" type="checkbox"${pt.mechanical !== false ? ' checked' : ''}></div>`,
+        `</div>`
+      ].join('');
+      panel.querySelector('#insp-pt-column').addEventListener('change', e => {
+        pt.column = e.target.checked; store.update(fp);
+      });
+      panel.querySelector('#insp-pt-mechanical').addEventListener('change', e => {
+        pt.mechanical = e.target.checked; store.update(fp);
+      });
+    } else {
+      // Mixed-value helpers: true if all match, null if mixed
+      const allColumn     = selected.every(p => p.column !== false);
+      const allNotColumn  = selected.every(p => p.column === false);
+      const allMech       = selected.every(p => p.mechanical !== false);
+      const allNotMech    = selected.every(p => p.mechanical === false);
+      panel.innerHTML = [
+        `<div class="inspector-header"><span class="inspector-kind">Grid Points</span><span class="inspector-value">${selected.length} selected</span></div>`,
+        `<div class="inspector-body">`,
+        `<div class="inspector-row"><span class="inspector-label">Column</span>`,
+        `<input id="insp-pt-column" type="checkbox"${allColumn ? ' checked' : ''}${(!allColumn && !allNotColumn) ? ' data-mixed="true"' : ''}></div>`,
+        `<div class="inspector-row"><span class="inspector-label">Mechanical</span>`,
+        `<input id="insp-pt-mechanical" type="checkbox"${allMech ? ' checked' : ''}${(!allMech && !allNotMech) ? ' data-mixed="true"' : ''}></div>`,
+        `</div>`
+      ].join('');
+      // Show indeterminate state for mixed values
+      const colCb = panel.querySelector('#insp-pt-column');
+      const mechCb = panel.querySelector('#insp-pt-mechanical');
+      if (!allColumn && !allNotColumn) colCb.indeterminate = true;
+      if (!allMech && !allNotMech) mechCb.indeterminate = true;
+      colCb.addEventListener('change', e => {
+        selected.forEach(p => { p.column = e.target.checked; }); store.update(fp);
+      });
+      mechCb.addEventListener('change', e => {
+        selected.forEach(p => { p.mechanical = e.target.checked; }); store.update(fp);
+      });
+    }
+    return;
+  }
+
+  // ── Core inspector ────────────────────────────────────────────────────────
+  if (fp?.selectedCore) {
+    const coreWalls = (fp.Walls || []).filter(w => w.wallType === 'core');
+    panel.innerHTML = [
+      `<div class="inspector-header"><span class="inspector-kind">Core</span></div>`,
+      `<div class="inspector-body">`,
+      `<div class="inspector-row"><span class="inspector-label">Walls</span><span class="inspector-value">${coreWalls.length}</span></div>`,
+      `<div class="inspector-row">`,
+      `<button id="insp-core-delete" class="insp-btn insp-btn-danger">Delete Core</button>`,
+      `</div>`,
+      `</div>`
+    ].join('');
+    panel.querySelector('#insp-core-delete').addEventListener('click', () => {
+      fp.deleteCore();
+      store.update(fp);
+    });
+    return;
+  }
+
+  const sel = fp?.selectedSegment;
+  if (!fp || sel == null) {
+    panel.innerHTML = '<p class="inspector-empty">NOTHING SELECTED</p>';
+    return;
+  }
+
+  const pxPerUnit = fp.units?.pxPerUnit || 1;
+  const unitLabel = fp.units?.length || 'mm';
+
+  const edge = fp.wall_graph.edges[sel];
+  if (!edge) {
+    panel.innerHTML = '<p class="inspector-empty">NOTHING SELECTED</p>';
+    return;
+  }
+
+  const n1 = fp.wall_graph.nodes.find(n => n.id === edge.v1);
+  const n2 = fp.wall_graph.nodes.find(n => n.id === edge.v2);
+  const fmt = v => (v / pxPerUnit).toFixed(4);
+
+  const length = (n1 && n2)
+    ? Math.hypot((n2.x - n1.x) / pxPerUnit, (n2.y - n1.y) / pxPerUnit).toFixed(4)
+    : '?';
+
+  const EPS = 1;
+  let wall = n1 && n2
+    ? (fp.Walls || []).find(w =>
+        Math.abs(w.start.x - n1.x) < EPS && Math.abs(w.start.y - n1.y) < EPS &&
+        Math.abs(w.end.x   - n2.x) < EPS && Math.abs(w.end.y   - n2.y) < EPS)
+    : null;
+
+  const ensureWall = () => {
+    if (!wall && n1 && n2) {
+      fp.addWall(n1, n2, { wallType: 'boundary', translucent: false, locked: edge.locked || false });
+      wall = fp.Walls[fp.Walls.length - 1];
+    }
+    return wall;
+  };
+
+  const wallType    = wall?.wallType    ?? 'boundary';
+  const translucent = wall?.translucent ?? false;
+  const locked      = edge.locked || false;
+  const openings    = wall?.openings    ?? [];
+
+  const openingRows = openings.map((o, i) => {
+    const isWin = o.openingKind === 'window';
+    return [
+      `<div class="inspector-opening" data-oidx="${i}">`,
+      `<select class="insp-op-kind insp-ctrl" data-oidx="${i}">`,
+      `<option value="entrance"${o.openingKind === 'entrance' ? ' selected' : ''}>entrance</option>`,
+      `<option value="door"${o.openingKind === 'door' ? ' selected' : ''}>door</option>`,
+      `<option value="window"${o.openingKind === 'window' ? ' selected' : ''}>window</option>`,
+      `<option value="opening"${o.openingKind === 'opening' ? ' selected' : ''}>opening</option>`,
+      `</select>`,
+      `<label class="insp-op-field">@ <input class="insp-op-t insp-ctrl" data-oidx="${i}" type="number" min="0" max="1" step="0.01" value="${o.t.toFixed(2)}"></label>`,
+      `<label class="insp-op-field">w <input class="insp-op-w insp-ctrl" data-oidx="${i}" type="number" min="0" step="10" value="${o.width}"></label>`,
+      isWin ? `<label class="insp-op-field">h <input class="insp-op-h insp-ctrl" data-oidx="${i}" type="number" min="0" step="10" value="${o.height}"></label>` : '',
+      isWin ? `<label class="insp-op-field">sill <input class="insp-op-sill insp-ctrl" data-oidx="${i}" type="number" min="0" step="10" value="${o.sillHeight}"></label>` : '',
+      `<button class="insp-op-remove insp-ctrl" data-oidx="${i}" title="Remove">&times;</button>`,
+      `</div>`
+    ].join('');
+  }).join('');
+
+  panel.innerHTML = [
+    `<div class="inspector-header">`,
+    `<span class="inspector-kind">Wall</span>`,
+    `<select id="insp-wall-type" class="inspector-type-select inspector-type-${wallType}">`,
+    `<option value="boundary"${wallType === 'boundary' ? ' selected' : ''}>boundary</option>`,
+    `<option value="core"${wallType === 'core' ? ' selected' : ''}>core</option>`,
+    `<option value="partition"${wallType === 'partition' ? ' selected' : ''}>partition</option>`,
+    `</select></div>`,
+    `<div class="inspector-body">`,
+    `<div class="inspector-row"><span class="inspector-label">Start X</span>`,
+    `<input id="insp-sx" class="inspector-coord-input" type="number" step="any" value="${n1 ? fmt(n1.x) : ''}"></div>`,
+    `<div class="inspector-row"><span class="inspector-label">Start Y</span>`,
+    `<input id="insp-sy" class="inspector-coord-input" type="number" step="any" value="${n1 ? fmt(n1.y) : ''}"></div>`,
+    `<div class="inspector-row"><span class="inspector-label">End X</span>`,
+    `<input id="insp-ex" class="inspector-coord-input" type="number" step="any" value="${n2 ? fmt(n2.x) : ''}"></div>`,
+    `<div class="inspector-row"><span class="inspector-label">End Y</span>`,
+    `<input id="insp-ey" class="inspector-coord-input" type="number" step="any" value="${n2 ? fmt(n2.y) : ''}"></div>`,
+    `<div class="inspector-row"><span class="inspector-label">Length</span>`,
+    `<span class="inspector-value">${length}\u00a0${unitLabel}</span></div>`,
+    `<div class="inspector-row"><span class="inspector-label">Locked</span>`,
+    `<input id="insp-locked" type="checkbox"${locked ? ' checked' : ''}></div>`,
+    `<div class="inspector-row"><span class="inspector-label">Translucent</span>`,
+    `<input id="insp-translucent" type="checkbox"${translucent ? ' checked' : ''}></div>`,
+    `<div class="inspector-section">`,
+    `<span class="inspector-label">Openings</span>`,
+    `<div class="inspector-openings">${openingRows || '<span class="inspector-empty-sub">None</span>'}</div>`,
+    `<div class="inspector-add-opening">`,
+    `<select id="insp-new-kind"><option value="door">door</option><option value="window">window</option><option value="entrance">entrance</option><option value="opening">opening</option></select>`,
+    `<label class="insp-op-field">@ <input id="insp-new-t" type="number" min="0" max="1" step="0.05" value="0.5"></label>`,
+    `<label class="insp-op-field">w <input id="insp-new-w" type="number" min="0" step="10" value="1200"></label>`,
+    `<button id="insp-add-op">+ Add</button>`,
+    `</div></div></div>`
+  ].join('');
+
+  // ── Wire event handlers ──────────────────────────────────────────────────
+
+  panel.querySelector('#insp-wall-type').addEventListener('change', e => {
+    const w = ensureWall();
+    if (w) {
+      w.wallType = e.target.value;
+      e.target.className = `inspector-type-select inspector-type-${w.wallType}`;
+      store.update(fp);
+    }
+  });
+
+  panel.querySelector('#insp-locked').addEventListener('change', e => {
+    edge.locked = e.target.checked;
+    const w = ensureWall();
+    if (w) w.locked = e.target.checked;
+    store.update(fp);
+  });
+
+  panel.querySelector('#insp-translucent').addEventListener('change', e => {
+    const w = ensureWall();
+    if (w) { w.translucent = e.target.checked; store.update(fp); }
+  });
+
+  const applyCoord = (node, axis, rawVal) => {
+    const val = parseFloat(rawVal);
+    if (isNaN(val) || !node) return;
+    node[axis] = val * pxPerUnit;
+    if (wall) {
+      if (node.id === edge.v1) wall.start[axis] = node[axis];
+      else                     wall.end[axis]   = node[axis];
+    }
+    store.update(fp);
+  };
+  const wireCoord = (id, node, axis) => {
+    const el = panel.querySelector('#' + id);
+    if (!el || !node) return;
+    el.addEventListener('blur',    ()  => applyCoord(node, axis, el.value));
+    el.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); applyCoord(node, axis, el.value); } });
+  };
+  wireCoord('insp-sx', n1, 'x');
+  wireCoord('insp-sy', n1, 'y');
+  wireCoord('insp-ex', n2, 'x');
+  wireCoord('insp-ey', n2, 'y');
+
+  panel.querySelectorAll('.insp-ctrl').forEach(el => {
+    const idx = parseInt(el.dataset.oidx, 10);
+    const o   = openings[idx];
+    if (o === undefined) return;
+    if (el.matches('.insp-op-kind')) {
+      el.addEventListener('change', () => { o.openingKind = el.value; store.update(fp); });
+    } else if (el.matches('.insp-op-t')) {
+      el.addEventListener('change', () => { o.t = Math.max(0, Math.min(1, parseFloat(el.value) || 0)); store.update(fp); });
+    } else if (el.matches('.insp-op-w')) {
+      el.addEventListener('change', () => { o.width = parseFloat(el.value) || o.width; store.update(fp); });
+    } else if (el.matches('.insp-op-h')) {
+      el.addEventListener('change', () => { o.height = parseFloat(el.value) || o.height; store.update(fp); });
+    } else if (el.matches('.insp-op-sill')) {
+      el.addEventListener('change', () => { o.sillHeight = parseFloat(el.value) || 0; store.update(fp); });
+    } else if (el.matches('.insp-op-remove')) {
+      el.addEventListener('click', () => {
+        const w = ensureWall();
+        if (w) { fp.removeOpeningFromWall(w.id, o.id); store.update(fp); }
+      });
+    }
+  });
+
+  panel.querySelector('#insp-add-op').addEventListener('click', () => {
+    const w = ensureWall();
+    if (!w) return;
+    const kind  = panel.querySelector('#insp-new-kind').value;
+    const t     = parseFloat(panel.querySelector('#insp-new-t').value) || 0.5;
+    const width = parseFloat(panel.querySelector('#insp-new-w').value) || 1200;
+    fp.addOpeningToWall(w.id, t, { openingKind: kind, width });
+    store.update(fp);
+  });
+}
+
+
+function setupCanvasGridPanel(onUpdate) {
+  const snapCb    = document.getElementById('cgSnapEnabled');
+  const spacingIn  = document.getElementById('cgSpacing');
+  const opacityIn  = document.getElementById('cgOpacity');
+  const opacityPct = document.getElementById('cgOpacityPct');
+  const unitLbl    = document.getElementById('cgSpacingUnit');
+
+  // Keep spacing unit label in sync with canvas unit selector
+  function syncUnit() {
+    const sel = document.getElementById('canvasUnitSelect');
+    if (unitLbl && sel) unitLbl.textContent = sel.value || 'm';
+  }
+  syncUnit();
+  document.getElementById('canvasUnitSelect')?.addEventListener('change', syncUnit);
+
+  snapCb?.addEventListener('change', () => {
+    gridSettings.snapEnabled = snapCb.checked;
+    onUpdate();
+  });
+
+  spacingIn?.addEventListener('input', () => {
+    const v = parseFloat(spacingIn.value);
+    gridSettings.spacingOverride = (isFinite(v) && v > 0) ? v : null;
+    onUpdate();
+  });
+
+  opacityIn?.addEventListener('input', () => {
+    gridSettings.lineOpacity = parseInt(opacityIn.value, 10) / 100;
+    if (opacityPct) opacityPct.textContent = `${opacityIn.value}%`;
+    onUpdate();
+  });
+}
 
 export function bindUI(store, canvas, mouse) {
   const ctx = canvas.getContext('2d');
-  // initialize UI layer controls (hook into the active store)
-  if (typeof setupLayerControls === 'function') setupLayerControls(store);
+  // initialize Canvas Grid panel controls
+  setupCanvasGridPanel(() => store.notify());
+
+  // Floating palette drag support
+  const palette = document.getElementById('toolPalette');
+  const paletteTitle = palette?.querySelector('.palette-title');
+  if (palette && paletteTitle) {
+    let dragging = false;
+    let dragOffsetX = 0;
+    let dragOffsetY = 0;
+
+    const onPointerMove = (e) => {
+      if (!dragging) return;
+      const x = e.clientX - dragOffsetX;
+      const y = e.clientY - dragOffsetY;
+      palette.style.left = `${x}px`;
+      palette.style.top = `${y}px`;
+    };
+
+    const onPointerUp = () => {
+      dragging = false;
+      document.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerup', onPointerUp);
+    };
+
+    paletteTitle.addEventListener('pointerdown', (e) => {
+      const rect = palette.getBoundingClientRect();
+      dragging = true;
+      dragOffsetX = e.clientX - rect.left;
+      dragOffsetY = e.clientY - rect.top;
+      document.addEventListener('pointermove', onPointerMove);
+      document.addEventListener('pointerup', onPointerUp);
+    });
+  }
 
   // Redraw on store change
   store.onChange(() => {
@@ -31,13 +392,38 @@ export function bindUI(store, canvas, mouse) {
       tempArea: store.tempAreaActive ? store.tempArea : null,
       tempCore: store.tempCoreActive ? store.tempCore : null,
       // In area/core mode we should not show or highlight selected segments
-      selectedSegment: (store.mode === 'area' || store.mode === 'core') ? null : store.active.selectedSegment
+      selectedSegment: (store.mode === 'area' || store.mode === 'core') ? null : store.active.selectedSegment,
+      gridSettings,
     });
 
     const indicator = document.getElementById('canvasModeIndicator');
     if (indicator) {
       indicator.textContent = `Mode: ${store.mode}`;
     }
+
+    // Show/hide finishCoreBtn depending on current mode
+    const finishCoreBtn = document.getElementById('finishCoreBtn');
+    if (finishCoreBtn) {
+      finishCoreBtn.style.display = store.mode === 'core' ? '' : 'none';
+    }
+
+    // Highlight active mode button in tool palette
+    const modeButtonMap = {
+      select:      'selectModeBtn',
+      draw:        'drawModeBtn',
+      area:        'areaModeBtn',
+      core:        'coreModeBtn',
+      'grid-origin': null,
+      door:        'entranceModeBtn',
+    };
+    Object.entries(modeButtonMap).forEach(([mode, id]) => {
+      if (!id) return;
+      const btn = document.getElementById(id);
+      if (btn) btn.classList.toggle('active', store.mode === mode);
+    });
+
+    // Refresh inspector panel for the selected element
+    refreshInspector(store.active, store);
 
     // Update JSON panel
     const jsonEl = document.getElementById('jsonOutput');
@@ -47,6 +433,22 @@ export function bindUI(store, canvas, mouse) {
   });
 
   // Mode controls (example buttons)
+  const selectBtn = document.getElementById('selectModeBtn');
+  if (selectBtn) {
+    selectBtn.addEventListener('click', () => {
+      store.setMode('select');
+      store.notify();
+    });
+  }
+
+  const drawBtn = document.getElementById('drawModeBtn');
+  if (drawBtn) {
+    drawBtn.addEventListener('click', () => {
+      store.setMode('draw');
+      store.notify();
+    });
+  }
+
   const areaBtn = document.getElementById('areaModeBtn');
   if (areaBtn) {
     areaBtn.addEventListener('click', () => {
@@ -70,7 +472,7 @@ export function bindUI(store, canvas, mouse) {
   const lockBtn = document.getElementById('lockBtn');
   if (lockBtn) {
     lockBtn.addEventListener('click', () => {
-      if (store.mode === "edit") {
+      if (store.mode === "select") {
         const seg = store.active.selectedSegment;
         if (seg != null) {
           const edge = store.active.wall_graph.edges[seg];
@@ -82,6 +484,15 @@ export function bindUI(store, canvas, mouse) {
     });
   }
 
+  // Place Door button — activate door placement mode (wall can be selected before or after)
+  const placeDoorBtn = document.getElementById('entranceModeBtn');
+  if (placeDoorBtn) {
+    placeDoorBtn.addEventListener('click', () => {
+      store.setMode('door');
+      store.notify();
+    });
+  }
+
   // Track mouse movement and constraint flag (Shift key)
   canvas.addEventListener('mousemove', (e) => {
     const rect = canvas.getBoundingClientRect();
@@ -89,11 +500,38 @@ export function bindUI(store, canvas, mouse) {
     mouse.y = e.clientY - rect.top;
     // We only read modifier state during movement for visual cue
     mouse.constrain = e.shiftKey;
+
+    // Apply grid snapping to the ghost position in draw/door/core modes
+    // (node/edge snaps still override via the ghost renderers)
+    if ((store.mode === 'draw' || store.mode === 'door' || store.mode === 'core') && gridSettings.snapEnabled) {
+      const gip = _gridIntervalPx(store.active);
+      mouse.x = _snapGrid(mouse.x, gip);
+      mouse.y = _snapGrid(mouse.y, gip);
+    }
+
+    // Cursor feedback for snapping
+    let isSnapping = false;
+    if (store.mode === "area") {
+      const nodeSnap = findClosestNode(store.active, { x: mouse.x, y: mouse.y }, SNAP_TO_NODE_DIST);
+      const areaSnap = nodeSnap ? null : findClosestAreaVertex(store.active, { x: mouse.x, y: mouse.y }, SNAP_TO_NODE_DIST);
+      const edgeSnap = (nodeSnap || areaSnap) ? null : findClosestEdgeProjection(store.active, { x: mouse.x, y: mouse.y }, SNAP_TO_EDGE_DIST);
+      isSnapping = !!(nodeSnap || areaSnap || edgeSnap);
+    } else if (store.mode === "core") {
+      const nodeSnap = findClosestNode(store.active, { x: mouse.x, y: mouse.y }, SNAP_TO_NODE_DIST);
+      const edgeSnap = nodeSnap ? null : findClosestEdgeProjection(store.active, { x: mouse.x, y: mouse.y }, SNAP_TO_EDGE_DIST);
+      isSnapping = !!(nodeSnap || edgeSnap);
+    } else if (store.mode === "draw") {
+      const proj = findClosestProjection(store.active, { x: mouse.x, y: mouse.y });
+      isSnapping = !!(proj && Math.hypot(mouse.x - proj.x, mouse.y - proj.y) < 10);
+    }
+
+    canvas.classList.toggle('cursor-snap', isSnapping);
+    canvas.classList.toggle('cursor-default', !isSnapping);
     store.notify(); // trigger a repaint to update ghost
   });
 
   canvas.addEventListener('mousedown', (e) => {
-    if (store.mode === "edit" && store.active.selectedSegment) {
+    if (store.mode === "select" && store.active.selectedSegment) {
       const rect = canvas.getBoundingClientRect();
       store.dragStart = {
         x: e.clientX - rect.left,
@@ -104,7 +542,7 @@ export function bindUI(store, canvas, mouse) {
   });
 
   canvas.addEventListener('mouseup', () => {
-    if (store.mode === "edit" && store.active) {
+    if (store.mode === "select" && store.active) {
       store.active.draggingSegment = null;
       store.dragStart = null;
       store.update(store.active); // commit final state
@@ -130,14 +568,41 @@ export function bindUI(store, canvas, mouse) {
     let x = e.clientX - rect.left;
     let y = e.clientY - rect.top;
 
+    // GRID ORIGIN PICKING MODE
+    if (store.mode === 'grid-origin') {
+      // Snap to nearest wall node (vertex endpoint)
+      const nodes = store.active.wall_graph?.nodes || [];
+      let best = null, bestDist = 20;
+      nodes.forEach(n => {
+        const d = Math.hypot(x - n.x, y - n.y);
+        if (d < bestDist) { bestDist = d; best = n; }
+      });
+      if (!best) return; // no nearby node — ignore click
+      const origin = { x: best.x, y: best.y };
+      const spacing = store._pendingGridSpacing || 1000;
+      const gridPoints = store.active.generateGrid(spacing, origin);
+      if (gridPoints?.length > 0) {
+        store.active.setLayerVisibility('Points', true);
+        const originDisplay = document.getElementById('gridOriginDisplay');
+        if (originDisplay) originDisplay.textContent = `Origin: (${best.x.toFixed(1)}, ${best.y.toFixed(1)}) — ${gridPoints.length} pts`;
+        store.update(store.active);
+        console.log(`Grid generated: ${gridPoints.length} points from origin`, origin);
+      } else {
+        alert('No grid points generated. Check that the origin is near validly-closed boundary.');
+      }
+      store.setMode('select');
+      return;
+    }
+
     if (store.mode === "area") {
       const rect = canvas.getBoundingClientRect();
       let x = e.clientX - rect.left;
       let y = e.clientY - rect.top;
 
-      // Prefer node snap, then edge projection
+      // Prefer node snap, then area vertex snap, then edge projection
       const nodeSnap = findClosestNode(store.active, { x, y }, SNAP_TO_NODE_DIST);
-      const edgeSnap = nodeSnap ? null : findClosestEdgeProjection(store.active, { x, y }, SNAP_TO_EDGE_DIST);
+      const areaSnap = nodeSnap ? null : findClosestAreaVertex(store.active, { x, y }, SNAP_TO_NODE_DIST);
+      const edgeSnap = (nodeSnap || areaSnap) ? null : findClosestEdgeProjection(store.active, { x, y }, SNAP_TO_EDGE_DIST);
 
       const constrain = e.shiftKey;
       // Determine previous temp point coordinates (if any) for constrain logic
@@ -163,15 +628,8 @@ export function bindUI(store, canvas, mouse) {
         store.tempAreaLastSnap = { ...nodeSnap, id: nodeId };
         if (constrain && lastX != null && lastY != null) {
           // Align either horizontally or vertically relative to last
-          const dx = Math.abs(nx - lastX);
-          const dy = Math.abs(ny - lastY);
-          if (dx > dy) {
-            // snap horizontally -> keep nx, set y to lastY
-            x = nx; y = lastY;
-          } else {
-            // snap vertically -> keep ny, set x to lastX
-            x = lastX; y = ny;
-          }
+          const snapped = snapTo45(lastX, lastY, nx, ny);
+          x = snapped.x; y = snapped.y;
           store.tempArea.push([x, y]);
           console.log("Snapped to node (constrained)", nodeSnap, "->", [x, y]);
         } else {
@@ -181,13 +639,25 @@ export function bindUI(store, canvas, mouse) {
           if (nodeId) store.tempArea.push(nodeId);
           else store.tempArea.push([x, y]);
         }
+      } else if (areaSnap) {
+        const ax = areaSnap.x, ay = areaSnap.y;
+        store.tempAreaLastSnap = areaSnap;
+        if (constrain && lastX != null && lastY != null) {
+          const snapped = snapTo45(lastX, lastY, ax, ay);
+          x = snapped.x; y = snapped.y;
+          store.tempArea.push([x, y]);
+          console.log("Snapped to area vertex (constrained)", areaSnap, "->", [x, y]);
+        } else {
+          x = ax; y = ay;
+          store.tempArea.push([x, y]);
+          console.log("Snapped to area vertex", areaSnap);
+        }
       } else if (edgeSnap) {
         const ex = edgeSnap.x, ey = edgeSnap.y;
         store.tempAreaLastSnap = edgeSnap;
         if (constrain && lastX != null && lastY != null) {
-          const dx = Math.abs(ex - lastX);
-          const dy = Math.abs(ey - lastY);
-          if (dx > dy) { x = ex; y = lastY; } else { x = lastX; y = ey; }
+          const snapped = snapTo45(lastX, lastY, ex, ey);
+          x = snapped.x; y = snapped.y;
           store.tempArea.push([x, y]);
           console.log("Snapped to edge (constrained)", edgeSnap, "->", [x, y]);
         } else {
@@ -198,9 +668,8 @@ export function bindUI(store, canvas, mouse) {
       } else {
         store.tempAreaLastSnap = null;
         if (constrain && lastX != null && lastY != null) {
-          const dx = Math.abs(x - lastX);
-          const dy = Math.abs(y - lastY);
-          if (dx > dy) { y = lastY; } else { x = lastX; }
+          const snapped = snapTo45(lastX, lastY, x, y);
+          x = snapped.x; y = snapped.y;
           console.log('Constrained free point ->', [x, y]);
         }
         store.tempArea.push([x, y]);
@@ -226,7 +695,7 @@ export function bindUI(store, canvas, mouse) {
             // Close and commit the area just like the boundary
             commitArea(store);
             refreshAreasList(store);
-            store.setMode('edit');
+            store.setMode('select');
             store.update(store.active);
             return;
           }
@@ -260,9 +729,8 @@ export function bindUI(store, canvas, mouse) {
         const nx = nodeSnap.x, ny = nodeSnap.y;
         store.tempCoreLastSnap = nodeSnap;
         if (constrain && lastX != null && lastY != null) {
-          const dx = Math.abs(nx - lastX);
-          const dy = Math.abs(ny - lastY);
-          if (dx > dy) { x = nx; y = lastY; } else { x = lastX; y = ny; }
+          const snapped = snapTo45(lastX, lastY, nx, ny);
+          x = snapped.x; y = snapped.y;
           console.log("Core: Snapped to node (constrained)", nodeSnap, "->", [x, y]);
         } else {
           x = nx; y = ny;
@@ -272,9 +740,8 @@ export function bindUI(store, canvas, mouse) {
         const ex = edgeSnap.x, ey = edgeSnap.y;
         store.tempCoreLastSnap = edgeSnap;
         if (constrain && lastX != null && lastY != null) {
-          const dx = Math.abs(ex - lastX);
-          const dy = Math.abs(ey - lastY);
-          if (dx > dy) { x = ex; y = lastY; } else { x = lastX; y = ey; }
+          const snapped = snapTo45(lastX, lastY, ex, ey);
+          x = snapped.x; y = snapped.y;
           console.log("Core: Snapped to edge (constrained)", edgeSnap, "->", [x, y]);
         } else {
           x = ex; y = ey;
@@ -282,10 +749,15 @@ export function bindUI(store, canvas, mouse) {
         }
       } else {
         store.tempCoreLastSnap = null;
+        // Apply grid snap before optional 45° constraint
+        if (gridSettings.snapEnabled && !constrain) {
+          const gip = _gridIntervalPx(store.active);
+          x = _snapGrid(x, gip);
+          y = _snapGrid(y, gip);
+        }
         if (constrain && lastX != null && lastY != null) {
-          const dx = Math.abs(x - lastX);
-          const dy = Math.abs(y - lastY);
-          if (dx > dy) { y = lastY; } else { x = lastX; }
+          const snapped = snapTo45(lastX, lastY, x, y);
+          x = snapped.x; y = snapped.y;
           console.log('Core: Constrained free point ->', [x, y]);
         }
       }
@@ -301,7 +773,7 @@ export function bindUI(store, canvas, mouse) {
         if (dx < SNAP_TO_NODE_DIST) {
           // Close and commit the core boundary
           commitCore(store);
-          store.setMode('edit');
+          store.setMode('select');
           store.update(store.active);
           return;
         }
@@ -311,16 +783,68 @@ export function bindUI(store, canvas, mouse) {
       return;
     }
 
-    // EDIT MODE: select segment and return
-    if (store.mode === "edit") {
+    // SELECT MODE: select segment and return
+    if (store.mode === "select") {
+      // Check for nearby grid point first (within 8px)
+      const pts = store.active.Points || [];
+      let nearPt = null, nearDist = 8;
+      pts.forEach(p => { const d = Math.hypot(x - p.x, y - p.y); if (d < nearDist) { nearDist = d; nearPt = p; } });
+      if (nearPt) {
+        store.active.selectedSegment = null;
+        if (!store.active.selectedPoints) store.active.selectedPoints = new Set();
+        if (e.shiftKey) {
+          // Toggle this point in/out of the multi-selection
+          if (store.active.selectedPoints.has(nearPt.id)) {
+            store.active.selectedPoints.delete(nearPt.id);
+          } else {
+            store.active.selectedPoints.add(nearPt.id);
+          }
+        } else {
+          // Plain click — replace selection with just this point
+          store.active.selectedPoints = new Set([nearPt.id]);
+        }
+        store.active.selectedPoint = nearPt.id; // keep legacy compat
+        store.update(store.active);
+        return;
+      }
       const seg = findClosestSegment(store.active, { x, y });
       if (seg) {
-        store.active.selectSegment(seg);
+        store.active.selectedPoints = new Set();
+        store.active.selectedPoint = null;
+        store.active.selectedCore = false;
+        if (seg.index === store.active.selectedSegment) {
+          // Second click on the already-selected segment → split it
+          // Snap the split point to the grid if snapping is enabled
+          let sx = x, sy = y;
+          if (gridSettings.snapEnabled) {
+            const gip = _gridIntervalPx(store.active);
+            sx = _snapGrid(x, gip);
+            sy = _snapGrid(y, gip);
+          }
+          store.active.splitEdge(seg.index, sx, sy);
+        } else {
+          store.active.selectSegment(seg);
+        }
         store.update(store.active);
-        console.log("Selected segment", seg);
       } else {
-        store.active.clearSelection();
-        store.update(store.active);
+        // Check if the click lands inside the core polygon → select the whole core
+        const coreBdry = (store.active.Core_Boundary || [])[0];
+        const corePoly = coreBdry
+          ? Object.keys(coreBdry)
+              .filter(k => /^Pt_\d+$/.test(k))
+              .sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3)))
+              .map(k => coreBdry[k])
+          : [];
+        if (corePoly.length >= 3 && store.active._isPointInPolygon(x, y, corePoly)) {
+          store.active.selectedCore = true;
+          store.active.selectedSegment = null;
+          store.active.selectedPoints = new Set();
+          store.active.selectedPoint = null;
+          store.update(store.active);
+        } else {
+          store.active.clearSelection();
+          store.update(store.active);
+        }
       }
       return;
     }
@@ -338,35 +862,94 @@ export function bindUI(store, canvas, mouse) {
       return;
     }
 
+    // DOOR PLACEMENT MODE — place a door opening on the selected wall
+    if (store.mode === 'door') {
+      // If no wall is selected yet, pick the nearest one from the click position
+      let seg = store.active.selectedSegment;
+      if (seg == null) {
+        const nearest = findClosestSegment(store.active, { x, y }, 20);
+        if (!nearest) return; // clicked nowhere near a wall — ignore
+        store.active.selectSegment(nearest);
+        seg = nearest.index;
+      }
+      const edge = store.active.wall_graph.edges[seg];
+      if (!edge) return;
+      const n1 = store.active.wall_graph.nodes.find(n => n.id === edge.v1);
+      const n2 = store.active.wall_graph.nodes.find(n => n.id === edge.v2);
+      if (!n1 || !n2) return;
+
+      const dx = n2.x - n1.x, dy = n2.y - n1.y;
+      const len2 = dx * dx + dy * dy || 1;
+      const edgeLen = Math.sqrt(len2);
+      // Door width: 1200 mm converted to canvas pixels, capped at 80% of wall
+      const _pxU  = store.active.units?.pxPerUnit || 1;
+      const _mmPU = store.active.units?.length === 'm' ? 1000 : 1;
+      const doorWidthPx = Math.min((1200 / _mmPU) * _pxU, edgeLen * 0.8);
+      const hw = doorWidthPx / 2;
+      let t = ((x - n1.x) * dx + (y - n1.y) * dy) / len2;
+      t = Math.max(hw / edgeLen, Math.min(1 - hw / edgeLen, t));
+
+      // Find or create the Wall object for this edge
+      const EPS = 1;
+      let wall = store.active.Walls?.find(w =>
+        Math.abs(w.start.x - n1.x) < EPS && Math.abs(w.start.y - n1.y) < EPS &&
+        Math.abs(w.end.x   - n2.x) < EPS && Math.abs(w.end.y   - n2.y) < EPS);
+      if (!wall) {
+        store.active.addWall(n1, n2, { wallType: 'boundary', locked: !!edge.locked });
+        wall = store.active.Walls[store.active.Walls.length - 1];
+      }
+
+      store.active.addOpeningToWall(wall.id, t, { openingKind: 'door', width: 1200 }); // width in mm
+      store.update(store.active);
+      return;
+    }
+
     // DRAW MODE: boundary creation
+    const drawConstrain = e.shiftKey;
+
+    // Apply grid snap as baseline (node/projection snap will override if closer)
+    if (!drawConstrain && gridSettings.snapEnabled) {
+      const gip = _gridIntervalPx(store.active);
+      x = _snapGrid(x, gip);
+      y = _snapGrid(y, gip);
+    }
+
+    if (drawConstrain && store.active.wall_graph.nodes.length > 0) {
+      const lastNode = store.active.wall_graph.nodes[store.active.wall_graph.nodes.length - 1];
+      const snapped = snapTo45(lastNode.x, lastNode.y, x, y);
+      x = snapped.x;
+      y = snapped.y;
+    }
+
     if (store.active.wall_graph.nodes.length > 0) {
       const first = store.active.wall_graph.nodes[0];
       const fx = first.x;
       const fy = first.y;
       const dist = Math.hypot(x - fx, y - fy);
       if (dist < 10) {
-        store.active.addVertex(fx, fy, { constrain: e.shiftKey });
+        // Close the boundary without adding a duplicate vertex
         store.active.closeBoundary();
         store.update(store.active);
         console.log("Boundary closed");
-        store.setMode("entrance");
+        store.setMode("select");
         return;
       }
     }
 
-    // Projection snapping
-    const proj = findClosestProjection(store.active, { x, y });
-    if (proj && Math.hypot(x - proj.x, y - proj.y) < 10) {
-      x = proj.x;
-      y = proj.y;
-      console.log("Snapped to projection", proj);
+    // Projection snapping (only when not constraining to 45°)
+    if (!drawConstrain) {
+      const proj = findClosestProjection(store.active, { x, y });
+      if (proj && Math.hypot(x - proj.x, y - proj.y) < 10) {
+        x = proj.x;
+        y = proj.y;
+        console.log("Snapped to projection", proj);
+      }
     }
 
     // Add vertex to boundary
-    store.active.addVertex(x, y, { constrain: e.shiftKey });
+    store.active.addVertex(x, y, { constrain: drawConstrain });
     store.update(store.active);
   });
-
 
 
   // Undo/redo shortcuts as before
@@ -379,7 +962,7 @@ export function bindUI(store, canvas, mouse) {
 
   // Lock/unlock segment: L key
   window.addEventListener('keydown', (e) => {
-    if (store.mode === "edit" && e.key.toLowerCase() === 'l') {
+    if (store.mode === "select" && e.key.toLowerCase() === 'l') {
       const seg = store.active.selectedSegment;
       console.log("Testing L key. Segment: ", seg)
       if (seg != null) {
@@ -389,6 +972,16 @@ export function bindUI(store, canvas, mouse) {
         store.update(store.active);
         // console.log("Segment lock toggled", seg.locked);
         console.log("Segment lock toggled", store.active.wall_graph.edges[seg].locked);
+      }
+    }
+  });
+
+  // Delete core: Delete or Backspace key
+  window.addEventListener('keydown', (e) => {
+    if (store.mode === 'select' && (e.key === 'Delete' || e.key === 'Backspace')) {
+      if (store.active.selectedCore) {
+        store.active.deleteCore();
+        store.update(store.active);
       }
     }
   });
@@ -403,6 +996,11 @@ export function bindUI(store, canvas, mouse) {
     if (store.mode === "core" && e.key === "Enter") {
       commitCore(store);
     }
+    // Escape in select mode deselects everything
+    if (store.mode === "select" && e.key === "Escape") {
+      store.active.clearSelection();
+      store.update(store.active);
+    }
     // Optional: Esc to cancel
     if (store.mode === "area" && e.key === "Escape") {
       store.resetTempArea();
@@ -411,8 +1009,16 @@ export function bindUI(store, canvas, mouse) {
       store.resetTempCore();
     }
     if (store.mode === "entrance" && e.key === "Escape") {
-      store.setMode("edit");
+      store.setMode("select");
       console.log("Exited entrance mode");
+    }
+    if (store.mode === "door" && e.key === "Escape") {
+      store.setMode("select");
+    }
+    if (store.mode === "grid-origin" && e.key === "Escape") {
+      store.setMode("select");
+      const originDisplay = document.getElementById('gridOriginDisplay');
+      if (originDisplay) originDisplay.textContent = '';
     }
   });
 
@@ -429,7 +1035,7 @@ export function bindUI(store, canvas, mouse) {
   canvas.addEventListener('contextmenu', (e) => {
     if (store.mode === "entrance") {
       e.preventDefault(); // Prevent context menu
-      store.setMode("edit");
+      store.setMode("select");
       console.log("Exited entrance mode (right-click)");
     }
   });
@@ -446,6 +1052,42 @@ export function bindUI(store, canvas, mouse) {
   }
 
   // ═══════════════════════════════════════════════════════════
+  // GRID GENERATION CONTROLS
+  // ═══════════════════════════════════════════════════════════
+  
+  const generateGridBtn = document.getElementById('generateGridBtn');
+  const clearGridBtn    = document.getElementById('clearGridBtn');
+  const gridSpacingInput = document.getElementById('gridSpacingInput');
+  const gridOriginDisplay = document.getElementById('gridOriginDisplay');
+
+  if (generateGridBtn) {
+    generateGridBtn.addEventListener('click', () => {
+      if (!store.active) return;
+      if (!store.active.boundaryClosed) {
+        alert('Draw and close a boundary before generating a grid.');
+        return;
+      }
+      const spacing = parseFloat(gridSpacingInput?.value || 1000);
+      if (spacing <= 0) { alert('Grid spacing must be greater than 0'); return; }
+      // Enter origin-picking mode
+      store._pendingGridSpacing = spacing;
+      store.setMode('grid-origin');
+      if (gridOriginDisplay) gridOriginDisplay.textContent = 'Click a wall node to set origin…';
+      store.notify();
+    });
+  }
+  
+  if (clearGridBtn) {
+    clearGridBtn.addEventListener('click', () => {
+      if (!store.active) return;
+      
+      store.active.clearGrid();
+      store.update(store.active);
+      console.log('Grid cleared');
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════
   // LAYER TOGGLE CONTROLS
   // ═══════════════════════════════════════════════════════════
   
@@ -455,7 +1097,7 @@ export function bindUI(store, canvas, mouse) {
     coreBoundaryLayer: 'Core_Boundary',
     coreAreaLayer: 'Core_Area',
     columnsLayer: 'Columns',
-    temperatureRegionsLayer: 'Temperature_Regions',
+    exclusionAreasLayer: 'Exclusion_Areas',
     beamsLayer: 'Beams',
     pointsLayer: 'Points',
     edgesLayer: 'Edges',
@@ -467,7 +1109,7 @@ export function bindUI(store, canvas, mouse) {
     const checkbox = document.getElementById(checkboxId);
     if (checkbox) {
       // Set initial state - use default if store.active is null
-      checkbox.checked = store.active?.layers?.[layerName] ?? (layerName === 'Plan_Boundary' || layerName === 'Boundary_Area' || layerName === 'Core_Boundary' || layerName === 'Core_Area' || layerName === 'Columns' || layerName === 'Temperature_Regions');
+      checkbox.checked = store.active?.layers?.[layerName] ?? (layerName === 'Plan_Boundary' || layerName === 'Boundary_Area' || layerName === 'Core_Boundary' || layerName === 'Core_Area' || layerName === 'Columns' || layerName === 'Exclusion_Areas');
       
       // Add event listener
       checkbox.addEventListener('change', () => {
@@ -688,7 +1330,7 @@ export function bindUI(store, canvas, mouse) {
               valEl.value = numeric;
             }
           }
-          store.setMode("edit");
+          store.setMode("select");
 
           // Repopulate requirements form (guard each element in case UI panel
           // is not present in a minimal embed or during tests)
@@ -931,80 +1573,36 @@ export function bindUI(store, canvas, mouse) {
 
 // Helper: commit the area, prompt for label, add to model, and reset temp state
 function commitArea(store) {
-  console.log("commit area has been called");
-  if (store.tempArea.length < 3) return; // need at least a triangle
-  // const label = prompt("Label for this area (e.g. private, common):");
-  // if (!label) return;
+  if (store.tempArea.length < 3) return;
 
-  // Option 1: read from an input field in your HTML
-  const labelInput = document.getElementById("areaLabelInput");
-  const label = labelInput?.value?.trim() || "area";
-
-  // Map temporary coordinate vertices back to existing node ids when
-  // they are within snap tolerance. This keeps area vertices linked to
-  // the wall graph when users snapped to nodes or constrained near them.
-  const mapped = store.tempArea.map(v => {
-    // already a node id
-    if (typeof v === 'string') return v;
-    if (!Array.isArray(v) || v.length < 2) return null;
-    const [x, y] = v;
-    // find closest node within snap distance
-    const node = store.active.wall_graph.nodes.find(n => Math.hypot(n.x - x, n.y - y) <= SNAP_TO_NODE_DIST);
-    if (node) return node.id;
-    // otherwise keep coordinates
-    return [x, y];
-  }).filter(v => v !== null);
-
-  // Resolve mapped entries to coordinates for Temperature_Regions
-  const resolvedCoords = mapped.map(v => {
+  // Resolve all temp vertices to pixel coordinates
+  const resolvedCoords = store.tempArea.map(v => {
     if (typeof v === 'string') {
       const n = store.active.wall_graph.nodes.find(n => n.id === v);
       return n ? [n.x, n.y] : null;
     }
-    return Array.isArray(v) && v.length >= 2 ? [v[0], v[1]] : null;
+    if (!Array.isArray(v) || v.length < 2) return null;
+    const [x, y] = v;
+    const node = store.active.wall_graph.nodes.find(n => Math.hypot(n.x - x, n.y - y) <= SNAP_TO_NODE_DIST);
+    return node ? [node.x, node.y] : [x, y];
   }).filter(v => v !== null);
 
-  let newId = null;
-  // Prefer the model method when available, otherwise fall back to
-  // creating a Temperature_Regions entry directly on the active object
-  // (for cases where `store.active` is a plain object without methods).
-  if (store.active && typeof store.active.addTemperatureRegion === 'function') {
-    newId = store.active.addTemperatureRegion(label, 'internal', resolvedCoords, { color: null, alpha: 0.3 });
-  } else {
-    // create Pt_* keyed subregion from resolvedCoords
-    const subregion = {};
-    resolvedCoords.forEach((c, i) => { subregion[`Pt_${i}`] = [c[0], c[1]]; });
-    if (resolvedCoords.length) subregion[`Pt_${resolvedCoords.length}`] = [resolvedCoords[0][0], resolvedCoords[0][1]];
-    // generate an id
-    const genId = (pref) => `${pref || 'tr'}_${Date.now()}_${Math.floor(Math.random()*1000)}`;
-    const id = genId('tr');
-    const region = {
-      id,
-      type: 'internal',
-      name: label,
-      color: null,
-      alpha: 0.3,
-      air_requirement: 7.5,
-      subregions: [subregion],
-      avg_load_per_point: 0,
-      total_load: 0,
-      total_area: 0,
-      VAV_number: 1,
-      entry_candidates: [[]],
-      thermal_control_zones: []
-    };
-    if (!store.active.Temperature_Regions) store.active.Temperature_Regions = [];
-    store.active.Temperature_Regions.push(region);
-    newId = id;
+  if (resolvedCoords.length >= 3) {
+    if (typeof store.active.addExclusionArea === 'function') {
+      store.active.addExclusionArea(resolvedCoords);
+    } else {
+      // fallback for plain objects
+      if (!store.active.Exclusion_Areas) store.active.Exclusion_Areas = [];
+      const id = `ex_${Date.now()}`;
+      store.active.Exclusion_Areas.push({ id, vertices: resolvedCoords });
+    }
   }
-  // Auto-select the newly created area so the user can change its color immediately
-  store.selectedAreaId = newId;
-  store.update(store.active);       // commit to history
+
+  store.update(store.active);
   store.tempArea = [];
   store.tempAreaActive = false;
-
-  // Optionally switch back to edit mode
-  store.setMode("edit");
+  store.setMode("select");
+  refreshAreasList(store);
 }
 
 function refreshAreasList(store) {
@@ -1012,79 +1610,24 @@ function refreshAreasList(store) {
   if (!listEl) return;
   listEl.innerHTML = '';
 
-  // Build combined list: boundaryArea, Temperature_Regions, then legacy areas
-  const items = [];
-  if (store.active.boundaryArea) items.push({ __type: 'boundary', id: store.active.boundaryArea.id, label: store.active.boundaryArea.label, source: store.active.boundaryArea });
-  (store.active.Temperature_Regions || []).forEach(r => items.push({ __type: 'temp', id: r.id, label: r.name || `temp_${r.id}`, color: r.color, alpha: r.alpha, source: r }));
-  (store.active.areas || []).forEach(a => items.push({ __type: 'legacy', id: a.id, label: a.label, color: a.color, alpha: a.alpha, source: a }));
+  const areas = store.active.Exclusion_Areas || [];
+  if (areas.length === 0) {
+    listEl.innerHTML = '<li style="color:#888; font-size:0.9em;">None</li>';
+    return;
+  }
 
-  items.forEach(item => {
+  areas.forEach((area, idx) => {
     const li = document.createElement('li');
-    const labelSpan = document.createElement('span');
-    labelSpan.textContent = item.label;
-    labelSpan.style.cursor = 'pointer';
-    labelSpan.onclick = () => {
-      store.selectedAreaId = item.id;
-      const picker = document.getElementById('areaColorPicker');
-      if (picker) picker.value = item.color || '#c86464';
-      const alphaInput = document.getElementById('areaAlphaRange');
-      const alphaValueInput = document.getElementById('areaAlphaValue');
-      const labelInput = document.getElementById('areaLabelInput');
-      const airInput = document.getElementById('areaAirReq');
-      if (labelInput) labelInput.value = item.label || '';
-      // for Temperature_Regions the name is stored in `source.name`
-      if (item.__type === 'temp' && item.source && item.source.name) {
-        if (labelInput) labelInput.value = item.source.name;
-      }
-      if (picker) picker.value = item.color || '#c86464';
-      if (alphaInput) alphaInput.value = typeof item.alpha === 'number' ? item.alpha : 0.3;
-      if (alphaValueInput) alphaValueInput.value = typeof item.alpha === 'number' ? item.alpha.toFixed(2) : '0.30';
-      if (airInput) airInput.value = (item.source && typeof item.source.air_requirement === 'number') ? String(item.source.air_requirement) : '7.5';
-      Array.from(listEl.children).forEach(ch => ch.classList.remove('selected'));
-      li.classList.add('selected');
-    };
-    li.appendChild(labelSpan);
-
-    const sw = document.createElement('span');
-    sw.style.display = 'inline-block';
-    sw.style.width = '14px';
-    sw.style.height = '14px';
-    sw.style.marginLeft = '8px';
-    sw.style.verticalAlign = 'middle';
-    sw.style.border = '1px solid rgba(0,0,0,0.1)';
-    if (item.color && typeof item.alpha === 'number') {
-      sw.style.background = item.color;
-      sw.style.opacity = String(item.alpha);
-    } else {
-      sw.style.background = item.color || '';
-      sw.style.opacity = '';
-    }
-    li.appendChild(sw);
+    li.textContent = `Exclusion ${idx + 1}`;
 
     const del = document.createElement('button');
     del.textContent = 'x';
-    if (item.__type === 'boundary') {
-      del.disabled = true;
-      del.title = 'Boundary area cannot be deleted';
-      li.style.fontWeight = '600';
-      const badge = document.createElement('span');
-      badge.textContent = ' (boundary)';
-      badge.style.fontSize = '0.9em';
-      badge.style.marginLeft = '6px';
-      li.appendChild(badge);
-    } else {
-      del.onclick = () => {
-        if (item.__type === 'temp') {
-          const idx = (store.active.Temperature_Regions || []).findIndex(r => r.id === item.id);
-          if (idx >= 0) store.active.Temperature_Regions.splice(idx, 1);
-        } else if (item.__type === 'legacy') {
-          const idx = (store.active.areas || []).findIndex(a => a.id === item.id);
-          if (idx >= 0) store.active.areas.splice(idx, 1);
-        }
-        store.update(store.active);
-        refreshAreasList(store);
-      };
-    }
+    del.style.marginLeft = '8px';
+    del.onclick = () => {
+      store.active.Exclusion_Areas.splice(idx, 1);
+      store.update(store.active);
+      refreshAreasList(store);
+    };
     li.appendChild(del);
     listEl.appendChild(li);
   });
@@ -1099,50 +1642,81 @@ function commitCore(store) {
   const coreVertices = store.tempCore.map(v => [v[0], v[1]]);
   
   store.active.addCoreBoundary(coreVertices);
+
+  // Add each edge of the core polygon to the wall_graph as a 'core' wall
+  // so they behave like wall segments (selectable, lockable, openings, etc.)
+  const nodeIds = coreVertices.map(([x, y]) => store.active.addNode(x, y));
+  const n = nodeIds.length;
+  for (let i = 0; i < n; i++) {
+    const v1Id = nodeIds[i];
+    const v2Id = nodeIds[(i + 1) % n];
+    const edgeId = store.active.addEdge(v1Id, v2Id, false);
+    // Mark the edge itself so drawWalls can identify it as core
+    const edge = store.active.wall_graph.edges.find(e => e.id === edgeId);
+    if (edge) edge.wallType = 'core';
+    // Create the matching Wall object for type-aware rendering / openings
+    const n1 = store.active.wall_graph.nodes.find(nd => nd.id === v1Id);
+    const n2 = store.active.wall_graph.nodes.find(nd => nd.id === v2Id);
+    if (n1 && n2) store.active.addWall(n1, n2, { wallType: 'core' });
+  }
+
   store.update(store.active);       // commit to history
   store.tempCore = [];
   store.tempCoreActive = false;
 
   // Optionally switch back to edit mode
-  store.setMode("edit");
+  store.setMode("select");
   console.log("Core boundary added successfully");
 }
 
-  // Layer control functionality (exposed as a setup function so it can be
-  // initialized from within `bindUI` where the `store` parameter exists).
-  function setupLayerControls(store) {
-    const layerControls = {
-      planBoundaryLayer: 'planBoundary',
-      coreBoundaryLayer: 'coreBoundary', 
-      columnsLayer: 'columns',
-      temperatureRegionsLayer: 'Temperature_Regions',
-      beamsLayer: 'beams',
-      pointsLayer: 'points',
-      edgesLayer: 'edges',
-      ductsLayer: 'ducts',
-      ductPlanLayer: 'ductPlan'
-    };
+// Find closest vertex from existing areas (Temperature_Regions and legacy areas)
+function findClosestAreaVertex(fp, point, maxDist = SNAP_TO_NODE_DIST) {
+  if (!fp) return null;
+  let best = null;
+  let bestDist = maxDist;
 
-    Object.entries(layerControls).forEach(([elementId, layerKey]) => {
-      const checkbox = document.getElementById(elementId);
-      if (checkbox) {
-        checkbox.addEventListener('change', () => {
-          const fp = store.active;
-          if (fp) {
-            if (!fp.layers) fp.layers = {};
-            fp.layers[layerKey] = checkbox.checked;
-            // Trigger re-render
-            store.notify();
+  // Temperature_Regions subregion vertices (Pt_* keyed objects)
+  (fp.Temperature_Regions || []).forEach(region => {
+    (region.subregions || []).forEach(sub => {
+      Object.values(sub).forEach(v => {
+        if (Array.isArray(v) && v.length >= 2) {
+          const dx = point.x - v[0];
+          const dy = point.y - v[1];
+          const d = Math.hypot(dx, dy);
+          if (d < bestDist) {
+            bestDist = d;
+            best = { x: v[0], y: v[1], source: 'temperature' };
           }
-        });
+        }
+      });
+    });
+  });
 
-        // Initialize checkbox state when plan changes
-        store.onChange(() => {
-          const fp = store.active;
-          if (fp && fp.layers && fp.layers.hasOwnProperty(layerKey)) {
-            checkbox.checked = fp.layers[layerKey];
+  // Legacy areas vertices
+  (fp.areas || []).forEach(area => {
+    (area.vertices || []).forEach(v => {
+      if (typeof v === 'string') {
+        const n = fp.wall_graph.nodes.find(n => n.id === v);
+        if (n) {
+          const dx = point.x - n.x;
+          const dy = point.y - n.y;
+          const d = Math.hypot(dx, dy);
+          if (d < bestDist) {
+            bestDist = d;
+            best = { x: n.x, y: n.y, source: 'legacy-node' };
           }
-        });
+        }
+      } else if (Array.isArray(v) && v.length >= 2) {
+        const dx = point.x - v[0];
+        const dy = point.y - v[1];
+        const d = Math.hypot(dx, dy);
+        if (d < bestDist) {
+          bestDist = d;
+          best = { x: v[0], y: v[1], source: 'legacy-vertex' };
+        }
       }
     });
-  }
+  });
+
+  return best;
+}

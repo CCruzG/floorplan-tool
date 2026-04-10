@@ -1,284 +1,174 @@
-# Floorplan Tool - Application Documentation
+# Floorplan Tool Documentation
 
 ## Overview
-The Floorplan Tool is an Electron-based desktop application for creating, editing, and managing building floor plans. It provides a visual canvas-based interface for drawing boundaries, defining areas, placing cores, and managing building elements with support for importing/exporting JSON data.
+The Floorplan Tool is an Electron-based desktop app for drawing floorplan boundaries, defining exclusion areas and service cores, placing wall openings, generating a routing grid, and saving or loading plan data as JSON.
 
----
+The current application is centered around a canvas editor with a floating tool palette, a live JSON panel, an inspector panel, canvas-grid controls, grid-generation controls, an exclusion-areas panel, and a layers panel.
 
-## Core Capabilities
+## Current User-Facing Tools
 
-### 1. Drawing & Editing
-- **Boundary Drawing Mode**: Create building perimeters by clicking to place vertices
-  - Automatic vertex snapping to existing nodes (10px threshold)
-  - Edge projection snapping (8px threshold)
-  - Orthogonal constraint mode (hold Shift for horizontal/vertical alignment)
-  - Visual projection guides showing alignment from existing vertices
-  - Double-click or press Enter to close the boundary
-  - Press Escape to cancel drawing
+### Select
+- Select wall segments, grid points, or the full core area.
+- Clicking a wall segment selects that segment.
+- Clicking inside the core area selects the whole core.
+- Clicking a selected wall segment a second time splits it by inserting a new vertex at the closest point on the segment.
+- Clicking empty space clears the current selection.
 
-- **Core Boundary Mode**: Define service core areas (stairs, elevators, mechanical rooms)
-  - Same drawing mechanics as boundary mode
-  - Alignment guides snap to both boundary and existing core vertices
-  - Visual feedback with green highlights for boundary alignment, red for core alignment
-  - Cursor snaps to guides within 15px for precise placement
-  - Red dashed preview line during drawing
-  - Separate fill and outline layers for visualization
+### Draw Boundary
+- Click to place boundary vertices.
+- The preview supports projection snapping and Shift-constrained drawing.
+- Boundary creation closes when the user clicks near the first vertex.
 
-- **Area Definition Mode**: Mark functional zones (rooms, spaces)
-  - Click to place vertices and define polygons
-  - Supports color and alpha transparency customization
-  - Area measurements and labeling
+### Add Exclusion Area
+- Creates polygonal exclusion areas inside the plan.
+- Finish with the Finish Area button or by using the keyboard shortcut documented below.
+- Exclusion areas are listed in the Exclusion Areas panel.
 
-- **Entrance Placement Mode**: Add building entry points
-  - Click on wall edges to place entrances
-  - Define entrance width and position
-  - Visual projection guides for edge alignment
+### Add Core
+- Draws a polygonal service core.
+- Core walls are added to the wall graph so they can be selected, locked, and edited like other walls.
+- The whole core can be selected by clicking its area and deleted from the inspector or keyboard.
 
-- **Edit Mode**: Modify existing geometry
-  - Select wall segments by clicking
-  - Lock/unlock segments (L key or Lock button)
-  - Locked segments appear as red dashed lines
-  - Drag segments to reposition (planned feature)
+### Place Door
+- Places a door opening on a selected wall.
+- If no segment is already selected, the app finds the nearest wall segment when placing the door.
+- Existing wall openings can be edited from the inspector.
 
-### 2. Layer Management
-The application supports independent visibility control for multiple layers:
+### Generate Grid
+- Prompts for a boundary node to use as the grid origin.
+- Generates grid points inside the usable plan area.
+- Generated points support `column` and `mechanical` flags.
 
-**Active Layers** (enabled by default):
-- **Plan Boundary**: Building perimeter outline (wall edges)
-- **Boundary Area**: Building perimeter fill
-- **Core Boundary**: Service core outlines
-- **Core Area**: Service core area fills
-- **Columns**: Structural column footprints
-- **Temperature Regions**: Thermal zone definitions
+## Selection and Editing
 
-**Disabled Layers** (can be enabled):
-- **Beams**: Structural beam definitions with height constraints
-- **Grid Points**: Discretized routing grid vertices
-- **Grid Edges**: Valid connections between grid points
-- **Ducts**: Available duct specifications
-- **Duct Plan**: Final duct routing solution
+### Wall Segments
+- Selecting a segment opens the wall inspector.
+- The inspector supports wall type, translucency, lock state, endpoint coordinates, and wall openings.
+- Pressing `L` toggles the selected segment lock state.
+- Locked walls render in the locked wall style.
 
-Each layer can be toggled independently via checkboxes in the Layers panel.
+### Segment Splitting
+- When a segment is already selected, hovering shows a split preview marker on the closest point of that segment.
+- Clicking again on that same segment inserts a new vertex and replaces the original segment with two segments.
+- The split point is snapped to the canvas grid when grid snapping is enabled.
+- Splitting is rejected when the new point would be too close to an existing endpoint.
 
-### 3. Canvas Controls
-- **Pan & Zoom**: Navigate large floor plans (view transform system)
-- **Unit System**: Support for mm, cm, m, in, ft with configurable canvas width
-- **Scale Management**: Pixels-per-unit conversion for accurate measurements
-- **Visual Feedback**: 
-  - Hover tooltips showing dimensions
-  - Mode indicator showing current editing mode
-  - Ghost rendering for preview during drawing
+### Grid Points
+- Grid points can be selected individually.
+- Shift-click toggles grid points into or out of a multi-selection.
+- The inspector applies `column` and `mechanical` changes to all selected grid points when multiple points are selected.
 
-### 4. Data Management
+### Core Selection
+- Clicking a core wall selects only that wall segment.
+- Clicking inside the core area selects the full core.
+- The core inspector includes a Delete Core action.
+- `Delete` or `Backspace` deletes the selected core.
 
-#### Import/Export
-- **Save Floorplan**: Export to JSON with all geometry and metadata
-- **Open Floorplan**: Load JSON files with backward compatibility
-- **Schema Version**: Tracks data format version (current: 1.0.0)
-- **Unit Preservation**: Saves and restores measurement units
+## Panels
 
-#### Data Structure
-The application uses a dual-schema approach:
-- **Legacy Schema**: `wall_graph` (nodes/edges), simple `areas` array
-- **Reference Schema**: Structured collections for advanced features
-  - `Plan_Boundary`: Array of polygon objects (Pt_0, Pt_1, etc.)
-  - `Core_Boundary`: Service core polygons
-  - `Columns`: Column footprint polygons
-  - `Temperature_Regions`: Thermal zone objects with subregions
-  - `Beams`: Beam objects with height constraints
-  - `Points`/`Edges`: Routing grid for duct planning
-  - `Ducts`: Available duct specifications
-  - `Duct_Plan`: Optimized routing solution
+### Inspector
+- Shows properties for the active selection.
+- Supports three main selection types:
+  - Grid point selection, including multi-selection.
+  - Core selection.
+  - Wall segment selection.
 
-#### Validation
-- JSON schema validation for floorplan data
-- Coordinate deduplication (configurable epsilon tolerance)
-- Node/edge canonicalization for consistency
-- Automatic conversion between legacy and reference schemas
+### Canvas Grid
+- Controls canvas-grid snapping and visual intensity.
+- Grid spacing is configurable in current plan units.
 
-### 5. Geometry Features
+### Grid Generation
+- Sets routing-grid spacing.
+- Starts origin-picking mode for grid generation.
+- Clears the generated grid.
 
-#### Snapping System
-- **Node Snap**: 10px threshold for vertex-to-vertex alignment
-- **Edge Snap**: 8px threshold for point-to-edge projection
-- **Alignment Guides**: Visual guides show horizontal/vertical alignment
-- **Orthogonal Constraint**: Force 90° angles with Shift key
+### Exclusion Areas
+- Lists current exclusion areas.
+- Includes the Finish Area action while drawing a new exclusion area.
 
-#### Measurements
-- **Edge Lengths**: Automatic dimension display on wall segments
-- **Area Calculations**: Polygon area computation
-- **Unit Conversion**: Seamless conversion between measurement systems
+### Layers
+- Toggles visibility for:
+  - Plan Boundary
+  - Boundary Area
+  - Core Boundary
+  - Core Area
+  - Columns
+  - Exclusion Areas
+  - Beams
+  - Grid Points
+  - Grid Edges
+  - Ducts
+  - Duct Plan
+- Also includes editable plan name input.
 
-#### Rendering
-- **Anti-aliased Canvas**: Smooth geometry rendering
-- **Color Customization**: RGB/hex color support with alpha transparency
-- **Visual Hierarchy**: Distinct colors for different element types
-  - Walls: Black (#222)
-  - Locked segments: Red dashed (#c22)
-  - Core boundaries: Red (#ff6b6b)
-  - Core areas: Light red (rgba(255, 107, 107, 0.15))
-  - Temperature regions: Customizable per region
-  - Columns: Gray (rgba(128, 128, 128, 0.6))
+## Keyboard Shortcuts
+- `Shift`: constrain boundary/core drawing to snapped angles.
+- `Cmd/Ctrl + Z`: undo.
+- `Cmd/Ctrl + Shift + Z`: redo.
+- `L`: lock or unlock the selected wall segment.
+- `Enter`: finish the current area or core polygon.
+- `Escape`:
+  - In Select mode, clear the current selection.
+  - In Area/Core/Door/Grid Origin modes, exit or cancel the current action.
+- `Delete` or `Backspace`: delete the selected core.
 
-### 6. UI Components
+## Data Model and JSON
 
-#### Toolbar
-- Clear: Reset to empty floorplan
-- Add Area: Enter area definition mode
-- Add Core: Enter core boundary mode
-- Entrance: Enter entrance placement mode
-- Lock: Toggle lock on selected segment
-- Open Floorplan: Load JSON file
-- Save Floorplan: Export current work
-- Optimize: Generate optimization request (API integration planned)
+### Current Export Format
+The active `toJSON()` implementation exports schema version `2.0.0`.
 
-#### Panels
-- **Canvas Panel**: Main drawing area with mode indicator
-- **JSON Panel**: Live view of floorplan data structure
-- **Layers Panel**: Layer visibility toggles
-- **Plan Panel**: Floorplan name and properties
-- **Areas Panel**: List of defined areas (planned)
-- **Core Panel**: Finish Core button to complete drawing
+The v2 format includes:
+- top-level metadata such as `schema_version`, `name`, and `units`
+- `boundary.edges`
+- `core.edges`
+- `grid_points`
+- `exclusion_areas`
+- `thermal_zones`
+- `structural_components`
+- `mechanical_components`
+- `layers`
 
-#### Keyboard Shortcuts
-- **Shift**: Enable orthogonal constraint during drawing
-- **L**: Lock/unlock selected wall segment
-- **Enter**: Finish current polygon (area or core)
-- **Escape**: Cancel current drawing operation
-- **Cmd/Ctrl + Z**: Undo
-- **Cmd/Ctrl + Shift + Z**: Redo
+Boundary and core edges are exported as objects with their own properties, including wall type, translucency, lock state, and serialized openings.
 
-### 7. History & State Management
-- **Undo/Redo**: Full history tracking for all edits
-- **Store System**: Centralized state management (FloorPlanStore)
-- **Auto-save**: JSON output updates on every change
-- **Multiple Plans**: Support for multiple floorplan documents (architecture in place)
+Grid points are exported as objects with at least:
+- `id`
+- `x`
+- `y`
+- `column`
+- `mechanical`
 
----
+Coordinates are snapped during serialization when they are within `0.001` of an integer to reduce floating-point noise.
 
-## Technical Architecture
+### Backward Compatibility
+- The loader supports older JSON files as well as the current v2 structure.
+- `FloorPlan.fromJSON()` detects v2 files and routes them through the dedicated v2 loader.
 
-### Frontend
-- **Framework**: Electron (desktop application)
-- **Rendering**: HTML5 Canvas 2D context
-- **Modules**: ES6 modules with clean separation
-  - `renderer/drawing/`: Canvas rendering and geometry
-  - `renderer/models/`: Data models (FloorPlan)
-  - `renderer/state/`: State management (Store, History)
-  - `renderer/ui/`: User interface and event handling
+## Rendering and Interaction Notes
+- Wall vertices are rendered subtly to reduce visual clutter.
+- Grid points are smaller and more desaturated than earlier versions.
+- Selected walls and selected grid points use a stronger highlight color.
+- Core walls are highlighted together when the whole core is selected.
 
-### Data Flow
-1. User interaction → UI event handlers
-2. Update FloorPlan model
-3. Push to History (for undo/redo)
-4. Notify Store listeners
-5. Trigger canvas re-render
-6. Update JSON panel display
+## Current Limitations
+- The UI button label says Place Door, while some internal code still contains legacy `entrance` naming for compatibility.
+- The exported JSON is v2, but some legacy validation/schema helpers in the codebase still describe older structures.
+- Beam, ducts, and duct-plan layers exist primarily as visibility toggles and data placeholders rather than full editing workflows.
+- Grid generation currently forces the Grid Points layer visible when a new grid is generated.
 
-### File Structure
-```
-floorplan-tool/
-├── main/                 # Electron main process
-├── renderer/
-│   ├── drawing/         # Canvas rendering, geometry utilities
-│   │   ├── drawingService.js
-│   │   ├── renderers.js
-│   │   └── geometry.js
-│   ├── models/          # Data models and validation
-│   │   ├── FloorPlan.js
-│   │   ├── validation.js
-│   │   └── promptRenderer.js
-│   ├── state/           # State management
-│   │   ├── store.js
-│   │   └── history.js
-│   ├── ui/              # UI and event handling
-│   │   └── ui.js
-│   ├── index.html       # Main HTML structure
-│   ├── index.js         # Renderer entry point
-│   └── styles.css       # Application styles
-├── config.js            # Unit conversion and scale settings
-└── package.json         # Dependencies and scripts
-```
+## Main Source Files
+- `renderer/ui/ui.js`: UI wiring, modes, shortcuts, inspector, layer controls, save/load actions.
+- `renderer/models/FloorPlan.js`: main model, selection state, wall/core/grid operations, JSON serialization.
+- `renderer/drawing/renderers.js`: canvas rendering for walls, areas, grid points, core previews, and split preview.
+- `renderer/drawing/drawingService.js`: render orchestration.
+- `renderer/drawing/geometry.js`: snapping, closest-segment, and projection helpers.
+- `renderer/index.html`: visible panel and toolbar layout.
+- `renderer/styles.css`: application styling.
 
----
-
-## Known Limitations & Future Enhancements
-
-### Current Limitations
-- Beams, Grid Points, Grid Edges, Ducts, and Duct Plan layers have no rendering implementation yet
-- Column placement/editing UI not yet implemented
-- Area list panel not functional
-- Segment dragging in edit mode incomplete
-- No measurement tools for distances/angles
-- Limited column manipulation
-
-### Planned Features
-- API integration for optimization (replace "Refine with AI" button)
-- Backend coordination for unified JSON structure
-- Enhanced validation with visual error feedback
-- Advanced geometry editing (move, rotate, scale)
-- Measurement and annotation tools
-- Template system for common layouts
-- Export to CAD formats (DXF, DWG)
-
----
-
-## Development Workflow Recommendations
-
-### Basic Workflow
-1. **Start Application**: `npm start`
-2. **Draw Boundary**: Click to place vertices, close polygon
-3. **Add Core Areas**: Switch to core mode, define service cores
-4. **Define Zones**: Use area mode for functional spaces
-5. **Place Entrances**: Switch to entrance mode, click on walls
-6. **Adjust Layers**: Toggle visibility as needed for clarity
-7. **Save Work**: Export JSON file for backup/sharing
-8. **Optimize**: (When API ready) Generate optimization request
-
-### Testing Workflow
-1. Load existing JSON files to test backward compatibility
-2. Verify layer toggles work correctly
-3. Test undo/redo after major edits
-4. Check coordinate precision with different unit systems
-5. Validate export/import cycle preserves all data
-6. Test snapping behavior at various zoom levels
-
-### Development Workflow
-1. Make changes to renderer code
-2. Hot reload updates automatically (Electron dev mode)
-3. Check browser console for errors/warnings
-4. Verify JSON output panel for data integrity
-5. Test with various floorplan sizes and complexities
-6. Commit changes with descriptive messages
-
----
-
-## Recent Updates (Dec 2, 2025)
-
-### Completed Features
-- ✅ Core drawing projection guides with alignment snapping
-- ✅ Cursor snapping to alignment guides (15px threshold)
-- ✅ Layer toggle system fully functional
-- ✅ Separate Core Area and Core Boundary layers
-- ✅ Lock button functionality for wall segments
-- ✅ Fixed layer visibility issues with proper state management
-
-### Bug Fixes
-- Fixed layer toggles not working (hasOwnProperty issue)
-- Fixed checkbox state being reset by onChange callbacks
-- Fixed boundary rendering showing segmented lines
-- Separated boundary area from temperature regions rendering
-- Added null checks for optimize button to prevent errors
-
----
-
-## API Integration (Planned)
-
-The optimize button is designed to:
-1. Validate current floorplan data
-2. Serialize to JSON format
-3. Send to backend optimization API
-4. Receive optimized layout suggestions
-5. Apply or preview changes
-
-**Status**: Button exists, API endpoint and contract pending backend team discussion.
+## Typical Workflow
+1. Draw the outer boundary.
+2. Add one or more exclusion areas if needed.
+3. Add the service core.
+4. Edit wall properties and openings from the inspector.
+5. Generate the routing grid from a chosen origin.
+6. Toggle layers to inspect different aspects of the model.
+7. Save the plan as JSON.

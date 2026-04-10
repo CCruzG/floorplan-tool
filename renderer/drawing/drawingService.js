@@ -11,6 +11,9 @@ export const DrawingService = {
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     if (!fp) return;
 
+    // Draw scale-aware background grid first so all geometry renders on top
+    R.drawBackgroundGrid(ctx, fp, options.gridSettings);
+
     // Apply an optional view transform (scale + offset) so large imported
     // plans can be fitted into the canvas. The transform is stored on the
     // FloorPlan as `_view` by the UI loader when appropriate.
@@ -39,16 +42,15 @@ export const DrawingService = {
       return;
     }
 
-    // Do not paint an opaque canvas background here so the wrapper
-    // element's CSS grid/background remains visible. The canvas should be
-    // transparent and only draw geometry on top of the CSS background.
+    // Do not paint an opaque canvas background here — drawBackgroundGrid
+    // already fills the canvas before this point.
 
     // Delegate to modular render functions - respecting layer visibility
     if (fp.layers?.Boundary_Area !== false) {
       R.drawBoundaryArea(ctx, fp);
     }
-    if (fp.layers?.Temperature_Regions !== false) {
-      R.drawAreas(ctx, fp);
+    if (fp.layers?.Exclusion_Areas !== false) {
+      R.drawExclusionAreas(ctx, fp);
     }
     console.log('Rendering Plan_Boundary:', fp.layers?.Plan_Boundary);
     if (fp.layers?.Plan_Boundary !== false) {
@@ -65,6 +67,14 @@ export const DrawingService = {
     if (fp.layers?.Columns !== false) {
       R.drawColumns(ctx, fp);
     }
+    // Draw grid points if layer is enabled
+    if (fp.layers?.Points !== false) {
+      R.drawGridPoints(ctx, fp);
+    }
+    // Draw grid edges if layer is enabled
+    if (fp.layers?.Edges !== false) {
+      R.drawGridEdges(ctx, fp);
+    }
     R.drawEntrances(ctx, fp);
     if (options.showVertices) R.drawVertices(ctx, fp);
 
@@ -74,6 +84,14 @@ export const DrawingService = {
 
     if (options.ghost && fp.boundaryClosed && options.mode === 'entrance') {
       R.drawEntranceProjection(ctx, fp, options.ghost);
+    }
+
+    if (options.ghost && options.mode === 'door') {
+      R.drawDoorGhost(ctx, fp, options.ghost);
+    }
+
+    if (options.ghost && options.mode === 'select' && fp.selectedSegment != null) {
+      R.drawSplitPreview(ctx, fp, options.ghost);
     }
 
     if (options.ghost && !fp.boundaryClosed) {
@@ -97,6 +115,10 @@ export const DrawingService = {
       if (options.ghost && options.tempCore.length > 0) {
         R.drawCoreProjectionGuides(ctx, fp, options.tempCore, options.ghost);
       }
+    }
+
+    if (options.mode === 'grid-origin' && options.ghost) {
+      R.drawGridOriginGhost(ctx, fp, options.ghost);
     }
 
     if (appliedView) ctx.restore();

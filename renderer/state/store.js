@@ -7,7 +7,7 @@ export class FloorPlanStore {
     this.active = null;
     this.history = new Map(); // name → History
     this.listeners = [];
-    this.mode = "draw" // draw | entrance | edit | area | core | column | beam
+    this.mode = "select" // select | draw | entrance | area | core | column | beam
 
     // Temporary UI state (not persisted to history)
     this.dragStart = null;       // { x, y } when a drag begins

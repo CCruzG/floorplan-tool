@@ -11,16 +11,6 @@
 
   <!-- Toolbar -->
   <div id="toolbar">
-    <button id="clearBtn">Clear</button>
-    <button id="areaModeBtn">Add Area</button>
-    <button id="coreModeBtn">Add Core</button>
-    <!-- <button id="editModeBtn">Edit</button> -->
-    <button id="entranceModeBtn">Entrance</button>
-    <button id="lockBtn">Lock</button>
-    <!-- <button id="saveReqBtn">Save Requirements</button> -->
-    <button id="openFloorplanBtn">Open Floorplan</button>
-    <button id="saveFloorplanBtn">Save Floorplan</button>
-    <button id="optimiseBtn">optimise</button>
     <label style="margin-left:12px; color:#fff; font-family: monospace; font-size:10px;">
       Canvas width:
       <input id="canvasWidthValue" type="number" value="50" min="0.01" step="0.01" style="width:90px; margin-left:6px" />
@@ -39,6 +29,26 @@
   <!-- Main App -->
   <div id="app">
 
+    <!-- Floating tool palette -->
+    <div id="toolPalette" class="floating-palette">
+      <div class="palette-title">Tools</div>
+      <div class="palette-buttons">
+        <button id="selectModeBtn">Select</button>
+        <button id="drawModeBtn">Draw Boundary</button>
+        <button id="clearBtn">Clear</button>
+        <button id="areaModeBtn">Add Exclusion Area</button>
+        <button id="coreModeBtn">Add Core</button>
+        <button id="finishCoreBtn" style="display:none">Finish Core</button>
+        <!-- <button id="editModeBtn">Edit</button> -->
+        <button id="entranceModeBtn">Place Door</button>
+        <button id="lockBtn">Lock</button>
+        <!-- <button id="saveReqBtn">Save Requirements</button> -->
+        <button id="openFloorplanBtn">Open Floorplan</button>
+        <button id="saveFloorplanBtn">Save Floorplan</button>
+        <button id="optimiseBtn">optimise</button>
+      </div>
+    </div>
+
     <!-- Top block: canvas + JSON -->
     <div id="canvasAndJson">
       <div id="canvasPanel">
@@ -55,63 +65,122 @@
     </div>
     <div id="ai-debug" style="display:none; padding:8px; border:1px solid #ccc; margin-top:8px;"></div>
 
-    <!-- Bottom block: areas + layers -->
+    <!-- Resize handle -->
+    <div id="resizeHandle"></div>
+
+    <!-- Bottom block: panels -->
     <div id="bottomPanels">
-      <div id="planPanel" class="panel">
-        <div class="form-row">
-          <label for="planNameInput">Plan name:</label>
-          <input id="planNameInput" type="text" placeholder="Untitled plan" />
+      <div id="inspectorPanel" class="panel">
+        <p class="inspector-empty">Properties (Nothing Selected)</p>
+      </div>
+      
+      <div id="canvasGridPanel" class="panel">
+        <div class="cg-header">Canvas Grid</div>
+        <div class="cg-body">
+          <div class="cg-row">
+            <label class="cg-label" for="cgSnapEnabled">Snap enabled</label>
+            <input type="checkbox" id="cgSnapEnabled" checked>
+          </div>
+          <div class="cg-row">
+            <label class="cg-label" for="cgSpacing">Spacing</label>
+            <div class="cg-input-group">
+              <input type="number" id="cgSpacing" placeholder="auto" min="0" step="0.5" value="2">
+              <span class="cg-unit" id="cgSpacingUnit">m</span>
+            </div>
+          </div>
+          <div class="cg-row">
+            <label class="cg-label" for="cgOpacity">Line intensity</label>
+            <input type="range" id="cgOpacity" min="0" max="100" value="50">
+            <span class="cg-pct" id="cgOpacityPct">50%</span>
+          </div>
         </div>
-      <!-- </div>
-        <h3>Feasibility</h3>
-        <div id="feasibilityContent">
-          <div id="feasibilityStatus" class="status unknown">Unknown</div>
-          <div id="feasibilitySummary">Set a boundary and requirements to see feasibility.</div>
-        </div>
-      </div> -->
+      </div>
 
+      
+      <div id="gridPanel" class="panel">
+        <div class="cg-header">Grid Generation</div>
+        <div class="cg-body">
+          <div class="cg-row">
+            <label class="cg-label" for="gridSpacingInput">Spacing</label>
+            <div class="cg-input-group">
+              <input type="number" id="gridSpacingInput" value="1000" min="100" step="100">
+              <span class="cg-unit">mm</span>
+            </div>
+          </div>
+          <div id="gridOriginDisplay" class="gp-origin-display"></div>
+          <div class="cg-row gp-btn-row">
+            <button id="generateGridBtn" class="gp-btn">Generate Grid</button>
+            <button id="clearGridBtn" class="gp-btn gp-btn-clear">Clear Grid</button>
+          </div>
+        </div>
+      </div>
+      
       <div id="areasPanel" class="panel">
-        <h3>Areas</h3>
-        <input id="areaLabelInput" placeholder="Label (e.g. private)">
-        <button id="finishAreaBtn">Finish Area</button>
-        <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
-          <label for="areaColorPicker">Area color:</label>
-          <input id="areaColorPicker" type="color" value="#c86464">
-          <label for="areaAlphaRange" style="margin-left:6px; font-size:0.9em">Alpha:</label>
-          <input id="areaAlphaRange" type="range" min="0" max="1" step="0.01" value="0.3" style="width:120px">
-          <input id="areaAlphaValue" type="number" min="0" max="1" step="0.01" value="0.3" style="width:60px">
-          <label for="areaAirReq" style="margin-left:6px; font-size:0.9em">Air req (l/s):</label>
-          <input id="areaAirReq" type="number" min="0" step="0.1" value="7.5" style="width:80px">
-          <button id="applyAreaColorBtn">Apply color</button>
+        <div class="cg-header">Exclusion Areas</div>
+        <div class="cg-body">
+          <div class="cg-row">
+            <button id="finishAreaBtn" class="gp-btn">Finish Area</button>
+          </div>
+          <ul id="areasList" class="ea-list"></ul>
         </div>
-        <ul id="areasList"></ul>
       </div>
-      </div>
-
-      <div id="corePanel" class="panel">
-        <h3>Core</h3>
-        <button id="finishCoreBtn">Finish Core</button>
-      </div>
-
+      
       <div id="layersPanel" class="panel">
-        <h3>Layers</h3>
-        <div class="layer-controls">
+        <div class="cg-header">Layers</div>
+        <div class="cg-body">
+          <div class="cg-row">
+            <label class="cg-label" for="planNameInput">Plan name</label>
+            <input id="planNameInput" type="text" placeholder="Untitled plan" style="background:#181825;color:#cdd6f4;border:1px solid #45475a;border-radius:3px;font-family:monospace;font-size:11px;padding:2px 4px;width:100px;">
+          </div>
+          <div class="layer-controls">
           <label><input type="checkbox" id="planBoundaryLayer" checked> Plan Boundary</label>
           <label><input type="checkbox" id="boundaryAreaLayer" checked> Boundary Area</label>
           <label><input type="checkbox" id="coreBoundaryLayer" checked> Core Boundary</label>
           <label><input type="checkbox" id="coreAreaLayer" checked> Core Area</label>
           <label><input type="checkbox" id="columnsLayer" checked> Columns</label>
-          <label><input type="checkbox" id="temperatureRegionsLayer" checked> Temperature Regions</label>
+          <label><input type="checkbox" id="exclusionAreasLayer" checked> Exclusion Areas</label>
           <label><input type="checkbox" id="beamsLayer"> Beams</label>
           <label><input type="checkbox" id="pointsLayer"> Grid Points</label>
           <label><input type="checkbox" id="edgesLayer"> Grid Edges</label>
           <label><input type="checkbox" id="ductsLayer"> Ducts</label>
           <label><input type="checkbox" id="ductPlanLayer"> Duct Plan</label>
+          </div>
         </div>
       </div>
 
     </div>  <!-- Your JS entry point -->
   <script type="module" src="index.js"></script>
+  <script>
+    (function () {
+      const handle = document.getElementById('resizeHandle');
+      const panels = document.getElementById('bottomPanels');
+      const app    = document.getElementById('app');
+      let dragging = false, startY = 0, startH = 0;
+
+      handle.addEventListener('mousedown', e => {
+        dragging = true;
+        startY = e.clientY;
+        startH = panels.getBoundingClientRect().height;
+        document.body.style.cursor = 'row-resize';
+        document.body.style.userSelect = 'none';
+        e.preventDefault();
+      });
+
+      document.addEventListener('mousemove', e => {
+        if (!dragging) return;
+        const delta  = startY - e.clientY;
+        const newH   = Math.max(60, Math.min(startH + delta, app.getBoundingClientRect().height - 80));
+        panels.style.flex = `0 0 ${newH}px`;
+      });
+
+      document.addEventListener('mouseup', () => {
+        if (!dragging) return;
+        dragging = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      });
+    })();
+  </script>
 </body>
 
 </html>

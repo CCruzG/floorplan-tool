@@ -172,6 +172,37 @@ function hexToRgba(hex, alpha = 1) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+export function drawExclusionAreas(ctx, fp) {
+  const areas = fp.Exclusion_Areas || [];
+  if (!areas.length) return;
+  ctx.save();
+  areas.forEach((area, idx) => {
+    const pts = area.vertices;
+    if (!pts || pts.length < 3) return;
+    ctx.beginPath();
+    pts.forEach(([x, y], i) => {
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(220, 50, 50, 0.12)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(200, 40, 40, 0.75)';
+    ctx.setLineDash([7, 4]);
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Label centroid
+    const cx = pts.reduce((s, v) => s + v[0], 0) / pts.length;
+    const cy = pts.reduce((s, v) => s + v[1], 0) / pts.length;
+    ctx.fillStyle = 'rgba(180, 30, 30, 0.9)';
+    ctx.font = 'bold 11px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`⛔ Exclusion ${idx + 1}`, cx, cy);
+  });
+  ctx.restore();
+}
+
 export function drawAreaGhost(ctx, fp, points, mouse) {
   if (!points.length) return;
   ctx.save();
@@ -217,22 +248,40 @@ export function drawAreaGhost(ctx, fp, points, mouse) {
     if (nodeSnap && !constrain) {
       previewX = nodeSnap.x; previewY = nodeSnap.y; previewMode = 'node';
     } else if (nodeSnap && constrain && lastX != null) {
-      // align node to last
-      const dx = Math.abs(nodeSnap.x - lastX);
-      const dy = Math.abs(nodeSnap.y - lastY);
-      if (dx > dy) { previewX = nodeSnap.x; previewY = lastY; } else { previewX = lastX; previewY = nodeSnap.y; }
+      const dx = nodeSnap.x - lastX;
+      const dy = nodeSnap.y - lastY;
+      const r = Math.hypot(dx, dy);
+      if (r > 0) {
+        const angle = Math.atan2(dy, dx);
+        const snapAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+        previewX = lastX + r * Math.cos(snapAngle);
+        previewY = lastY + r * Math.sin(snapAngle);
+      }
       previewMode = 'constrained';
     } else if (edgeSnap && !constrain) {
       previewX = edgeSnap.x; previewY = edgeSnap.y; previewMode = 'edge';
     } else if (edgeSnap && constrain && lastX != null) {
-      const dx = Math.abs(edgeSnap.x - lastX);
-      const dy = Math.abs(edgeSnap.y - lastY);
-      if (dx > dy) { previewX = edgeSnap.x; previewY = lastY; } else { previewX = lastX; previewY = edgeSnap.y; }
+      const dx = edgeSnap.x - lastX;
+      const dy = edgeSnap.y - lastY;
+      const r = Math.hypot(dx, dy);
+      if (r > 0) {
+        const angle = Math.atan2(dy, dx);
+        const snapAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+        previewX = lastX + r * Math.cos(snapAngle);
+        previewY = lastY + r * Math.sin(snapAngle);
+      }
       previewMode = 'constrained';
     } else if (constrain && lastX != null) {
-      // project mouse onto horizontal/vertical through last vertex
-      const proj = projectToVertex({ x: lastX, y: lastY }, { x: mouse.x, y: mouse.y });
-      previewX = proj.x; previewY = proj.y; previewMode = 'constrained';
+      const dx = mouse.x - lastX;
+      const dy = mouse.y - lastY;
+      const r = Math.hypot(dx, dy);
+      if (r > 0) {
+        const angle = Math.atan2(dy, dx);
+        const snapAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+        previewX = lastX + r * Math.cos(snapAngle);
+        previewY = lastY + r * Math.sin(snapAngle);
+      }
+      previewMode = 'constrained';
     } else {
       previewMode = 'free';
       previewX = mouse.x; previewY = mouse.y;
@@ -351,6 +400,121 @@ export function areaColour(label) {
   return map[label] || { fill: "rgba(120,120,120,0.2)", stroke: "#666" };
 }
 
+// ── Door symbol helper (not exported) ────────────────────────────────────
+// Draws an architectural plan-view door symbol centred at parametric t on
+// the line n1→n2.  widthPx is the full opening width in canvas pixels.
+function _drawDoorSymbol(ctx, n1x, n1y, n2x, n2y, t, widthPx, opts = {}) {
+  const { color = '#333', wallThick = 5, ghost = false } = opts;
+  const dx = n2x - n1x, dy = n2y - n1y;
+  const edgeLen = Math.hypot(dx, dy) || 1;
+  const angle = Math.atan2(dy, dx);
+  const cx = n1x + t * dx, cy = n1y + t * dy;
+  const hw = widthPx / 2;     // half opening width along wall
+  const halfWall = wallThick / 2 + 1; // clearance for white fill
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(angle);
+
+  if (ghost) {
+    // Semi-transparent rectangle preview
+    ctx.fillStyle = 'rgba(80,140,255,0.25)';
+    ctx.fillRect(-hw, -halfWall, hw * 2, halfWall * 2);
+    ctx.strokeStyle = 'rgba(80,140,255,0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    ctx.strokeRect(-hw, -halfWall, hw * 2, halfWall * 2);
+    ctx.setLineDash([]);
+  } else {
+    // White fill clears the wall behind the opening
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(-hw - 0.5, -halfWall, (hw + 0.5) * 2, halfWall * 2);
+
+    // Jamb ticks at each edge of the opening
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(-hw, -halfWall); ctx.lineTo(-hw, halfWall + 4);
+    ctx.moveTo( hw, -halfWall); ctx.lineTo( hw, halfWall + 4);
+    ctx.stroke();
+
+    // Door leaf (line along the inside wall face, hinge at left jamb)
+    const hingeX = -hw, hingeY = halfWall + 4;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(hingeX, hingeY);
+    ctx.lineTo(hingeX + widthPx, hingeY);  // closed position
+    ctx.stroke();
+
+    // Swing arc (quarter circle from closed → perpendicular open)
+    ctx.beginPath();
+    ctx.arc(hingeX, hingeY, widthPx, 0, Math.PI / 2);
+    ctx.setLineDash([3, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.restore();
+}
+
+// ── Background grid ────────────────────────────────────────────────────────
+// Returns the canvas-pixel size of one grid cell given pxPerUnit so that
+// lines are visually ~40 px apart, rounded to a "nice" plan-unit interval.
+function _niceGridIntervalPx(pxPerUnit) {
+  const targetPx = 40;
+  const raw = targetPx / pxPerUnit;
+  if (!isFinite(raw) || raw <= 0) return targetPx;
+  const mag  = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const nice = norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10;
+  return nice * mag * pxPerUnit;
+}
+
+/**
+ * Draw a scale-aware background grid on the canvas.
+ * Called as the very first draw operation so all geometry renders on top.
+ * @param {object} gridSettings - optional overrides: spacingOverride (plan units), lineOpacity (0-1)
+ */
+export function drawBackgroundGrid(ctx, fp, gridSettings = {}) {
+  const W = ctx.canvas.width;
+  const H = ctx.canvas.height;
+
+  // White background
+  ctx.fillStyle = '#fafafa';
+  ctx.fillRect(0, 0, W, H);
+
+  const pxPerUnit = fp?.units?.pxPerUnit || 1;
+
+  // Use manual spacing override (plan units) if provided, otherwise auto-compute
+  let intervalPx;
+  const spacing = gridSettings.spacingOverride;
+  if (spacing > 0) {
+    intervalPx = spacing * pxPerUnit;
+  } else {
+    intervalPx = _niceGridIntervalPx(pxPerUnit);
+  }
+  if (intervalPx < 4) return; // too dense to be useful
+
+  const opacity = gridSettings.lineOpacity ?? 0.5;
+  ctx.save();
+  ctx.strokeStyle = `rgba(160, 160, 160, ${Math.max(0, Math.min(1, opacity))})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = 0; x <= W + intervalPx; x += intervalPx) {
+    const px = Math.round(x) + 0.5;
+    ctx.moveTo(px, 0);
+    ctx.lineTo(px, H);
+  }
+  for (let y = 0; y <= H + intervalPx; y += intervalPx) {
+    const py = Math.round(y) + 0.5;
+    ctx.moveTo(0, py);
+    ctx.lineTo(W, py);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
 export function drawWalls(ctx, fp, options = {}) {
   ctx.save();
   
@@ -360,8 +524,23 @@ export function drawWalls(ctx, fp, options = {}) {
     if (!n1 || !n2) return;
 
     // Visual differentiation: selected segment and locked segments
-    const isSelected = fp.selectedSegment === i || options.selectedSegment === i;
+    let isSelected = fp.selectedSegment === i || options.selectedSegment === i;
     const isLocked = !!edge.locked;
+
+    // Look up matching Wall object for type/translucent-aware drawing
+    const _EPS = 1;
+    const wall = (fp.Walls || []).find(w =>
+      Math.abs(w.start.x - n1.x) < _EPS && Math.abs(w.start.y - n1.y) < _EPS &&
+      Math.abs(w.end.x   - n2.x) < _EPS && Math.abs(w.end.y   - n2.y) < _EPS);
+
+    // Hoist wall-type flags so they're available both for rendering and opening drawing
+    const wallType = wall?.wallType ?? edge.wallType ?? 'boundary';
+    const isBoundaryWall = wallType === 'boundary' || (!wall && !edge.wallType);
+    const isCoreWall     = wallType === 'core';
+    const isTranslucent  = isBoundaryWall && !!wall?.translucent;
+
+    // When the entire core is selected, highlight all core walls
+    if (fp.selectedCore && isCoreWall) isSelected = true;
 
     ctx.beginPath();
     ctx.moveTo(n1.x, n1.y);
@@ -378,17 +557,43 @@ export function drawWalls(ctx, fp, options = {}) {
       ctx.strokeStyle = "#222";
       ctx.lineWidth = 2;
       ctx.stroke();
-    } else if (isLocked) {
-      // Render locked edges in red to make them visually distinct.
-      ctx.strokeStyle = "#c22"; // red-ish color for locked edges
-      ctx.lineWidth = 3;
-      ctx.setLineDash([6, 4]);
-      ctx.stroke();
-      ctx.setLineDash([]);
     } else {
-      ctx.strokeStyle = "#222";
-      ctx.lineWidth = 2;
-      ctx.stroke();
+      // Locked edges use red instead of black but keep the same line style
+      const baseColor = isLocked ? '#c22' : '#000';
+
+      if (isBoundaryWall && isTranslucent) {
+        // Two parallel thin lines (translucent boundary wall)
+        const dx = n2.x - n1.x;
+        const dy = n2.y - n1.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const nx = -dy / len;
+        const ny =  dx / len;
+        const offset = 2;
+        ctx.strokeStyle = baseColor;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(n1.x + nx * offset, n1.y + ny * offset);
+        ctx.lineTo(n2.x + nx * offset, n2.y + ny * offset);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(n1.x - nx * offset, n1.y - ny * offset);
+        ctx.lineTo(n2.x - nx * offset, n2.y - ny * offset);
+        ctx.stroke();
+      } else if (isCoreWall) {
+        // Core walls: thick line in a distinct core colour
+        ctx.strokeStyle = isLocked ? '#c22' : '#cc5500';
+        ctx.lineWidth = 4;
+        ctx.stroke();
+      } else if (isBoundaryWall) {
+        // Thick solid line (opaque boundary wall)
+        ctx.strokeStyle = baseColor;
+        ctx.lineWidth = 5;
+        ctx.stroke();
+      } else {
+        ctx.strokeStyle = isLocked ? '#c22' : '#222';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
     }
 
     if (options.mode === "draw") {
@@ -401,16 +606,114 @@ export function drawWalls(ctx, fp, options = {}) {
         ctx.textBaseline = "middle";
         ctx.fillText(formatLen(len), mid.x, mid.y);
     }
+
+    // Draw any door/window openings placed on this wall
+    if (wall?.openings?.length && n1 && n2) {
+      // o.width is stored in mm; convert to canvas pixels before drawing
+      const _pxU  = fp.units?.pxPerUnit || 1;
+      const _mmPU = fp.units?.length === 'm' ? 1000 : 1; // mm per plan-unit
+      const doorColor = isLocked ? '#c22' : '#333';
+      const wallThickPx = isBoundaryWall ? 5 : isCoreWall ? 4 : 2;
+      wall.openings.forEach(o => {
+        if (o.openingKind === 'door' || o.openingKind === 'entrance') {
+          const openingWidthPx = (o.width / _mmPU) * _pxU;
+          _drawDoorSymbol(ctx, n1.x, n1.y, n2.x, n2.y, o.t, openingWidthPx, {
+            color: doorColor,
+            wallThick: wallThickPx,
+            ghost: false
+          });
+        } else if (o.openingKind === 'opening') {
+          // Plain gap: white fill only, no symbol
+          const openingWidthPx = (o.width / _mmPU) * _pxU;
+          const dx = n2.x - n1.x, dy = n2.y - n1.y;
+          const angle = Math.atan2(dy, dx);
+          const cx = n1.x + o.t * dx, cy = n1.y + o.t * dy;
+          const hw = openingWidthPx / 2;
+          const halfWall = wallThickPx / 2 + 1;
+          ctx.save();
+          ctx.translate(cx, cy);
+          ctx.rotate(angle);
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(-hw - 0.5, -halfWall, (hw + 0.5) * 2, halfWall * 2);
+          ctx.restore();
+        }
+      });
+    }
   });
   
   ctx.restore();
 }
 
+/** Draws a door placement ghost on the selected wall while in 'door' mode. */
+export function drawDoorGhost(ctx, fp, mouse) {
+  if (fp.selectedSegment == null) return;
+  const edge = fp.wall_graph.edges[fp.selectedSegment];
+  if (!edge) return;
+  const n1 = getNodeById(fp.wall_graph.nodes, edge.v1);
+  const n2 = getNodeById(fp.wall_graph.nodes, edge.v2);
+  if (!n1 || !n2) return;
+
+  const dx = n2.x - n1.x, dy = n2.y - n1.y;
+  const edgeLen = Math.hypot(dx, dy) || 1;
+  const len2 = dx * dx + dy * dy || 1;
+
+  // Project mouse onto edge
+  let t = ((mouse.x - n1.x) * dx + (mouse.y - n1.y) * dy) / len2;
+
+  // Compute ghost door width: 1200 mm converted to canvas pixels
+  const pxPerUnit = fp.units?.pxPerUnit || 1;
+  const mmPerUnit = fp.units?.length === 'm' ? 1000 : 1;
+  const doorWidth = Math.min((1200 / mmPerUnit) * pxPerUnit, edgeLen * 0.8);
+  const hw = doorWidth / 2;
+  // Clamp t so door stays fully on the wall
+  t = Math.max(hw / edgeLen, Math.min(1 - hw / edgeLen, t));
+
+  _drawDoorSymbol(ctx, n1.x, n1.y, n2.x, n2.y, t, doorWidth, { ghost: true });
+}
+
+/**
+ * Draw a ghost crosshair at the nearest wall node while in 'grid-origin' mode.
+ * Snaps only to wall graph nodes (vertex endpoints).
+ */
+export function drawGridOriginGhost(ctx, fp, mouse) {
+  if (!fp || !mouse) return;
+  const nodes = fp.wall_graph?.nodes;
+  if (!nodes?.length) return;
+
+  // Find closest node within 20px
+  let best = null;
+  let bestDist = 20;
+  nodes.forEach(n => {
+    const d = Math.hypot(mouse.x - n.x, mouse.y - n.y);
+    if (d < bestDist) { bestDist = d; best = n; }
+  });
+
+  const px = best ? best.x : mouse.x;
+  const py = best ? best.y : mouse.y;
+  const snapping = !!best;
+
+  ctx.save();
+  const color = snapping ? '#e67e22' : 'rgba(230,126,34,0.4)';
+  ctx.strokeStyle = color;
+  ctx.lineWidth = snapping ? 1.5 : 1;
+  const r = 6;
+  // Circle
+  ctx.beginPath();
+  ctx.arc(px, py, r, 0, Math.PI * 2);
+  ctx.stroke();
+  // Cross
+  ctx.beginPath();
+  ctx.moveTo(px - r * 2, py); ctx.lineTo(px + r * 2, py);
+  ctx.moveTo(px, py - r * 2); ctx.lineTo(px, py + r * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
 export function drawVertices(ctx, fp) {
-  ctx.fillStyle = "#cc0000";
+  ctx.fillStyle = "rgba(180, 60, 60, 0.35)";
   fp.wall_graph.nodes.forEach(node => {
     ctx.beginPath();
-    ctx.arc(node.x, node.y, 3, 0, Math.PI * 2);
+    ctx.arc(node.x, node.y, 2.5, 0, Math.PI * 2);
     ctx.fill();
   });
 }
@@ -665,12 +968,14 @@ export function drawGhost(ctx, fp, mouse, { constrain = false } = {}) {
 
   let constrained = false;
   if (constrain) {
-    const dx = Math.abs(ghostX - lastX);
-    const dy = Math.abs(ghostY - lastY);
-    if (dx > dy) {
-      ghostY = lastY;
-    } else {
-      ghostX = lastX;
+    const dx = ghostX - lastX;
+    const dy = ghostY - lastY;
+    const r = Math.hypot(dx, dy);
+    if (r > 0) {
+      const angle = Math.atan2(dy, dx);
+      const snapAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+      ghostX = lastX + r * Math.cos(snapAngle);
+      ghostY = lastY + r * Math.sin(snapAngle);
     }
     constrained = true;
   }
@@ -939,16 +1244,14 @@ export function drawCoreGhost(ctx, fp, tempCore, mouse, constrain = false) {
     if (last) {
       const lastX = last[0];
       const lastY = last[1];
-      const dx = Math.abs(mouse.x - lastX);
-      const dy = Math.abs(mouse.y - lastY);
-      if (dx > dy) {
-        // lock horizontally
-        targetX = mouse.x;
-        targetY = lastY;
-      } else {
-        // lock vertically
-        targetX = lastX;
-        targetY = mouse.y;
+      const dx = mouse.x - lastX;
+      const dy = mouse.y - lastY;
+      const r = Math.hypot(dx, dy);
+      if (r > 0) {
+        const angle = Math.atan2(dy, dx);
+        const snapAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+        targetX = lastX + r * Math.cos(snapAngle);
+        targetY = lastY + r * Math.sin(snapAngle);
       }
       constrainedPoint = [targetX, targetY];
     }
@@ -1275,12 +1578,105 @@ export function drawColumnsVertices(ctx, fp) {
   ctx.restore();
 }
 
+// Draw grid points
+export function drawGridPoints(ctx, fp) {
+  if (!fp.Points || fp.Points.length === 0) return;
+  
+  ctx.save();
+  ctx.lineWidth = 1;
+  
+  fp.Points.forEach(point => {
+    const isSelected = fp.selectedPoints?.has(point.id) ?? fp.selectedPoint === point.id;
+    const isColumn   = point.column !== false; // default true
+
+    if (isColumn) {
+      // Filled muted blue dot — column vertex
+      ctx.fillStyle   = isSelected ? '#f39c12' : '#6b8caa';
+      ctx.strokeStyle = isSelected ? '#fff' : 'rgba(255,255,255,0.5)';
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, isSelected ? 5 : 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      // Hollow muted ring — non-column vertex
+      ctx.strokeStyle = isSelected ? '#f39c12' : '#555f73';
+      ctx.fillStyle   = 'transparent';
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, isSelected ? 5 : 2.5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  });
+  
+  ctx.restore();
+}
+
+// Draw grid edges (connections between points)
+export function drawGridEdges(ctx, fp) {
+  if (!fp.Edges || fp.Edges.length === 0) return;
+  
+  ctx.save();
+  ctx.strokeStyle = 'rgba(52, 152, 219, 0.3)'; // Semi-transparent blue
+  ctx.lineWidth = 1;
+  
+  fp.Edges.forEach(edge => {
+    const p1 = fp.Points.find(p => p.id === edge.v1);
+    const p2 = fp.Points.find(p => p.id === edge.v2);
+    if (p1 && p2) {
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+    }
+  });
+  
+  ctx.restore();
+}
+
+/**
+ * When a wall segment is selected in select mode, draw a preview vertex
+ * at the point on that segment closest to the mouse.  A second click on
+ * the segment will split it there (handled in the click handler).
+ */
+export function drawSplitPreview(ctx, fp, mouse) {
+  if (fp.selectedSegment == null) return;
+  const edge = fp.wall_graph.edges[fp.selectedSegment];
+  if (!edge) return;
+  const n1 = getNodeById(fp.wall_graph.nodes, edge.v1);
+  const n2 = getNodeById(fp.wall_graph.nodes, edge.v2);
+  if (!n1 || !n2) return;
+
+  const [cx, cy] = closestPointOnSegment(n1.x, n1.y, n2.x, n2.y, mouse.x, mouse.y);
+
+  // Only show when the mouse is actually near the segment
+  if (Math.hypot(mouse.x - cx, mouse.y - cy) > 14) return;
+  // Hide when the projected point would land too close to an endpoint
+  if (Math.hypot(cx - n1.x, cy - n1.y) < 10 || Math.hypot(cx - n2.x, cy - n2.y) < 10) return;
+
+  ctx.save();
+  // Outer white ring
+  ctx.beginPath();
+  ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+  ctx.fill();
+  // Orange border matching selection colour
+  ctx.strokeStyle = '#ff8800';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // Small centre dot
+  ctx.beginPath();
+  ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = '#ff8800';
+  ctx.fill();
+  ctx.restore();
+}
+
 // export default object for convenience
 export default {
   isNearFirstNode,
   drawEdgeWithDimension,
   drawBoundaryArea,
   drawAreas,
+  drawExclusionAreas,
   drawAreaGhost,
   areaColour,
   drawWalls,
@@ -1300,5 +1696,11 @@ export default {
   drawCoreAreas,
   drawCoreBoundaries,
   drawCoreGhost,
-  drawColumns
+  drawColumns,
+  drawGridPoints,
+  drawGridEdges,
+  drawDoorGhost,
+  drawBackgroundGrid,
+  drawGridOriginGhost,
+  drawSplitPreview
 };
