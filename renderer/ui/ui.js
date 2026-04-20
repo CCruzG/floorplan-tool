@@ -7,6 +7,7 @@ import { FloorPlan } from '../models/FloorPlan.js'; // adjust path if needed
 import { setScalePixelsPerUnit, getPixelsPerUnit, getUnitLabel } from '../../config.js';
 import { validateFloorPlan } from '../models/validation.js';
 import { renderPrompt } from '../models/promptRenderer.js';
+import { View3D } from '../drawing/view3d.js';
 
 // import { DrawingService, findClosestBoundaryPoint } from '../drawing/drawingService.js';
 
@@ -480,6 +481,48 @@ export function bindUI(store, canvas, mouse) {
           store.update(store.active);
           console.log("Segment lock toggled", store.active.wall_graph.edges[seg].locked);
         }
+      }
+    });
+  }
+
+  // 3D View toggle button
+  const view3dBtn      = document.getElementById('view3dBtn');
+  const canvasBg       = document.getElementById('canvasBg');
+  const view3dControls = document.getElementById('view3dControls');
+  const heightSlider   = document.getElementById('heightSlider');
+  const heightSliderPct = document.getElementById('heightSliderPct');
+  let view3d = null;
+  let is3dActive = false;
+
+  if (heightSlider && heightSliderPct) {
+    heightSlider.addEventListener('input', () => {
+      const cm = parseInt(heightSlider.value, 10);
+      heightSliderPct.textContent = `${cm} cm`;
+      if (view3d) view3d.setHeightCm(cm);
+    });
+  }
+
+  if (view3dBtn && canvasBg) {
+    view3dBtn.addEventListener('click', () => {
+      is3dActive = !is3dActive;
+
+      if (is3dActive) {
+        // Show 3D view, hide 2D canvas
+        canvas.style.display = 'none';
+        if (!view3d) view3d = new View3D(canvasBg);
+        view3d.show(store.active, parseInt(heightSlider?.value ?? 300, 10));
+        view3dBtn.textContent = '2D View';
+        view3dBtn.classList.add('active');
+        if (view3dControls) view3dControls.style.display = 'flex';
+      } else {
+        // Show 2D canvas, pause 3D view
+        if (view3d) view3d.hide();
+        canvas.style.display = '';
+        view3dBtn.textContent = '3D View';
+        view3dBtn.classList.remove('active');
+        if (view3dControls) view3dControls.style.display = 'none';
+        // Trigger a 2D redraw
+        store.notify();
       }
     });
   }

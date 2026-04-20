@@ -42,6 +42,7 @@
         <!-- <button id="editModeBtn">Edit</button> -->
         <button id="entranceModeBtn">Place Door</button>
         <button id="lockBtn">Lock</button>
+        <button id="view3dBtn">3D View</button>
         <!-- <button id="saveReqBtn">Save Requirements</button> -->
         <button id="openFloorplanBtn">Open Floorplan</button>
         <button id="saveFloorplanBtn">Save Floorplan</button>
@@ -52,8 +53,15 @@
     <!-- Top block: canvas + JSON -->
     <div id="canvasAndJson">
       <div id="canvasPanel">
-        <div id="canvasBg">
+        <div id="canvasBg" style="position:relative;">
           <canvas id="canvas" width="512" height="512"></canvas>
+          <div id="view3dControls" style="display:none; position:absolute; bottom:10px; left:50%; transform:translateX(-50%); z-index:10;
+               background:rgba(15,15,30,0.72); border:1px solid rgba(255,255,255,0.15); border-radius:6px;
+               padding:6px 14px; align-items:center; gap:10px; font-family:monospace; font-size:11px; color:#cdd6f4; white-space:nowrap;">
+            <span>Height</span>
+            <input id="heightSlider" type="range" min="270" max="600" value="300" step="10" style="width:120px; accent-color:#89b4fa;">
+            <span id="heightSliderPct">300 cm</span>
+          </div>
         </div>
         <div class="mode-indicator" id="canvasModeIndicator">Edit Mode</div>
       </div>
@@ -148,7 +156,16 @@
         </div>
       </div>
 
-    </div>  <!-- Your JS entry point -->
+    </div>  <!-- Three.js import map (must precede all type="module" scripts) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "../node_modules/three/build/three.module.js",
+      "three/examples/jsm/controls/OrbitControls.js": "../node_modules/three/examples/jsm/controls/OrbitControls.js"
+    }
+  }
+  </script>
+  <!-- Your JS entry point -->
   <script type="module" src="index.js"></script>
   <script>
     (function () {
