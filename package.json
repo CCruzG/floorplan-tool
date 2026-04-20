@@ -1,13 +1,50 @@
 {
   "name": "floorplan-tool",
   "version": "1.0.0",
+  "description": "Services Optimisation - Floorplan Editor",
+  "author": "FBI",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "electron-builder --mac"
   },
   "dependencies": {
     "ajv": "^8.17.1",
     "jsonschema": "^1.5.0",
     "three": "^0.184.0"
+  },
+  "devDependencies": {
+    "electron": "^41.2.1",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.fbi.floorplan-tool",
+    "productName": "Floorplan Tool",
+    "asar": false,
+    "files": [
+      "main.js",
+      "preload.js",
+      "config.js",
+      "renderer/**/*",
+      "node_modules/**/*",
+      "!node_modules/electron/**",
+      "!node_modules/electron-builder/**",
+      "!node_modules/.cache/**"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
+      ],
+      "identity": null
+    },
+    "dmg": {
+      "title": "Floorplan Tool ${version}",
+      "contents": [
+        { "x": 130, "y": 220 },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ]
+    }
   }
 }

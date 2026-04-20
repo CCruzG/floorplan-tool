@@ -4,8 +4,8 @@
 // Renders: extruded boundary walls, core boundaries, columns, exclusion areas
 // and a flat floor plane. Camera is fully orbitable with mouse.
 
-import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import * as THREE from '../vendor/three.module.js';
+import { OrbitControls } from '../vendor/OrbitControls.js';
 import { getNodeById } from '../models/floorPlanUtils.js';
 
 const WALL_THICKNESS_RATIO  = 0.008; // fraction of plan footprint size
