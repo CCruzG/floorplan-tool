@@ -6,6 +6,7 @@ import { bindUI } from './ui/ui.js';
 import { setScalePixelsPerUnit } from '../config.js';
 
 const store = new FloorPlanStore();
+store.viewport = { scale: 1, tx: 0, ty: 0 }; // zoom/pan state
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 
@@ -57,7 +58,8 @@ store.onChange(() => {
     DrawingService.render(ctx, store.active, {
       showVertices: true,
       ghost: mouse,
-      constrain: mouse.constrain
+      constrain: mouse.constrain,
+      viewport: store.viewport,
     });
     // console.log('[renderer] DrawingService.render invoked', {
     //   boundaryClosed: !!store.active?.boundaryClosed,
@@ -76,6 +78,21 @@ store.onChange(() => {
 
 // Bind UI events (will update mouse and call store.update as needed)
 bindUI(store, canvas, mouse);
+
+// Keep the canvas bitmap pixel-aligned to its CSS size as the panel resizes.
+// This must happen after bindUI so the resize fires into a fully wired store.
+function _syncCanvasSize() {
+  const w = canvas.clientWidth  | 0;
+  const h = canvas.clientHeight | 0;
+  if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
+    canvas.width  = w;
+    canvas.height = h;
+    store.notify();
+  }
+}
+const _resizeObs = new ResizeObserver(_syncCanvasSize);
+_resizeObs.observe(canvas);
+_syncCanvasSize(); // run immediately in case CSS has already settled
 
 // Start with one plan
 store.add(new FloorPlan('Plan 1'));

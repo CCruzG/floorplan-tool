@@ -27,6 +27,17 @@ ipcMain.handle('save-floorplan', async (event, { filenameSuggested, payload }) =
   }
 });
 
+ipcMain.handle('save-floorplan-silent', async (event, { filePath, payload }) => {
+  try {
+    const json = JSON.stringify(payload, null, 2);
+    await fs.writeFile(filePath, json, 'utf-8');
+    return { success: true, path: filePath };
+  } catch (err) {
+    console.error('Failed to save floorplan silently:', err);
+    return { success: false, error: String(err) };
+  }
+});
+
 ipcMain.handle('open-floorplan', async () => {
   try {
     const { canceled, filePaths } = await dialog.showOpenDialog({

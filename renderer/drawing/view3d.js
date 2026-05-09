@@ -47,7 +47,7 @@ export class View3D {
    */
   setHeightCm(cm) {
     this._heightPx = this._cmToPx(Math.max(270, Math.min(600, cm)));
-    if (this._fp && this._active) this._buildScene(this._fp);
+    if (this._fp && this._active) this._buildScene(this._fp, { preserveView: true });
   }
 
   /**
@@ -138,7 +138,8 @@ export class View3D {
 
   // ── Scene construction ──────────────────────────────────────────────────
 
-  _buildScene(fp) {
+  _buildScene(fp, { preserveView = false } = {}) {
+    const prevView = preserveView ? this._captureView() : null;
     this._scene = new THREE.Scene();
     const scene = this._scene;
 
@@ -194,12 +195,13 @@ export class View3D {
     scene.add(fill);
 
     // ── Materials ──────────────────────────────────────────────────────────
-    const wallMat  = new THREE.MeshLambertMaterial({ color: 0xd4d0c8 });
-    const coreMat  = new THREE.MeshLambertMaterial({ color: 0xe06060 });
-    const colMat   = new THREE.MeshLambertMaterial({ color: 0x787878 });
+    const wireframe = true;
+    const wallMat  = new THREE.MeshLambertMaterial({ color: 0xd4d0c8, wireframe });
+    const coreMat  = new THREE.MeshLambertMaterial({ color: 0xe06060, wireframe });
+    const colMat   = new THREE.MeshLambertMaterial({ color: 0x787878, wireframe });
     const floorMat = new THREE.MeshLambertMaterial({ color: 0xf2ede0, side: THREE.DoubleSide });
     const exclMat  = new THREE.MeshLambertMaterial({
-      color: 0xcc3333, transparent: true, opacity: 0.28, side: THREE.DoubleSide,
+      color: 0xcc3333, transparent: true, opacity: 0.28, side: THREE.DoubleSide, wireframe,
     });
 
     // ── Floor slab ─────────────────────────────────────────────────────────
@@ -297,11 +299,15 @@ export class View3D {
     scene.add(grid);
 
     // ── Position camera ────────────────────────────────────────────────────
-    const target = new THREE.Vector3(0, WALL_H * 0.3, 0);
-    this._controls.target.copy(target);
-    this._camera.position.set(planSize * 0.55, planSize * 0.45, planSize * 0.75);
-    this._camera.lookAt(target);
-    this._controls.update();
+    if (prevView) {
+      this._restoreView(prevView);
+    } else {
+      const target = new THREE.Vector3(0, WALL_H * 0.3, 0);
+      this._controls.target.copy(target);
+      this._camera.position.set(planSize * 0.55, planSize * 0.45, planSize * 0.75);
+      this._camera.lookAt(target);
+      this._controls.update();
+    }
   }
 
   // ── Geometry helpers ────────────────────────────────────────────────────
@@ -399,6 +405,22 @@ export class View3D {
     mesh.castShadow    = true;
     mesh.receiveShadow = true;
     return mesh;
+  }
+
+  _captureView() {
+    if (!this._camera || !this._controls) return null;
+    return {
+      position: this._camera.position.clone(),
+      quaternion: this._camera.quaternion.clone(),
+      target: this._controls.target.clone(),
+    };
+  }
+
+  _restoreView(view) {
+    this._camera.position.copy(view.position);
+    this._camera.quaternion.copy(view.quaternion);
+    this._controls.target.copy(view.target);
+    this._controls.update();
   }
 
   // ── Render loop ─────────────────────────────────────────────────────────

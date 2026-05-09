@@ -36,7 +36,7 @@
         <button id="selectModeBtn">Select</button>
         <button id="drawModeBtn">Draw Boundary</button>
         <button id="clearBtn">Clear</button>
-        <button id="areaModeBtn">Add Exclusion Area</button>
+        <button id="areaModeBtn">Add Excl. Area</button>
         <button id="coreModeBtn">Add Core</button>
         <button id="finishCoreBtn" style="display:none">Finish Core</button>
         <!-- <button id="editModeBtn">Edit</button> -->
@@ -47,6 +47,8 @@
         <button id="openFloorplanBtn">Open Floorplan</button>
         <button id="saveFloorplanBtn">Save Floorplan</button>
         <button id="optimiseBtn">optimise</button>
+        <button id="stopOptBtn" style="display:none; background:#c0392b; color:#fff; border:none; border-radius:4px; padding:4px 10px; cursor:pointer;">stop</button>
+        <div id="optimiseStatus" style="display:none; font-family:'Courier New',monospace; font-size:10px; color:#aaa; margin-top:6px; line-height:1.5;"></div>
       </div>
     </div>
 
@@ -56,10 +58,10 @@
         <div id="canvasBg" style="position:relative;">
           <canvas id="canvas" width="512" height="512"></canvas>
           <div id="view3dControls" style="display:none; position:absolute; bottom:10px; left:50%; transform:translateX(-50%); z-index:10;
-               background:rgba(15,15,30,0.72); border:1px solid rgba(255,255,255,0.15); border-radius:6px;
-               padding:6px 14px; align-items:center; gap:10px; font-family:monospace; font-size:11px; color:#cdd6f4; white-space:nowrap;">
+               background:rgba(8,8,8,0.85); border:1px solid #282828;
+               padding:6px 14px; align-items:center; gap:10px; font-family:'Courier New',monospace; font-size:10px; color:#c8c8c8; white-space:nowrap;">
             <span>Height</span>
-            <input id="heightSlider" type="range" min="270" max="600" value="300" step="10" style="width:120px; accent-color:#89b4fa;">
+            <input id="heightSlider" type="range" min="270" max="600" value="300" step="10" style="width:120px; accent-color:#00e676;">
             <span id="heightSliderPct">300 cm</span>
           </div>
         </div>
@@ -132,13 +134,20 @@
           <ul id="areasList" class="ea-list"></ul>
         </div>
       </div>
+
+      <div id="thermalZonesPanel" class="panel">
+        <div class="cg-header">Thermal Zones</div>
+        <div class="cg-body">
+          <ul id="thermalZonesList" class="ea-list"></ul>
+        </div>
+      </div>
       
       <div id="layersPanel" class="panel">
         <div class="cg-header">Layers</div>
         <div class="cg-body">
           <div class="cg-row">
             <label class="cg-label" for="planNameInput">Plan name</label>
-            <input id="planNameInput" type="text" placeholder="Untitled plan" style="background:#181825;color:#cdd6f4;border:1px solid #45475a;border-radius:3px;font-family:monospace;font-size:11px;padding:2px 4px;width:100px;">
+            <input id="planNameInput" type="text" placeholder="Untitled plan">
           </div>
           <div class="layer-controls">
           <label><input type="checkbox" id="planBoundaryLayer" checked> Plan Boundary</label>
@@ -147,6 +156,7 @@
           <label><input type="checkbox" id="coreAreaLayer" checked> Core Area</label>
           <label><input type="checkbox" id="columnsLayer" checked> Columns</label>
           <label><input type="checkbox" id="exclusionAreasLayer" checked> Exclusion Areas</label>
+          <label><input type="checkbox" id="temperatureRegionsLayer" checked> Thermal Zones</label>
           <label><input type="checkbox" id="beamsLayer"> Beams</label>
           <label><input type="checkbox" id="pointsLayer"> Grid Points</label>
           <label><input type="checkbox" id="edgesLayer"> Grid Edges</label>

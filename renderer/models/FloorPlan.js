@@ -894,7 +894,7 @@ export class FloorPlan {
         const inExclusion = (this.Exclusion_Areas || []).some(ea =>
           this._isPointInPolygon(x, y, ea.vertices));
         const id = this._genId('gp');
-        gridPoints.push({ id, x, y, column: !nearCore && !inExclusion, mechanical: true });
+        gridPoints.push({ id, x, y, column: !nearCore && !inExclusion, mechanical: true, entryPoint: false });
       }
     }
 
@@ -1184,7 +1184,7 @@ export class FloorPlan {
 
     // ── grid points ───────────────────────────────────────────────────────
     const gridPoints = (this.Points || []).map(p => ({
-      id: p.id, x: u(p.x), y: u(p.y), column: p.column ?? true, mechanical: p.mechanical ?? true
+      id: p.id, x: u(p.x), y: u(p.y), column: p.column ?? true, mechanical: p.mechanical ?? true, entryPoint: p.entryPoint ?? false
     }));
 
     // ── exclusion areas ───────────────────────────────────────────────────
@@ -1250,6 +1250,7 @@ export class FloorPlan {
 
       mechanical_components: {
         ducts: this.Ducts || [],
+        duct_plan: this.Duct_Plan || [],
         terminals: (this.terminals || []).map(t => ({ ...t, position: { x: u(t.position.x), y: u(t.position.y) } })),
         equipment: (this.equipment || []).map(e => ({ ...e, position: { x: u(e.position.x), y: u(e.position.y) } }))
       },
@@ -1712,6 +1713,17 @@ export class FloorPlan {
     const ppu = obj.units?.pxPerUnit || 1;
     const px = v => v * ppu;
 
+    // ── shared helpers ─────────────────────────────────────────────────────
+    const deserializeOpenings = (openings) => (openings || []).map(o =>
+      makeWallOpening(o.id || fp._genId('wo'), {
+        openingKind: o.type || o.openingKind || 'door',
+        t:           o.placement ?? o.t ?? 0.5,
+        width:       o.width  ?? 900,
+        height:      o.height ?? 2100,
+        sillHeight:  o.sill_height ?? o.sillHeight ?? 0
+      })
+    );
+
     // ── boundary ──────────────────────────────────────────────────────────
     fp.boundaryClosed = obj.boundary?.closed ?? false;
     const bEdgesIn = obj.boundary?.edges || [];
@@ -1727,15 +1739,28 @@ export class FloorPlan {
 
     const wEdges = [];
     const orderedBoundaryNodes = [];
+    // Keep edge data alongside the graph entry so we can populate fp.Walls below
+    const bEdgeData = []; // { e, n1, n2 } for edges that were added to wEdges
     for (const e of bEdgesIn) {
       const n1 = orCreate(e.start.x, e.start.y);
       const n2 = orCreate(e.end.x, e.end.y);
       orderedBoundaryNodes.push(n1);
       if (n1.id !== n2.id) {
-        wEdges.push({ id: e.id || fp._genId('e'), v1: n1.id, v2: n2.id, locked: !!e.locked });
+        wEdges.push({ id: e.id || fp._genId('e'), v1: n1.id, v2: n2.id, locked: !!e.locked, translucent: e.translucent ?? false });
+        bEdgeData.push({ e, n1, n2 });
       }
     }
     fp.wall_graph = { nodes: [...nodeByKey.values()], edges: wEdges };
+
+    // Populate fp.Walls for boundary edges so the inspector and renderer can
+    // read wallType, translucent, locked, and openings per-edge.
+    for (const { e, n1, n2 } of bEdgeData) {
+      fp.Walls.push(makeWall(e.id || fp._genId('w'), {
+        start: { x: n1.x, y: n1.y }, end: { x: n2.x, y: n2.y },
+        wallType: 'boundary', translucent: e.translucent ?? false,
+        locked: !!e.locked, openings: deserializeOpenings(e.openings)
+      }));
+    }
 
     if (fp.boundaryClosed && orderedBoundaryNodes.length >= 3) {
       fp.boundaryArea = {
@@ -1748,26 +1773,28 @@ export class FloorPlan {
     // ── core ──────────────────────────────────────────────────────────────
     const cEdgesIn = obj.core?.edges || [];
     const corePtObj = {};
-    const deserializeOpenings = (openings) => (openings || []).map(o =>
-      makeWallOpening(o.id || fp._genId('wo'), {
-        openingKind: o.type || o.openingKind || 'door',
-        t:           o.placement ?? o.t ?? 0.5,
-        width:       o.width  ?? 900,
-        height:      o.height ?? 2100,
-        sillHeight:  o.sill_height ?? o.sillHeight ?? 0
-      })
-    );
     for (let i = 0; i < cEdgesIn.length; i++) {
       const e = cEdgesIn[i];
       const sx = px(e.start.x), sy = px(e.start.y);
       const ex = px(e.end.x),   ey = px(e.end.y);
-      fp.Walls.push(makeWall(e.id || fp._genId('w'), {
+      const wallId = e.id || fp._genId('w');
+      fp.Walls.push(makeWall(wallId, {
         start: { x: sx, y: sy }, end: { x: ex, y: ey },
         wallType: 'core', translucent: e.translucent ?? false,
         locked: !!e.locked, openings: deserializeOpenings(e.openings)
       }));
+      // Add core edges to wall_graph so findClosestSegment can hit-test them.
+      // orCreate deduplicates nodes by coordinate, shared with boundary nodes.
+      const cn1 = orCreate(e.start.x, e.start.y);
+      const cn2 = orCreate(e.end.x, e.end.y);
+      if (cn1.id !== cn2.id) {
+        fp.wall_graph.edges.push({ id: wallId, v1: cn1.id, v2: cn2.id,
+          locked: !!e.locked, translucent: e.translucent ?? false, wallType: 'core' });
+      }
       corePtObj[`Pt_${i}`] = [sx, sy, 0];
     }
+    // wall_graph.nodes may have grown — keep it in sync
+    fp.wall_graph.nodes = [...nodeByKey.values()];
     if (cEdgesIn.length > 0) {
       corePtObj[`Pt_${cEdgesIn.length}`] = [px(cEdgesIn[0].start.x), px(cEdgesIn[0].start.y), 0];
       fp.Core_Boundary = [corePtObj];
@@ -1775,7 +1802,7 @@ export class FloorPlan {
 
     // ── grid points ───────────────────────────────────────────────────────
     fp.Points = (obj.grid_points || []).map(p => ({
-      id: p.id, x: px(p.x), y: px(p.y), column: p.column ?? true, mechanical: p.mechanical ?? true
+      id: p.id, x: px(p.x), y: px(p.y), column: p.column ?? true, mechanical: p.mechanical ?? true, entryPoint: p.entryPoint ?? false
     }));
 
     // ── exclusion areas ───────────────────────────────────────────────────
@@ -1797,6 +1824,7 @@ export class FloorPlan {
 
     // ── mechanical ────────────────────────────────────────────────────────
     fp.Ducts = obj.mechanical_components?.ducts || [];
+    fp.Duct_Plan = obj.mechanical_components?.duct_plan || [];
     fp.terminals = (obj.mechanical_components?.terminals || []).map(t => ({
       ...t, position: { x: px(t.position?.x || 0), y: px(t.position?.y || 0) }
     }));
