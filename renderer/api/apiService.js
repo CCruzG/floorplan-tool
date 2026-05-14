@@ -80,8 +80,10 @@ export function floorplanToInstance(planJson, units) {
   }));
 
   // ── exclusion areas ───────────────────────────────────────────────────────
-  if (Array.isArray(planJson.Exclusion_Areas) && planJson.Exclusion_Areas.length) {
-    instance.exclusion_areas = planJson.Exclusion_Areas.map(area => ({
+  // v2 toJSON() outputs 'exclusion_areas' (snake_case); fall back to PascalCase for legacy plans.
+  const rawExclusionAreas = planJson.exclusion_areas ?? planJson.Exclusion_Areas;
+  if (Array.isArray(rawExclusionAreas) && rawExclusionAreas.length) {
+    instance.exclusion_areas = rawExclusionAreas.map(area => ({
       vertices: (area.vertices ?? []).map(([x, y]) => [toMm(x), toMm(y), 0]),
       label: area.label ?? 'exclusion',
     }));

@@ -1560,7 +1560,7 @@ export function bindUI(store, canvas, mouse) {
       // Helper: apply a partial or full data dict to the active floorplan
       const applyData = (d) => {
         if (!d) return;
-        if (Array.isArray(d.thermal_zones)        && d.thermal_zones.length)        fp.Thermal_Zones        = d.thermal_zones.map(tz => ({ ...tz, subZones: tz.sub_zones || [] }));
+        if (Array.isArray(d.thermal_zones)        && d.thermal_zones.length)        fp.Thermal_Zones        = d.thermal_zones.map(({ sub_zones, ...tz }) => ({ ...tz, subZones: sub_zones || [] }));
         if (Array.isArray(d.Points)               && d.Points.length)               fp.Points               = d.Points;
         if (Array.isArray(d.Edges)                && d.Edges.length)                fp.Edges                = d.Edges;
         if (Array.isArray(d.Beams)                && d.Beams.length)                fp.Beams                = d.Beams;

@@ -300,9 +300,9 @@ export class FloorPlan {
     fp.Columns = obj.Columns || [];
     // Map backend key thermal_zones to frontend property Thermal_Zones,
     // and rename backend key sub_zones to frontend property subZones
-    fp.Thermal_Zones = (obj.thermal_zones || []).map(tz => ({
+    fp.Thermal_Zones = (obj.thermal_zones || []).map(({ sub_zones, ...tz }) => ({
       ...tz,
-      subZones: tz.sub_zones || []
+      subZones: sub_zones || []
     }));
     fp.Beams = obj.Beams || [];
     fp.Points = obj.Points || [];
@@ -1450,9 +1450,9 @@ export class FloorPlan {
 
     // Use canonical Thermal_Zones only (no legacy migration fallback).
     // Map backend key sub_zones to frontend property subZones
-    fp.Thermal_Zones = (obj.thermal_zones || []).map(tz => ({
+    fp.Thermal_Zones = (obj.thermal_zones || []).map(({ sub_zones, ...tz }) => ({
       ...tz,
-      subZones: tz.sub_zones || []
+      subZones: sub_zones || []
     }));
     fp.Exclusion_Areas = (obj.Exclusion_Areas || []).map(ea => ({
       id: ea.id,
@@ -1497,14 +1497,6 @@ export class FloorPlan {
       });
     });
     
-    // After normalization, map backend key sub_zones to subZones if needed
-    (fp.Thermal_Zones || []).forEach(region => {
-      if (region.sub_zones && !region.subZones) {
-        region.subZones = region.sub_zones;
-        delete region.sub_zones;
-      }
-    });
-
     // If no explicit boundaryArea was provided, and we have a Plan_Boundary
     // convert the first Plan_Boundary polygon into a boundaryArea so the
     // existing renderer (which draws boundaryArea) can display it directly.
@@ -1746,9 +1738,9 @@ export class FloorPlan {
 
     // ── thermal zones ─────────────────────────────────────────────────────
     // Map backend key sub_zones to frontend property subZones
-    fp.Thermal_Zones = (obj.thermal_zones || []).map(tz => ({
+    fp.Thermal_Zones = (obj.thermal_zones || []).map(({ sub_zones, ...tz }) => ({
       ...tz,
-      subZones: tz.sub_zones || []
+      subZones: sub_zones || []
     }));
 
     // ── structural ────────────────────────────────────────────────────────

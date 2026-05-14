@@ -82,13 +82,18 @@ export function drawBoundaryArea(ctx, fp) {
 export function drawAreas(ctx, fp) {
   const unified = [];
 
-  // thermal_zones: take first subZone polygon ([{x,y}, ...]) for compact area rendering
+  // thermal_zones: take first subZone polygon ([{x,y}, ...]) for compact area rendering.
+  // subZones coordinates are always in mm (from backend) — convert to canvas pixels.
+  const _mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
+  const _pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const _toCanvas = mm => mm * _pxPerUnit / _mmPerUnit;
+
   (fp.Thermal_Zones || []).forEach(region => {
     const sub = (region.subZones && region.subZones[0]) || [];
     const coords = sub
       .map((v) => {
         if (!v || typeof v.x !== 'number' || typeof v.y !== 'number') return null;
-        return [v.x, v.y];
+        return [_toCanvas(v.x), _toCanvas(v.y)];
       })
       .filter(Boolean);
     if (coords.length) unified.push({ label: region.name || 'temp', vertices: coords, color: region.color, alpha: region.alpha });
@@ -1758,12 +1763,9 @@ export function drawThermalZones(ctx, fp) {
 
       ctx.beginPath();
       coords.forEach((pt, i) => {
-        // Coords may be canvas-px (manual zones) or mm (BuildWeave zones).
-        // Detect: if max coord value > 5000 treat as mm; otherwise treat as px.
-        const maxVal = Math.max(...coords.map(p => Math.max(Math.abs(p[0]), Math.abs(p[1]))));
-        const isMm = maxVal > 5000;
-        const cx = isMm ? toCanvas(pt[0]) : pt[0];
-        const cy = isMm ? toCanvas(pt[1]) : pt[1];
+        // subZones always come from the backend in mm — always convert to canvas pixels.
+        const cx = toCanvas(pt[0]);
+        const cy = toCanvas(pt[1]);
         if (i === 0) ctx.moveTo(cx, cy);
         else ctx.lineTo(cx, cy);
       });
@@ -1779,10 +1781,8 @@ export function drawThermalZones(ctx, fp) {
 
       // Label centroid of first subregion only
       if (si === 0) {
-        const maxVal = Math.max(...coords.map(p => Math.max(Math.abs(p[0]), Math.abs(p[1]))));
-        const isMm = maxVal > 5000;
-        const xs = coords.map(p => isMm ? toCanvas(p[0]) : p[0]);
-        const ys = coords.map(p => isMm ? toCanvas(p[1]) : p[1]);
+        const xs = coords.map(p => toCanvas(p[0]));
+        const ys = coords.map(p => toCanvas(p[1]));
         const cx = xs.reduce((a, b) => a + b, 0) / xs.length;
         const cy = ys.reduce((a, b) => a + b, 0) / ys.length;
         ctx.font = '11px monospace';
