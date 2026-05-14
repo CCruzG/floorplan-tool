@@ -1478,30 +1478,22 @@ export function drawCoreProjectionGuides(ctx, fp, tempCore, mouse) {
 
 export function drawColumns(ctx, fp) {
   if (!fp.Columns || fp.Columns.length === 0) return;
-  
+
+  const half = Math.max(4, (fp.units?.pxPerUnit ?? 1) * 0.25);
   ctx.save();
-  ctx.strokeStyle = "#555"; // dark neutral for columns
-  ctx.lineWidth = 1;
-  ctx.fillStyle = "rgba(80, 80, 80, 0.25)"; // semi-transparent neutral fill
-  
-  fp.Columns.forEach(column => {
-    const points = Object.values(column);
-    if (points.length < 3) return;
-    
+  ctx.fillStyle   = 'rgba(50, 50, 70, 0.85)';
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth   = 1;
+
+  fp.Columns.forEach(col => {
+    const { x, y } = col;
+    if (x === undefined || y === undefined) return;
     ctx.beginPath();
-    const [startX, startY] = points[0];
-    ctx.moveTo(startX, startY);
-    
-    for (let i = 1; i < points.length; i++) {
-      const [x, y] = points[i];
-      ctx.lineTo(x, y);
-    }
-    
-    ctx.closePath();
+    ctx.rect(x - half, y - half, half * 2, half * 2);
     ctx.fill();
     ctx.stroke();
   });
-  
+
   ctx.restore();
 }
 
@@ -1973,6 +1965,32 @@ export function drawThermalControlZones(ctx, fp) {
   ctx.restore();
 }
 
+// ── Structural solver renderers ───────────────────────────────────────────────
+
+/**
+ * Draw solver-placed beams as lines reading fp.Beams: [{start:{x,y}, end:{x,y}}]
+ * Coordinates are in canvas pixels.
+ */
+export function drawBeams(ctx, fp) {
+  if (!fp.Beams || fp.Beams.length === 0) return;
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(50, 50, 70, 0.55)';
+  ctx.lineWidth   = Math.max(1, (fp.units?.pxPerUnit ?? 1) * 0.06);
+  ctx.lineCap     = 'round';
+
+  fp.Beams.forEach(beam => {
+    const { start, end } = beam;
+    if (!start || !end) return;
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+  });
+
+  ctx.restore();
+}
+
 // ── Duct plan renderer (BuildWeave duct phase) ────────────────────────────────
 // Draws fp.Duct_Plan: [{entryPoint, ducts:[[edgeIdx,ductSizeIdx,flow],...], vav:[[ptIdx,load],...]}]
 // Requires fp._ductEdges: [[ptA, ptB, step], ...] (indices into fp.Points)
@@ -2092,5 +2110,6 @@ export default {
   drawSplitPreview,
   drawThermalZones,
   drawThermalControlZones,
-  drawDuctPlan
+  drawDuctPlan,
+  drawBeams
 };

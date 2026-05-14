@@ -75,6 +75,9 @@ export const DrawingService = {
     if (fp.layers?.Columns !== false) {
       R.drawColumns(ctx, fp);
     }
+    if (fp.layers?.Beams !== false) {
+      R.drawBeams(ctx, fp);
+    }
     // Draw grid points if layer is enabled
     if (fp.layers?.Points !== false) {
       R.drawGridPoints(ctx, fp);

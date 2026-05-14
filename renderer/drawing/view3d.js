@@ -56,7 +56,7 @@ export class View3D {
    */
   _cmToPx(cm) {
     const pxPerUnit = this._fp?.units?.pxPerUnit || 1;
-    const unit      = this._fp?.units?.length    || 'mm';
+    const unit      = this._fp?.units?.length    || 'm';
     // How many plan-units fit in 1 cm
     const unitsPerCm = { mm: 10, cm: 1, m: 0.01, in: 0.3937, ft: 0.032808 }[unit] ?? 10;
     return cm * unitsPerCm * pxPerUnit;

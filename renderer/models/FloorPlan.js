@@ -1082,7 +1082,7 @@ export class FloorPlan {
       thermal_region_geometry: tr.subZones || []
     })) : [];
     fp.Exclusion_Areas = (this.Exclusion_Areas || []).map(ea => ({ ...ea, vertices: ea.vertices.map(v => [...v]) }));
-    fp.Beams = this.Beams ? this.Beams.map(b => ({ ...b })) : [];
+    fp.Beams = (this.Beams || []).map(b => ({ ...b, start: b.start ? { ...b.start } : { x: 0, y: 0 }, end: b.end ? { ...b.end } : { x: 0, y: 0 } }));
     fp.Walls = (this.Walls || []).map(w => ({
       ...w,
       start:    { ...w.start },
@@ -1229,8 +1229,13 @@ export class FloorPlan {
       thermal_zones: this.Thermal_Zones || [],
 
       structural_components: {
+        units: { length: this.units?.length || 'm' },
         columns,
-        beams: this.Beams || []
+        beams: (this.Beams || []).map(b => ({
+          ...b,
+          start: b.start ? { x: u(b.start.x), y: u(b.start.y) } : { x: 0, y: 0 },
+          end:   b.end   ? { x: u(b.end.x),   y: u(b.end.y)   } : { x: 0, y: 0 },
+        })),
       },
 
       mechanical_components: {
@@ -1252,7 +1257,7 @@ export class FloorPlan {
 
     const fp = new FloorPlan(obj.name);
     fp.schema_version = obj.schema_version || "0.9.0";
-    fp.units = obj.units || { length: "mm" };
+    fp.units = obj.units || { length: "m" };
     fp.boundaryClosed = obj.boundaryClosed || false;
 
     // Restore layer visibility settings
@@ -1637,7 +1642,7 @@ export class FloorPlan {
   static _fromJSONv2(obj, options = {}) {
     const fp = new FloorPlan(obj.name);
     fp.schema_version = "2.0.0";
-    fp.units = obj.units || { length: "mm" };
+    fp.units = obj.units || { length: "m" };
     const ppu = obj.units?.pxPerUnit || 1;
     const px = v => v * ppu;
 
@@ -1748,12 +1753,38 @@ export class FloorPlan {
     }));
 
     // ── structural ────────────────────────────────────────────────────────
-    fp.Columns = (obj.structural_components?.columns || []).map(col => ({
-      ...col,
-      x: col.x !== undefined ? px(col.x) : undefined,
-      y: col.y !== undefined ? px(col.y) : undefined
-    }));
-    fp.Beams = obj.structural_components?.beams || [];
+    const mmMap = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 };
+    const srcUnit = obj.structural_components?.units?.length || obj.units?.length || 'm';
+    const mmPerSrc = mmMap[srcUnit] ?? 1000;
+    const mmPerCanvas = mmMap[fp.units?.length || 'm'] ?? 1000;
+    const sPx = v => v * ppu * mmPerSrc / mmPerCanvas;
+
+    fp.Columns = (obj.structural_components?.columns || []).map((col, i) => {
+      if (Array.isArray(col)) {
+        const pts = col.filter(p => p && typeof p.x === 'number' && typeof p.y === 'number');
+        if (!pts.length) return null;
+        const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+        const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+        return { id: `Column_${i}`, x: sPx(cx), y: sPx(cy) };
+      }
+      return {
+        ...col,
+        x: col?.x !== undefined ? sPx(col.x) : undefined,
+        y: col?.y !== undefined ? sPx(col.y) : undefined
+      };
+    }).filter(Boolean);
+
+    fp.Beams = (obj.structural_components?.beams || []).map(b => {
+      const sx = b?.start?.x;
+      const sy = b?.start?.y;
+      const ex = b?.end?.x;
+      const ey = b?.end?.y;
+      return {
+        ...b,
+        start: (sx !== undefined && sy !== undefined) ? { x: sPx(sx), y: sPx(sy) } : { x: 0, y: 0 },
+        end:   (ex !== undefined && ey !== undefined) ? { x: sPx(ex), y: sPx(ey) } : { x: 0, y: 0 },
+      };
+    });
 
     // ── mechanical ────────────────────────────────────────────────────────
     fp.Ducts = obj.mechanical_components?.ducts || [];

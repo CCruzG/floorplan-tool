@@ -24,7 +24,7 @@ function parseUnitValue(value, unit) {
 
 function updateScaleFromInput() {
   const val = parseUnitValue(canvasWidthValue?.value, canvasUnitSelect?.value);
-  const unit = canvasUnitSelect?.value || 'mm';
+  const unit = canvasUnitSelect?.value || 'm';
   if (!val) return;
 
   const pxPerUnit = canvas.width / val; // pixels per (selected unit)

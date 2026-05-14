@@ -1543,17 +1543,17 @@ export function bindUI(store, canvas, mouse) {
 
       const statusEl = document.getElementById('optimiseStatus');
       const _optStart = Date.now();
-      const _phaseLabels = { segmentation: 'segmentation', zones: 'zone partition', duct: 'duct routing', span: 'span' };
-      const _phaseOrder  = ['segmentation', 'zones', 'duct', 'span'];
+      const _phaseLabels = { segmentation: 'segmentation', structural: 'structural', zones: 'zone partition', duct: 'duct routing' };
+      const _phaseOrder  = ['segmentation', 'structural', 'zones', 'duct'];
       let _currentPhase = _phaseOrder[0];
       if (statusEl) {
         statusEl.style.display = 'block';
-        statusEl.textContent = `phase 1/4: segmentation  0s`;
+        statusEl.textContent = `phase 1/${_phaseOrder.length}: segmentation  0s`;
       }
       const _timerInterval = setInterval(() => {
         const elapsed = Math.round((Date.now() - _optStart) / 1000);
         const idx = _phaseOrder.indexOf(_currentPhase);
-        if (statusEl) statusEl.textContent = `phase ${idx + 1}/4: ${_phaseLabels[_currentPhase]}  ${elapsed}s`;
+        if (statusEl) statusEl.textContent = `phase ${idx + 1}/${_phaseOrder.length}: ${_phaseLabels[_currentPhase]}  ${elapsed}s`;
         btnOptimise.textContent = `running… ${elapsed}s`;
       }, 1000);
 
@@ -1569,6 +1569,45 @@ export function bindUI(store, canvas, mouse) {
         }
         // Refresh the thermal zones panel whenever zone data changes
         if (d.thermal_zones) refreshThermalZonesList(store);
+
+        // Apply structural solver results using declared structural units.
+        if (d.structural_components) {
+          const sc = d.structural_components;
+          const mmMap = { mm: 1, cm: 10, m: 1000, 'in': 25.4, ft: 304.8 };
+          const srcUnit = sc?.units?.length || d?.units?.length || fp.units?.length || 'm';
+          const mmPerSrc = mmMap[srcUnit] ?? 1000;
+          const mmPerCanvas = mmMap[fp.units?.length ?? 'm'] ?? 1000;
+          const lenToPx = v => v * (fp.units?.pxPerUnit ?? 1) * mmPerSrc / mmPerCanvas;
+          if (Array.isArray(sc.columns) && sc.columns.length) {
+            fp.Columns = sc.columns
+              .map((c, i) => {
+                if (Array.isArray(c)) {
+                  const pts = c.filter(p => p && typeof p.x === 'number' && typeof p.y === 'number');
+                  if (!pts.length) return null;
+                  const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+                  const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+                  return { id: `Column_${i}`, x: lenToPx(cx), y: lenToPx(cy) };
+                }
+                return { ...c, x: lenToPx(c.x), y: lenToPx(c.y) };
+              })
+              .filter(Boolean);
+          }
+          if (Array.isArray(sc.beams) && sc.beams.length) {
+            fp.Beams = sc.beams
+              .map(b => {
+                if (!b?.start || !b?.end) return null;
+                return {
+                  ...b,
+                  start: { x: lenToPx(b.start.x), y: lenToPx(b.start.y) },
+                  end:   { x: lenToPx(b.end.x),   y: lenToPx(b.end.y) },
+                };
+              })
+              .filter(Boolean);
+          }
+          // Auto-enable Beams and Columns layers so results are immediately visible
+          fp.layers.Beams   = true;
+          fp.layers.Columns = true;
+        }
       };
 
       try {
