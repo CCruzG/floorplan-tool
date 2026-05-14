@@ -244,10 +244,11 @@ export class FloorPlan {
       Core_Boundary: this.Core_Boundary,
       Columns: this.Columns,
       // Map frontend property Thermal_Zones back to backend key thermal_zones,
-      // and map frontend property subZones back to backend key sub_zones
+      // and map frontend property subZones back to backend key thermal_region_geometry
       thermal_zones: this.Thermal_Zones.map(tz => ({
         ...tz,
-        sub_zones: tz.subZones || []
+        thermal_region_geometry: tz.subZones || [],
+        vav_control_zones: tz.thermalControlZones || []
       })),
       Beams: this.Beams,
       Points: this.Points,
@@ -299,10 +300,11 @@ export class FloorPlan {
     });
     fp.Columns = obj.Columns || [];
     // Map backend key thermal_zones to frontend property Thermal_Zones,
-    // and rename backend key sub_zones to frontend property subZones
-    fp.Thermal_Zones = (obj.thermal_zones || []).map(({ sub_zones, ...tz }) => ({
+    // and rename backend key thermal_region_geometry to frontend property subZones
+    fp.Thermal_Zones = (obj.thermal_zones || []).map(({ thermal_region_geometry, vav_control_zones, ...tz }) => ({
       ...tz,
-      subZones: sub_zones || []
+      subZones: thermal_region_geometry || [],
+      thermalControlZones: vav_control_zones || []
     }));
     fp.Beams = obj.Beams || [];
     fp.Points = obj.Points || [];
@@ -629,7 +631,7 @@ export class FloorPlan {
       totalLoad:        properties.total_load         ?? properties.totalLoad         ?? 0,
       totalArea:        properties.total_area         ?? properties.totalArea         ?? 0,
       entryCandidates:  properties.entry_candidates   ?? properties.entryCandidates  ?? [[]],
-      thermalControlZones: properties.thermal_control_zones ?? properties.thermalControlZones ?? [],
+      thermalControlZones: properties.vav_control_zones ?? properties.thermalControlZones ?? [],
       color: properties.color ?? null,
       alpha: typeof properties.alpha === 'number' ? properties.alpha : 0.3
     });
@@ -1075,9 +1077,9 @@ export class FloorPlan {
       ...tr,
       subZones: tr.subZones ? tr.subZones.map(sz => (sz || []).map(p => ({ ...p }))) : [],
       entry_candidates: tr.entry_candidates ? tr.entry_candidates.map(ec => [...ec]) : [[]],
-      thermal_control_zones: tr.thermal_control_zones ? [...tr.thermal_control_zones] : [],
-      // Map frontend property subZones back to backend key sub_zones for JSON output
-      sub_zones: tr.subZones || []
+      vav_control_zones: tr.thermalControlZones ? [...tr.thermalControlZones] : [],
+      // Map frontend property subZones back to backend key thermal_region_geometry for JSON output
+      thermal_region_geometry: tr.subZones || []
     })) : [];
     fp.Exclusion_Areas = (this.Exclusion_Areas || []).map(ea => ({ ...ea, vertices: ea.vertices.map(v => [...v]) }));
     fp.Beams = this.Beams ? this.Beams.map(b => ({ ...b })) : [];
@@ -1449,10 +1451,11 @@ export class FloorPlan {
     .filter(a => a.vertices && a.vertices.length >= 3);
 
     // Use canonical Thermal_Zones only (no legacy migration fallback).
-    // Map backend key sub_zones to frontend property subZones
-    fp.Thermal_Zones = (obj.thermal_zones || []).map(({ sub_zones, ...tz }) => ({
+    // Map backend key thermal_region_geometry to frontend property subZones
+    fp.Thermal_Zones = (obj.thermal_zones || []).map(({ thermal_region_geometry, vav_control_zones, ...tz }) => ({
       ...tz,
-      subZones: sub_zones || []
+      subZones: thermal_region_geometry || [],
+      thermalControlZones: vav_control_zones || []
     }));
     fp.Exclusion_Areas = (obj.Exclusion_Areas || []).map(ea => ({
       id: ea.id,
@@ -1737,10 +1740,11 @@ export class FloorPlan {
     }));
 
     // ── thermal zones ─────────────────────────────────────────────────────
-    // Map backend key sub_zones to frontend property subZones
-    fp.Thermal_Zones = (obj.thermal_zones || []).map(({ sub_zones, ...tz }) => ({
+    // Map backend key thermal_region_geometry to frontend property subZones
+    fp.Thermal_Zones = (obj.thermal_zones || []).map(({ thermal_region_geometry, vav_control_zones, ...tz }) => ({
       ...tz,
-      subZones: sub_zones || []
+      subZones: thermal_region_geometry || [],
+      thermalControlZones: vav_control_zones || []
     }));
 
     // ── structural ────────────────────────────────────────────────────────

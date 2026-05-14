@@ -1560,15 +1560,13 @@ export function bindUI(store, canvas, mouse) {
       // Helper: apply a partial or full data dict to the active floorplan
       const applyData = (d) => {
         if (!d) return;
-        if (Array.isArray(d.thermal_zones)        && d.thermal_zones.length)        fp.Thermal_Zones        = d.thermal_zones.map(({ sub_zones, ...tz }) => ({ ...tz, subZones: sub_zones || [] }));
-        if (Array.isArray(d.Points)               && d.Points.length)               fp.Points               = d.Points;
-        if (Array.isArray(d.Edges)                && d.Edges.length)                fp.Edges                = d.Edges;
-        if (Array.isArray(d.Beams)                && d.Beams.length)                fp.Beams                = d.Beams;
-        if (Array.isArray(d.Ducts)                && d.Ducts.length)                fp.Ducts                = d.Ducts;
-        if (Array.isArray(d.Duct_Plan)            && d.Duct_Plan.length)            fp.Duct_Plan            = d.Duct_Plan;
-        if (Array.isArray(d.ductPlan)             && d.ductPlan.length)           { fp.Duct_Plan            = d.ductPlan; fp.layers.Duct_Plan = true; }
-        if (Array.isArray(d._ductEdges)           && d._ductEdges.length)           fp._ductEdges           = d._ductEdges;
-        if (Array.isArray(d.edges)                && d.edges.length)                fp._ductEdges           = d.edges;
+        if (Array.isArray(d.thermal_zones) && d.thermal_zones.length) {
+          fp.Thermal_Zones = d.thermal_zones.map(({ thermal_region_geometry, vav_control_zones, ...tz }) => ({
+            ...tz,
+            subZones: thermal_region_geometry || [],
+            thermalControlZones: vav_control_zones || [],
+          }));
+        }
         // Refresh the thermal zones panel whenever zone data changes
         if (d.thermal_zones) refreshThermalZonesList(store);
       };
@@ -1810,15 +1808,23 @@ export function refreshThermalZonesList(store) {
     const type = region.type || 'perimeter';
     const orient = region.orientation !== null && region.orientation !== undefined
       ? `${region.orientation.toFixed(0)}°` : 'internal';
-    const subCount = (region.subZones || []).length;
-    const ptCount = subCount > 0 ? _subregionVertexCount(region.subZones[0]) : 0;
-    const fmt = subCount > 0 ? _subregionFormat(region.subZones[0]) : '—';
-    const air = region.airRequirement?.total_flow
-      ? `${region.airRequirement.total_flow.toFixed(0)} L/s` : '—';
+    const vavCount = Array.isArray(region.thermalControlZones) ? region.thermalControlZones.length : 0;
+    const airReqPerArea = Number.isFinite(region.air_requirement)
+      ? region.air_requirement
+      : (Number.isFinite(region.airRequirement) ? region.airRequirement : null);
+    const summedVavLoad = Array.isArray(region.thermalControlZones)
+      ? region.thermalControlZones.reduce((s, z) => s + (Number.isFinite(z?.load) ? z.load : 0), 0)
+      : null;
+    const totalLoad = (Number.isFinite(region.total_load) && region.total_load > 0)
+      ? region.total_load
+      : (vavCount > 0 ? summedVavLoad : null);
+    const air = totalLoad !== null
+      ? `${totalLoad.toFixed(0)} L/s`
+      : (airReqPerArea !== null ? `${airReqPerArea.toFixed(2)} L/s·m²` : '—');
 
     info.innerHTML =
       `<strong>Zone ${ri + 1}</strong> · ${type} · ${orient}<br>` +
-      `subZones: ${subCount} · pts[0]: ${ptCount} · fmt: <code>${fmt}</code><br>` +
+      `vav zones: ${vavCount}<br>` +
       `air req: ${air}`;
 
     li.appendChild(info);

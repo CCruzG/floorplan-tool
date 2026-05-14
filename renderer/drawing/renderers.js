@@ -1746,13 +1746,13 @@ export function drawThermalZones(ctx, fp) {
   ctx.save();
 
   regions.forEach((region, ri) => {
-    // Ensure subZones property (in case backend sends sub_zones)
-    const subZones = region.subZones || region.sub_zones || [];
+    const subZones = region.subZones || [];
     const isInternal = region.type === 'internal' || region.orientation === null || region.orientation === undefined;
     const palette = _zoneColour(ri, isInternal);
     const label = _orientationName(region.orientation);
+    const validRings = [];
 
-    (subZones || []).forEach((subZone, si) => {
+    (subZones || []).forEach((subZone) => {
       const coords = (subZone || [])
         .map((pt) => {
           if (!pt || typeof pt.x !== 'number' || typeof pt.y !== 'number') return null;
@@ -1760,38 +1760,36 @@ export function drawThermalZones(ctx, fp) {
         })
         .filter(Boolean);
       if (!coords || coords.length < 3) return;
+      validRings.push(coords);
+    });
 
-      ctx.beginPath();
+    if (!validRings.length) return;
+
+    // Draw one merged fill per thermal region so sub-zone seams are not visible.
+    ctx.beginPath();
+    validRings.forEach((coords) => {
       coords.forEach((pt, i) => {
-        // subZones always come from the backend in mm — always convert to canvas pixels.
         const cx = toCanvas(pt[0]);
         const cy = toCanvas(pt[1]);
         if (i === 0) ctx.moveTo(cx, cy);
         else ctx.lineTo(cx, cy);
       });
       ctx.closePath();
-
-      ctx.fillStyle = palette.fill;
-      ctx.fill();
-      ctx.strokeStyle = palette.stroke;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([5, 3]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Label centroid of first subregion only
-      if (si === 0) {
-        const xs = coords.map(p => toCanvas(p[0]));
-        const ys = coords.map(p => toCanvas(p[1]));
-        const cx = xs.reduce((a, b) => a + b, 0) / xs.length;
-        const cy = ys.reduce((a, b) => a + b, 0) / ys.length;
-        ctx.font = '11px monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = palette.stroke;
-        ctx.fillText(label, cx, cy);
-      }
     });
+
+    ctx.fillStyle = palette.fill;
+    ctx.fill();
+
+    const first = validRings[0];
+    const xs = first.map(p => toCanvas(p[0]));
+    const ys = first.map(p => toCanvas(p[1]));
+    const cx = xs.reduce((a, b) => a + b, 0) / xs.length;
+    const cy = ys.reduce((a, b) => a + b, 0) / ys.length;
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = palette.stroke;
+    ctx.fillText(label, cx, cy);
   });
 
   ctx.restore();
@@ -1827,11 +1825,9 @@ function _gridStepPx(fp) {
 export function drawThermalControlZones(ctx, fp) {
   const regions = fp.Thermal_Zones;
   if (!regions || regions.length === 0) return;
-  if (!fp.Points || fp.Points.length === 0) return;
-
-  const step = _gridStepPx(fp);
-  if (step <= 0) return;
-  const h = step / 4; // quarter-step margin — cells share edges visually
+  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
+  const pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const toCanvas = mm => mm * pxPerUnit / mmPerUnit;
 
   ctx.save();
 
@@ -1842,12 +1838,61 @@ export function drawThermalControlZones(ctx, fp) {
     const hue = isInternal ? 0 : _ZONE_HUES[ri % _ZONE_HUES.length];
     const sat = isInternal ? '0%' : '70%';
 
-    const controlZones = region.thermalControlZones ?? region.thermal_control_zones ?? [];
+    const controlZones = region.thermalControlZones ?? [];
     if (!controlZones.length) return;
 
     controlZones.forEach((cz, ci) => {
+      const polygon = cz.polygon;
+      if (Array.isArray(polygon) && polygon.length >= 3) {
+        const coords = polygon
+          .map((pt) => {
+            if (!pt || typeof pt.x !== 'number' || typeof pt.y !== 'number') return null;
+            return [toCanvas(pt.x), toCanvas(pt.y)];
+          })
+          .filter(Boolean);
+        if (coords.length >= 3) {
+          const lightness = 55 + (ci % 3) * 8;
+          const fillAlpha = 0.20;
+          const strokeAlpha = 0.90;
+          ctx.beginPath();
+          coords.forEach(([x, y], i) => {
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.closePath();
+          ctx.fillStyle = isInternal
+            ? `rgba(140,140,140,${fillAlpha})`
+            : `hsla(${hue},${sat},${lightness}%,${fillAlpha})`;
+          ctx.fill();
+          ctx.strokeStyle = isInternal
+            ? `rgba(90,90,90,${strokeAlpha})`
+            : `hsla(${hue},${sat},${Math.max(30, lightness - 20)}%,${strokeAlpha})`;
+          ctx.lineWidth = 1.2;
+          ctx.setLineDash([4, 2]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          const cx = coords.reduce((s, p) => s + p[0], 0) / coords.length;
+          const cy = coords.reduce((s, p) => s + p[1], 0) / coords.length;
+          const loadStr = cz.load != null ? `${Math.round(cz.load)} W` : `cz${ci}`;
+          ctx.font = '9px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = isInternal
+            ? `rgba(90,90,90,0.9)`
+            : `hsla(${hue},${sat},${Math.max(25, lightness - 25)}%,0.9)`;
+          ctx.fillText(loadStr, cx, cy);
+          return;
+        }
+      }
+
       const ptIndices = cz.points;
       if (!ptIndices || ptIndices.length === 0) return;
+      if (!fp.Points || fp.Points.length === 0) return;
+
+      const step = _gridStepPx(fp);
+      if (step <= 0) return;
+      const h = step / 4; // quarter-step margin — cells share edges visually
 
       // Build set of occupied cell keys (using rounded grid index as key)
       // key = "gx,gy" where gx = round(x / step), gy = round(y / step)
