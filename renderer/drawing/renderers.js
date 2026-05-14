@@ -80,37 +80,25 @@ export function drawBoundaryArea(ctx, fp) {
 }
 
 export function drawAreas(ctx, fp) {
-  // Build a unified list of area-like objects: Temperature_Regions and legacy areas
   const unified = [];
 
-  // Temperature_Regions: convert Pt_* subregions to coordinate arrays
-  (fp.Temperature_Regions || []).forEach(region => {
-    // pick the first subregion for rendering
-    const sub = (region.subregions && region.subregions[0]) || {};
-    const coords = Object.keys(sub).sort((a,b)=>{
-      const ai = parseInt(a.replace(/^Pt_/,''),10);
-      const bi = parseInt(b.replace(/^Pt_/,''),10);
-      return ai - bi;
-    }).map(k => {
-      const v = sub[k];
-      if (!v) return null;
-      return [v[0], v[1]];
-    }).filter(Boolean);
+  // thermal_zones: take first subZone polygon ([{x,y}, ...]) for compact area rendering
+  (fp.Thermal_Zones || []).forEach(region => {
+    const sub = (region.subZones && region.subZones[0]) || [];
+    const coords = sub
+      .map((v) => {
+        if (!v || typeof v.x !== 'number' || typeof v.y !== 'number') return null;
+        return [v.x, v.y];
+      })
+      .filter(Boolean);
     if (coords.length) unified.push({ label: region.name || 'temp', vertices: coords, color: region.color, alpha: region.alpha });
   });
 
-  // legacy areas
-  (fp.areas || []).forEach(area => unified.push({ label: area.label, vertices: area.vertices, color: area.color, alpha: area.alpha }));
-
   unified.forEach(area => {
-    // normalize vertices (may be node ids or coordinate pairs)
+    // normalize vertices to coordinate pairs
     const ptsRaw = area.vertices || [];
     if (ptsRaw.length === 0) return;
     const resolved = ptsRaw.map(v => {
-      if (typeof v === 'string') {
-        const n = getNodeById(fp.wall_graph.nodes, v);
-        return n ? [n.x, n.y] : null;
-      }
       if (Array.isArray(v) && v.length >= 2) return [v[0], v[1]];
       if (v && typeof v.x === 'number' && typeof v.y === 'number') return [v.x, v.y];
       return null;
@@ -1710,9 +1698,8 @@ export function drawSplitPreview(ctx, fp, mouse) {
 }
 
 // ── Thermal zone renderer (BuildWeave segmentation + zone phases) ─────────────
-// Draws fp.Temperature_Regions: [{type, orientation, subregions:[[[x,y,z?],...]],...}]
-// Subregion coordinates are in mm (BuildWeave's coordinate space).
-// Converts mm → canvas pixels using fp.units.
+// Draws fp.Thermal_Zones: [{type, orientation, subZones:[[{x,y},...],...],...}]
+// Coordinates are in backend/world units, mapped to canvas by fp.units when needed.
 
 // Distinct HSL hues spread across the spectrum, one per zone index.
 // Internal zones get a grey tone regardless of index.
@@ -1744,33 +1731,29 @@ function _orientationName(azimuth) {
 }
 
 export function drawThermalZones(ctx, fp) {
-  const regions = fp.Temperature_Regions;
+  const regions = fp.Thermal_Zones;
   if (!regions || regions.length === 0) return;
 
   const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
   const pxPerUnit = fp.units?.pxPerUnit ?? 1;
   const toCanvas = mm => mm * pxPerUnit / mmPerUnit;
 
-  // Normalise a subregion to an array of [x, y] pairs regardless of whether it
-  // arrived as a BuildWeave array-of-arrays or a legacy Pt_N keyed object.
-  function normaliseSub(sub) {
-    if (Array.isArray(sub)) return sub; // already [[x,y],...]
-    // Pt_N keyed object → sort by index → array
-    return Object.keys(sub)
-      .filter(k => /^Pt_\d+$/.test(k))
-      .sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3)))
-      .map(k => sub[k]);
-  }
-
   ctx.save();
 
   regions.forEach((region, ri) => {
+    // Ensure subZones property (in case backend sends sub_zones)
+    const subZones = region.subZones || region.sub_zones || [];
     const isInternal = region.type === 'internal' || region.orientation === null || region.orientation === undefined;
     const palette = _zoneColour(ri, isInternal);
     const label = _orientationName(region.orientation);
 
-    (region.subregions || []).forEach((rawSub, si) => {
-      const coords = normaliseSub(rawSub);
+    (subZones || []).forEach((subZone, si) => {
+      const coords = (subZone || [])
+        .map((pt) => {
+          if (!pt || typeof pt.x !== 'number' || typeof pt.y !== 'number') return null;
+          return [pt.x, pt.y];
+        })
+        .filter(Boolean);
       if (!coords || coords.length < 3) return;
 
       ctx.beginPath();
@@ -1842,7 +1825,7 @@ function _gridStepPx(fp) {
 }
 
 export function drawThermalControlZones(ctx, fp) {
-  const regions = fp.Temperature_Regions;
+  const regions = fp.Thermal_Zones;
   if (!regions || regions.length === 0) return;
   if (!fp.Points || fp.Points.length === 0) return;
 

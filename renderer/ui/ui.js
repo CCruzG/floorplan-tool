@@ -1232,7 +1232,7 @@ export function bindUI(store, canvas, mouse) {
     coreAreaLayer: 'Core_Area',
     columnsLayer: 'Columns',
     exclusionAreasLayer: 'Exclusion_Areas',
-    temperatureRegionsLayer: 'Temperature_Regions',
+    thermalZonesLayer: 'Thermal_Zones',
     beamsLayer: 'Beams',
     pointsLayer: 'Points',
     edgesLayer: 'Edges',
@@ -1244,7 +1244,7 @@ export function bindUI(store, canvas, mouse) {
     const checkbox = document.getElementById(checkboxId);
     if (checkbox) {
       // Set initial state - use default if store.active is null
-      checkbox.checked = store.active?.layers?.[layerName] ?? (layerName === 'Plan_Boundary' || layerName === 'Boundary_Area' || layerName === 'Core_Boundary' || layerName === 'Core_Area' || layerName === 'Columns' || layerName === 'Exclusion_Areas' || layerName === 'Temperature_Regions');
+      checkbox.checked = store.active?.layers?.[layerName] ?? (layerName === 'Plan_Boundary' || layerName === 'Boundary_Area' || layerName === 'Core_Boundary' || layerName === 'Core_Area' || layerName === 'Columns' || layerName === 'Exclusion_Areas' || layerName === 'Thermal_Zones');
       
       // Add event listener
       checkbox.addEventListener('change', () => {
@@ -1560,8 +1560,7 @@ export function bindUI(store, canvas, mouse) {
       // Helper: apply a partial or full data dict to the active floorplan
       const applyData = (d) => {
         if (!d) return;
-        if (Array.isArray(d.thermal_zones)        && d.thermal_zones.length)        fp.Temperature_Regions  = d.thermal_zones;
-        if (Array.isArray(d.Temperature_Regions)  && d.Temperature_Regions.length)  fp.Temperature_Regions  = d.Temperature_Regions;
+        if (Array.isArray(d.thermal_zones)        && d.thermal_zones.length)        fp.Thermal_Zones        = d.thermal_zones.map(tz => ({ ...tz, subZones: tz.sub_zones || [] }));
         if (Array.isArray(d.Points)               && d.Points.length)               fp.Points               = d.Points;
         if (Array.isArray(d.Edges)                && d.Edges.length)                fp.Edges                = d.Edges;
         if (Array.isArray(d.Beams)                && d.Beams.length)                fp.Beams                = d.Beams;
@@ -1571,7 +1570,7 @@ export function bindUI(store, canvas, mouse) {
         if (Array.isArray(d._ductEdges)           && d._ductEdges.length)           fp._ductEdges           = d._ductEdges;
         if (Array.isArray(d.edges)                && d.edges.length)                fp._ductEdges           = d.edges;
         // Refresh the thermal zones panel whenever zone data changes
-        if (d.thermal_zones || d.Temperature_Regions) refreshThermalZonesList(store);
+        if (d.thermal_zones) refreshThermalZonesList(store);
       };
 
       try {
@@ -1666,8 +1665,8 @@ export function bindUI(store, canvas, mouse) {
   if (applyBtn && colorPicker) {
     applyBtn.addEventListener('click', () => {
       if (!store.active) return;
-      // Resolve selected area id across boundaryArea, Temperature_Regions, and legacy areas
-      const fallbackId = store.active.Temperature_Regions && store.active.Temperature_Regions.length ? store.active.Temperature_Regions[0].id : (store.active.areas && store.active.areas.length ? store.active.areas[0].id : null);
+      // Resolve selected area id across boundaryArea and thermal_zones
+      const fallbackId = store.active.Thermal_Zones && store.active.Thermal_Zones.length ? store.active.Thermal_Zones[0].id : null;
       const sel = store.selectedAreaId || fallbackId;
       if (!sel) return;
 
@@ -1677,8 +1676,8 @@ export function bindUI(store, canvas, mouse) {
         return;
       }
 
-      // try Temperature_Regions
-      let region = (store.active.Temperature_Regions || []).find(r => r.id === sel);
+      // try thermal_zones
+      let region = (store.active.Thermal_Zones || []).find(r => r.id === sel);
       if (region) {
         const alphaInput = document.getElementById('areaAlphaRange');
         const alphaValueInput = document.getElementById('areaAlphaValue');
@@ -1695,22 +1694,6 @@ export function bindUI(store, canvas, mouse) {
         return;
       }
 
-      // fallback to legacy areas
-      const area = store.active.areas.find(a => a.id === sel);
-      if (area) {
-        const alphaInput = document.getElementById('areaAlphaRange');
-        const alphaValueInput = document.getElementById('areaAlphaValue');
-        const airInput = document.getElementById('areaAirReq');
-        const labelInput = document.getElementById('areaLabelInput');
-        const alpha = alphaInput ? parseFloat(alphaInput.value) : (area.alpha || 0.3);
-        area.color = colorPicker.value;
-        area.alpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 0.3;
-        if (labelInput && labelInput.value) area.label = labelInput.value;
-        if (airInput) area.air_requirement = Number.isFinite(parseFloat(airInput.value)) ? parseFloat(airInput.value) : area.air_requirement || 7.5;
-        if (alphaValueInput) alphaValueInput.value = area.alpha.toFixed(2);
-        store.update(store.active);
-        refreshAreasList(store);
-      }
     });
   }
 
@@ -1788,12 +1771,13 @@ function _tzColour(idx, isInternal) {
 }
 
 function _subregionVertexCount(sub) {
-  if (Array.isArray(sub)) return sub.length;
-  return Object.keys(sub).filter(k => /^Pt_\d+$/.test(k)).length;
+  if (!Array.isArray(sub)) return 0;
+  return sub.filter(v => v && typeof v.x === 'number' && typeof v.y === 'number').length;
 }
 
 function _subregionFormat(sub) {
-  return Array.isArray(sub) ? 'array' : 'Pt_N';
+  if (!Array.isArray(sub)) return 'invalid';
+  return (sub.length && sub[0] && typeof sub[0].x === 'number') ? '{x,y}' : 'unknown';
 }
 
 export function refreshThermalZonesList(store) {
@@ -1801,7 +1785,7 @@ export function refreshThermalZonesList(store) {
   if (!listEl) return;
   listEl.innerHTML = '';
 
-  const regions = store.active?.Temperature_Regions || [];
+  const regions = store.active?.Thermal_Zones || [];
   if (regions.length === 0) {
     listEl.innerHTML = '<li style="color:#888; font-size:0.9em;">None — run optimisation to generate zones</li>';
     return;
@@ -1826,15 +1810,15 @@ export function refreshThermalZonesList(store) {
     const type = region.type || 'perimeter';
     const orient = region.orientation !== null && region.orientation !== undefined
       ? `${region.orientation.toFixed(0)}°` : 'internal';
-    const subCount = (region.subregions || []).length;
-    const ptCount = subCount > 0 ? _subregionVertexCount(region.subregions[0]) : 0;
-    const fmt = subCount > 0 ? _subregionFormat(region.subregions[0]) : '—';
+    const subCount = (region.subZones || []).length;
+    const ptCount = subCount > 0 ? _subregionVertexCount(region.subZones[0]) : 0;
+    const fmt = subCount > 0 ? _subregionFormat(region.subZones[0]) : '—';
     const air = region.airRequirement?.total_flow
       ? `${region.airRequirement.total_flow.toFixed(0)} L/s` : '—';
 
     info.innerHTML =
       `<strong>Zone ${ri + 1}</strong> · ${type} · ${orient}<br>` +
-      `subregions: ${subCount} · pts[0]: ${ptCount} · fmt: <code>${fmt}</code><br>` +
+      `subZones: ${subCount} · pts[0]: ${ptCount} · fmt: <code>${fmt}</code><br>` +
       `air req: ${air}`;
 
     li.appendChild(info);
@@ -1845,7 +1829,7 @@ export function refreshThermalZonesList(store) {
     del.title = 'Remove zone';
     del.style.cssText = 'margin-left:auto; background:none; border:none; color:#888; cursor:pointer; font-size:14px; flex-shrink:0;';
     del.onclick = () => {
-      store.active.Temperature_Regions.splice(ri, 1);
+      store.active.Thermal_Zones.splice(ri, 1);
       store.update(store.active);
       refreshThermalZonesList(store);
     };
@@ -1890,52 +1874,26 @@ function commitCore(store) {
   console.log("Core boundary added successfully");
 }
 
-// Find closest vertex from existing areas (Temperature_Regions and legacy areas)
+// Find closest vertex from existing thermal zone polygons
 function findClosestAreaVertex(fp, point, maxDist = SNAP_TO_NODE_DIST) {
   if (!fp) return null;
   let best = null;
   let bestDist = maxDist;
 
-  // Temperature_Regions subregion vertices (Pt_* keyed objects)
-  (fp.Temperature_Regions || []).forEach(region => {
-    (region.subregions || []).forEach(sub => {
-      Object.values(sub).forEach(v => {
-        if (Array.isArray(v) && v.length >= 2) {
-          const dx = point.x - v[0];
-          const dy = point.y - v[1];
+  // thermal_zones sub-zone vertices ({x,y} objects)
+  (fp.Thermal_Zones || []).forEach(region => {
+    (region.subZones || []).forEach(sub => {
+      (sub || []).forEach(v => {
+        if (v && typeof v.x === 'number' && typeof v.y === 'number') {
+          const dx = point.x - v.x;
+          const dy = point.y - v.y;
           const d = Math.hypot(dx, dy);
           if (d < bestDist) {
             bestDist = d;
-            best = { x: v[0], y: v[1], source: 'temperature' };
+            best = { x: v.x, y: v.y, source: 'temperature' };
           }
         }
       });
-    });
-  });
-
-  // Legacy areas vertices
-  (fp.areas || []).forEach(area => {
-    (area.vertices || []).forEach(v => {
-      if (typeof v === 'string') {
-        const n = fp.wall_graph.nodes.find(n => n.id === v);
-        if (n) {
-          const dx = point.x - n.x;
-          const dy = point.y - n.y;
-          const d = Math.hypot(dx, dy);
-          if (d < bestDist) {
-            bestDist = d;
-            best = { x: n.x, y: n.y, source: 'legacy-node' };
-          }
-        }
-      } else if (Array.isArray(v) && v.length >= 2) {
-        const dx = point.x - v[0];
-        const dy = point.y - v[1];
-        const d = Math.hypot(dx, dy);
-        if (d < bestDist) {
-          bestDist = d;
-          best = { x: v[0], y: v[1], source: 'legacy-vertex' };
-        }
-      }
     });
   });
 

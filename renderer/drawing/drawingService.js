@@ -53,7 +53,7 @@ export const DrawingService = {
       R.drawBoundaryArea(ctx, fp);
     }
     // Thermal zones (BuildWeave segmentation/zone results) — behind walls
-    if (fp.layers?.Temperature_Regions !== false) {
+    if (fp.layers?.Thermal_Zones !== false) {
       R.drawThermalZones(ctx, fp);
       R.drawThermalControlZones(ctx, fp);
     }

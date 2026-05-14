@@ -226,7 +226,7 @@ export function makeBeam(id, props = {}) {
  * @param {Object} [props]
  * @param {string}  [props.name]
  * @param {'perimeter'|'internal'} [props.zoneType]
- * @param {Array<Array<{x:number,y:number}>>} [props.subregions]
+ * @param {Array<Array<{x:number,y:number}>>} [props.subZones]
  * @param {number}  [props.airRequirement]   – l/s per person or l/s·m²
  * @param {number}  [props.numberOfRisers]
  * @param {number}  [props.vavNumber]
@@ -239,7 +239,7 @@ export function makeThermalZone(id, props = {}) {
     id,
     name: '',
     zoneType: 'internal',    // 'perimeter' | 'internal'
-    subregions: [],          // [[ {x,y}, … ], …]  one polygon per sub-region
+    subZones: [],           // [[ {x,y}, … ], …]  one polygon per sub-zone
     airRequirement: 7.5,     // model units (l/s)
     numberOfRisers: 1,
     vavNumber: 1,

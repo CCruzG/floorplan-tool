@@ -7,7 +7,7 @@ export class FloorPlan {
     this.Plan_Boundary = []; // Array of polygon objects with Pt_0, Pt_1, etc.
     this.Core_Boundary = []; // Array of core polygon objects
     this.Columns = []; // Array of column footprint polygons
-    this.Temperature_Regions = []; // Array of thermal zone objects (replacing simple areas)
+    this.Thermal_Zones = []; // Canonical thermal zone collection
     this.Beams = []; // Array of beam objects with height constraints
     this.Points = []; // Discretized grid points for routing
     this.Edges = []; // Valid connections between points
@@ -20,7 +20,7 @@ export class FloorPlan {
       Boundary_Area: true,
       Core_Boundary: true,
       Columns: true,
-      Temperature_Regions: true,
+      Thermal_Zones: true,
       Beams: false,
       Points: false,
       Edges: false,
@@ -30,7 +30,7 @@ export class FloorPlan {
     
     // Legacy compatibility - keep for gradual migration
     this.wall_graph = { nodes: [], edges: [] };
-    this.areas = []; // Will be migrated to Temperature_Regions
+    this.areas = [];
     this.entrances = []; // Will be integrated with Points/entry_candidates
     
     // UI state
@@ -182,35 +182,7 @@ export class FloorPlan {
     });
   }
 
-  // Convert simple area to Temperature_Region
-  addTemperatureRegion(name, type, vertices, properties = {}) {
-    const subregionPoints = {};
-    vertices.forEach((vertex, index) => {
-      subregionPoints[`Pt_${index}`] = [vertex[0], vertex[1]];
-    });
 
-    const region = {
-      id: this._genId('tr'),
-      type: type || "internal", // "perimeter" | "internal"
-      name: name,
-      // UI presentation fields (allow color/alpha editing like legacy areas)
-      color: properties.color || null,
-      alpha: typeof properties.alpha === 'number' ? properties.alpha : 0.3,
-      air_requirement: properties.air_requirement || 7.5,
-      // New required parameter
-      number_of_risers: typeof properties.number_of_risers === 'number' ? properties.number_of_risers : 1,
-      subregions: [subregionPoints],
-      avg_load_per_point: properties.avg_load_per_point || 0,
-      total_load: properties.total_load || 0,
-      total_area: properties.total_area || 0,
-      VAV_number: properties.VAV_number || 1,
-      entry_candidates: properties.entry_candidates || [[]],
-      thermal_control_zones: properties.thermal_control_zones || []
-    };
-
-    this.Temperature_Regions.push(region);
-    return region.id;
-  }
 
   // Toggle layer visibility
   toggleLayer(layerName) {
@@ -271,7 +243,12 @@ export class FloorPlan {
       Plan_Boundary: this.Plan_Boundary,
       Core_Boundary: this.Core_Boundary,
       Columns: this.Columns,
-      Temperature_Regions: this.Temperature_Regions,
+      // Map frontend property Thermal_Zones back to backend key thermal_zones,
+      // and map frontend property subZones back to backend key sub_zones
+      thermal_zones: this.Thermal_Zones.map(tz => ({
+        ...tz,
+        sub_zones: tz.subZones || []
+      })),
       Beams: this.Beams,
       Points: this.Points,
       Edges: this.Edges,
@@ -321,7 +298,12 @@ export class FloorPlan {
       return out;
     });
     fp.Columns = obj.Columns || [];
-    fp.Temperature_Regions = obj.Temperature_Regions || [];
+    // Map backend key thermal_zones to frontend property Thermal_Zones,
+    // and rename backend key sub_zones to frontend property subZones
+    fp.Thermal_Zones = (obj.thermal_zones || []).map(tz => ({
+      ...tz,
+      subZones: tz.sub_zones || []
+    }));
     fp.Beams = obj.Beams || [];
     fp.Points = obj.Points || [];
     fp.Edges = obj.Edges || [];
@@ -331,7 +313,7 @@ export class FloorPlan {
       Plan_Boundary: true,
       Core_Boundary: true,
       Columns: true,
-      Temperature_Regions: true,
+      Thermal_Zones: true,
       Beams: false,
       Points: false,
       Edges: false,
@@ -432,7 +414,7 @@ export class FloorPlan {
     this.Edges = [];
     this.Ducts = [];
     this.Duct_Plan = [];
-    this.Temperature_Regions = [];
+    this.Thermal_Zones = [];
     this.Exclusion_Areas = [];  // [{id, vertices:[[x,y],...]}] – column-free zones
     this.Beams = [];
     this.Walls = [];  // makeWall – primary wall primitives (boundary/core/partition)
@@ -458,7 +440,7 @@ export class FloorPlan {
       Core_Boundary: true,
       Core_Area: true,
       Columns: true,
-      Temperature_Regions: true,
+      Thermal_Zones: true,
       Exclusion_Areas: true,
       Beams: false,
       Walls: true,
@@ -630,17 +612,16 @@ export class FloorPlan {
    * vertices: [[x,y], …] or [{x,y}, …]
    * properties: { color, alpha, airRequirement, numberOfRisers, vavNumber, … }
    */
-  addTemperatureRegion(name, type, vertices, properties = {}) {
+  addThermalZone(name, type, vertices, properties = {}) {
     const id = this._genId('tr');
-    // Build legacy Pt_* subregion object (renderers still read this format)
-    const subregion = {};
-    (vertices || []).forEach((v, i) => {
-      subregion[`Pt_${i}`] = Array.isArray(v) ? [v[0], v[1]] : [v.x, v.y];
+    const subZone = (vertices || []).map((v) => {
+      if (Array.isArray(v)) return { x: v[0], y: v[1] };
+      return { x: v.x, y: v.y };
     });
     const zone = makeThermalZone(id, {
       name: name || '',
       zoneType: type || 'internal',
-      subregions: [subregion],
+      subZones: [subZone],
       airRequirement:   properties.air_requirement   ?? properties.airRequirement   ?? 7.5,
       numberOfRisers:   properties.number_of_risers  ?? properties.numberOfRisers   ?? 1,
       vavNumber:        properties.VAV_number         ?? properties.vavNumber         ?? 1,
@@ -652,7 +633,7 @@ export class FloorPlan {
       color: properties.color ?? null,
       alpha: typeof properties.alpha === 'number' ? properties.alpha : 0.3
     });
-    this.Temperature_Regions.push(zone);
+    this.Thermal_Zones.push(zone);
     return id;
   }
 
@@ -1090,11 +1071,13 @@ export class FloorPlan {
     fp.Edges = this.Edges ? [...this.Edges] : [];
     fp.Ducts = this.Ducts ? [...this.Ducts] : [];
     fp.Duct_Plan = this.Duct_Plan ? [...this.Duct_Plan] : [];
-    fp.Temperature_Regions = this.Temperature_Regions ? this.Temperature_Regions.map(tr => ({
+    fp.Thermal_Zones = this.Thermal_Zones ? this.Thermal_Zones.map(tr => ({
       ...tr,
-      subregions: tr.subregions ? tr.subregions.map(sr => ({ ...sr })) : [],
+      subZones: tr.subZones ? tr.subZones.map(sz => (sz || []).map(p => ({ ...p }))) : [],
       entry_candidates: tr.entry_candidates ? tr.entry_candidates.map(ec => [...ec]) : [[]],
-      thermal_control_zones: tr.thermal_control_zones ? [...tr.thermal_control_zones] : []
+      thermal_control_zones: tr.thermal_control_zones ? [...tr.thermal_control_zones] : [],
+      // Map frontend property subZones back to backend key sub_zones for JSON output
+      sub_zones: tr.subZones || []
     })) : [];
     fp.Exclusion_Areas = (this.Exclusion_Areas || []).map(ea => ({ ...ea, vertices: ea.vertices.map(v => [...v]) }));
     fp.Beams = this.Beams ? this.Beams.map(b => ({ ...b })) : [];
@@ -1220,7 +1203,7 @@ export class FloorPlan {
       Core:                  this.layers?.Core_Boundary       ?? true,
       Grid_Points:           this.layers?.Points              ?? true,
       Exclusion_Areas:       this.layers?.Exclusion_Areas     ?? true,
-      Thermal_Zones:         this.layers?.Temperature_Regions ?? true,
+      Thermal_Zones:         this.layers?.Thermal_Zones ?? true,
       Structural_Components: this.layers?.Columns             ?? true,
       Mechanical_Components: this.layers?.Ducts               ?? false
     };
@@ -1241,7 +1224,7 @@ export class FloorPlan {
 
       exclusion_areas: exclusionAreas,
 
-      thermal_zones: this.Temperature_Regions || [],
+      thermal_zones: this.Thermal_Zones || [],
 
       structural_components: {
         columns,
@@ -1277,7 +1260,7 @@ export class FloorPlan {
       Core_Boundary: true,
       Core_Area: true,
       Columns: true,
-      Temperature_Regions: true,
+      Thermal_Zones: true,
       Beams: false,
       Points: false,
       Edges: false,
@@ -1465,60 +1448,18 @@ export class FloorPlan {
     // Keep areas that have at least 3 vertices (coordinate or ids).
     .filter(a => a.vertices && a.vertices.length >= 3);
 
-    // Migrate legacy areas into Temperature_Regions when loading older files.
-    // If the saved JSON already contains Temperature_Regions prefer those,
-    // otherwise convert the legacy `areas` array into the new structure so
-    // the UI and renderers can immediately show regions.
-    fp.Temperature_Regions = obj.Temperature_Regions || [];
+    // Use canonical Thermal_Zones only (no legacy migration fallback).
+    // Map backend key sub_zones to frontend property subZones
+    fp.Thermal_Zones = (obj.thermal_zones || []).map(tz => ({
+      ...tz,
+      subZones: tz.sub_zones || []
+    }));
     fp.Exclusion_Areas = (obj.Exclusion_Areas || []).map(ea => ({
       id: ea.id,
       vertices: (ea.vertices || []).map(([x, y]) => [x * (savedPxPerUnit || 1), y * (savedPxPerUnit || 1)])
     }));
-    if ((!fp.Temperature_Regions || fp.Temperature_Regions.length === 0) && fp.areas && fp.areas.length) {
-      fp.Temperature_Regions = fp.areas.map(a => {
-        const subregion = {};
-        (a.vertices || []).forEach((v, i) => {
-          let coord = null;
-          if (typeof v === 'string') {
-            // try resolving node id -> coordinates
-            const node = fp.wall_graph.nodes.find(n => n.id === v);
-            if (node) coord = [node.x, node.y];
-          } else if (Array.isArray(v) && v.length >= 2) {
-            coord = [v[0], v[1]];
-          } else if (v && typeof v.x === 'number' && typeof v.y === 'number') {
-            coord = [v.x, v.y];
-          }
-          if (coord) subregion[`Pt_${i}`] = coord;
-        });
 
-        // ensure closed polygon by repeating the first point
-        if ((a.vertices || []).length > 0) {
-          const first = a.vertices[0];
-          let firstCoord = null;
-          if (typeof first === 'string') {
-            const node = fp.wall_graph.nodes.find(n => n.id === first);
-            if (node) firstCoord = [node.x, node.y];
-          } else if (Array.isArray(first) && first.length >= 2) {
-            firstCoord = [first[0], first[1]];
-          } else if (first && typeof first.x === 'number' && typeof first.y === 'number') {
-            firstCoord = [first.x, first.y];
-          }
-          if (firstCoord) subregion[`Pt_${(a.vertices || []).length}`] = firstCoord;
-        }
-
-        return {
-          id: a.id || fp._genId('tr'),
-          name: a.label || a.id || 'region',
-          type: a.type || 'internal',
-          color: a.color || null,
-          alpha: typeof a.alpha === 'number' ? a.alpha : 0.3,
-          air_requirement: a.air_requirement || 7.5,
-          subregions: [subregion]
-        };
-      });
-    }
-
-    // Normalize Plan_Boundary polygons and Temperature_Regions subregion
+    // Normalize Plan_Boundary polygons and thermal_zones sub-zone
     // coordinates to the canonical points produced above. This removes
     // duplicate coordinates and ensures visual consistency.
     const pxConv = savedPxPerUnit || 1;
@@ -1546,30 +1487,22 @@ export class FloorPlan {
       return out;
     });
 
-    // Normalize Temperature_Regions subregions coordinates
-    (fp.Temperature_Regions || []).forEach(region => {
-      region.subregions = (region.subregions || []).map(sub => {
-        // if sub is Pt_* keyed object
-        const keys = Object.keys(sub || {}).sort((a, b) => {
-          const ai = parseInt(a.split('_')[1] || '0', 10);
-          const bi = parseInt(b.split('_')[1] || '0', 10);
-          return ai - bi;
+    // Normalize Thermal_Zones subZones coordinates
+    (fp.Thermal_Zones || []).forEach(region => {
+      region.subZones = (region.subZones || []).map(sub => {
+        return (sub || []).map((pt) => {
+          const found = findCanonical(pt.x, pt.y);
+          return found ? { x: found.x, y: found.y } : { x: pt.x, y: pt.y };
         });
-        const coords = keys.map(k => sub[k]).filter(Boolean).map(v => [v[0], v[1]]);
-        const out = {};
-        coords.forEach((c, i) => {
-          const found = findCanonical(c[0], c[1]);
-          const use = found ? [found.x, found.y] : [c[0], c[1]];
-          out[`Pt_${i}`] = use;
-        });
-        if (coords.length > 0) {
-          const first = coords[0];
-          const found = findCanonical(first[0], first[1]);
-          const use = found ? [found.x, found.y] : [first[0], first[1]];
-          out[`Pt_${coords.length}`] = use;
-        }
-        return out;
       });
+    });
+    
+    // After normalization, map backend key sub_zones to subZones if needed
+    (fp.Thermal_Zones || []).forEach(region => {
+      if (region.sub_zones && !region.subZones) {
+        region.subZones = region.sub_zones;
+        delete region.sub_zones;
+      }
     });
 
     // If no explicit boundaryArea was provided, and we have a Plan_Boundary
@@ -1812,7 +1745,11 @@ export class FloorPlan {
     }));
 
     // ── thermal zones ─────────────────────────────────────────────────────
-    fp.Temperature_Regions = obj.thermal_zones || [];
+    // Map backend key sub_zones to frontend property subZones
+    fp.Thermal_Zones = (obj.thermal_zones || []).map(tz => ({
+      ...tz,
+      subZones: tz.sub_zones || []
+    }));
 
     // ── structural ────────────────────────────────────────────────────────
     fp.Columns = (obj.structural_components?.columns || []).map(col => ({
@@ -1844,7 +1781,7 @@ export class FloorPlan {
       Core_Boundary:       obj.layers?.Core                  ?? true,
       Core_Area:           obj.layers?.Core                  ?? true,
       Columns:             obj.layers?.Structural_Components ?? true,
-      Temperature_Regions: obj.layers?.Thermal_Zones         ?? true,
+      Thermal_Zones:     obj.layers?.Thermal_Zones           ?? true,
       Exclusion_Areas:     obj.layers?.Exclusion_Areas       ?? true,
       Beams:               false,
       Walls:               obj.layers?.Boundary              ?? true,
