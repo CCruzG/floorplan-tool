@@ -877,6 +877,8 @@ export class FloorPlan {
         const inExclusion = (this.Exclusion_Areas || []).some(ea =>
           this._isPointInPolygon(x, y, ea.vertices));
         const id = this._genId('gp');
+        // entryPoint defaults to false; markCoreAdjacentPointsAsEntry() is called
+        // after generateGrid to apply boundary-exclusion logic in one place.
         gridPoints.push({ id, x, y, column: !nearCore && !inExclusion, mechanical: true, entryPoint: false });
       }
     }
@@ -884,6 +886,59 @@ export class FloorPlan {
     this.Points = gridPoints;
     console.log(`Generated ${gridPoints.length} grid points from origin (${ox.toFixed(1)}, ${oy.toFixed(1)})`);
     return gridPoints;
+  }
+
+  // Mark all existing grid points close to the core boundary as entry points.
+  markCoreAdjacentPointsAsEntry() {
+    if (!Array.isArray(this.Points) || this.Points.length === 0) return 0;
+
+    const corePolys = (this.Core_Boundary || []).map(core => {
+      const pts = Object.values(core);
+      const unique = pts.filter((p, i) => i === 0 || p[0] !== pts[0][0] || p[1] !== pts[0][1]);
+      return unique.map(p => [p[0], p[1]]);
+    }).filter(poly => poly.length >= 3);
+
+    if (corePolys.length === 0) return 0;
+
+    const unitLabel = this.units?.length || 'mm';
+    const pxPerUnit = this.units?.pxPerUnit || 1;
+    const mmToUnit = (mm) => {
+      switch (unitLabel) {
+        case 'mm': return mm;
+        case 'cm': return mm / 10;
+        case 'm':  return mm / 1000;
+        case 'in': return mm / 25.4;
+        case 'ft': return mm / 304.8;
+        default:   return mm;
+      }
+    };
+    const coreProximityPx = mmToUnit(200) * pxPerUnit;
+    const boundaryExclusionPx = mmToUnit(200) * pxPerUnit;
+
+    // Resolve boundary polygon once for the proximity check.
+    const boundaryPoly = this.boundaryArea?.vertices
+      ? this.boundaryArea.vertices
+          .map(vid => {
+            const n = this.wall_graph.nodes.find(nd => nd.id === vid);
+            return n ? [n.x, n.y] : null;
+          })
+          .filter(Boolean)
+      : [];
+
+    let marked = 0;
+    for (const p of this.Points) {
+      if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') continue;
+      const nearCore = corePolys.some(poly => this._distToPolygon(p.x, p.y, poly) < coreProximityPx);
+      if (!nearCore) continue;
+      // Exclude points that are too close to the outer boundary wall.
+      const nearBoundary = boundaryPoly.length >= 3 &&
+        this._distToPolygon(p.x, p.y, boundaryPoly) < boundaryExclusionPx;
+      if (!nearBoundary && p.entryPoint !== true) {
+        p.entryPoint = true;
+        marked += 1;
+      }
+    }
+    return marked;
   }
 
   // Minimum distance from point (px,py) to the nearest edge of a closed polygon

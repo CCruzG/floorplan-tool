@@ -693,6 +693,9 @@ export function bindUI(store, canvas, mouse) {
       const spacing = store._pendingGridSpacing || 1000;
       const gridPoints = store.active.generateGrid(spacing, origin);
       if (gridPoints?.length > 0) {
+        if (typeof store.active.markCoreAdjacentPointsAsEntry === 'function') {
+          store.active.markCoreAdjacentPointsAsEntry();
+        }
         store.active.setLayerVisibility('Points', true);
         const originDisplay = document.getElementById('gridOriginDisplay');
         if (originDisplay) originDisplay.textContent = `Origin: (${best.x.toFixed(1)}, ${best.y.toFixed(1)}) — ${gridPoints.length} pts`;
@@ -1607,6 +1610,34 @@ export function bindUI(store, canvas, mouse) {
           // Auto-enable Beams and Columns layers so results are immediately visible
           fp.layers.Beams   = true;
           fp.layers.Columns = true;
+        }
+
+        // Apply duct-planning results.
+        const rawDuctPlan = d?.mechanical_components?.duct_plan || d?.ductPlan;
+        if (Array.isArray(rawDuctPlan)) {
+          fp.Duct_Plan = rawDuctPlan;
+
+          if (Array.isArray(d?._ductEdges) && d._ductEdges.length) {
+            fp._ductEdges = d._ductEdges
+              .map(e => Array.isArray(e) && e.length >= 2 ? [e[0], e[1], e[2]] : null)
+              .filter(Boolean);
+          } else if (Array.isArray(fp.Edges) && fp.Edges.length && Array.isArray(fp.Points) && fp.Points.length) {
+            const pointIndexById = new Map(fp.Points.map((p, i) => [p.id, i]));
+            const idxOf = (v) => {
+              if (typeof v === 'number') return v;
+              return pointIndexById.get(v);
+            };
+            fp._ductEdges = fp.Edges
+              .map(e => {
+                const a = idxOf(e?.v1);
+                const b = idxOf(e?.v2);
+                if (!Number.isInteger(a) || !Number.isInteger(b)) return null;
+                return [a, b, e?.length ?? e?.step ?? 1];
+              })
+              .filter(Boolean);
+          }
+
+          fp.layers.Duct_Plan = true;
         }
       };
 
