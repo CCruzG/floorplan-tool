@@ -1777,16 +1777,12 @@ export function bindUI(store, canvas, mouse) {
         }
         _activeJobId = started.job_id;
 
-        const result = await pollOptimisation(started.job_id, (phase, partial) => {
-          // Phase just completed — apply partial results and refresh canvas
+        const result = await pollOptimisation(started.job_id, (phase, data) => {
+          // New data for a phase (in-progress or just completed) — apply and redraw
           _currentPhase = _phaseOrder[Math.min(_phaseOrder.indexOf(phase) + 1, _phaseOrder.length - 1)];
-          applyData(partial);
-          store.notify();
-        }, 2000, abortCtrl.signal, (_key, data) => {
-          // Intermediate result from in-progress phase — update canvas immediately
           applyData(data);
           store.notify();
-        });
+        }, 2000, abortCtrl.signal);
 
         if (!result.ok) {
           if (!result.cancelled && !abortCtrl.signal.aborted) {

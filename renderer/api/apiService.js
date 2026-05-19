@@ -175,17 +175,17 @@ export async function cancelOptimisation(jobId) {
 
 /**
  * Poll a job until it completes or errors.
- * Calls onPhase(phaseName, partialData) each time a new phase finishes.
+ * Calls onUpdate(phase, data) whenever a phase key in `partial` has a new version,
+ * whether the phase is still in progress or has just completed.
  *
  * @param {string}      jobId
- * @param {Function}    onPhase   - (phase: string, partial: object) => void
+ * @param {Function}    onUpdate  - (phase: string, data: object) => void
  * @param {number}      [interval=2000] poll interval ms
  * @param {AbortSignal} [signal]  - abort to stop polling (treated as cancellation)
  * @returns {Promise<{ ok: boolean, data?: object, error?: string }>}
  */
-export async function pollOptimisation(jobId, onPhase, interval = 2000, signal = null, onIntermediate = null) {
-  const seen = new Set();
-  const intermediateVersions = {};
+export async function pollOptimisation(jobId, onUpdate, interval = 2000, signal = null) {
+  const versions = {};  // phase → last delivered version number
 
   return new Promise((resolve) => {
     let timeoutHandle = null;
@@ -212,22 +212,11 @@ export async function pollOptimisation(jobId, onPhase, interval = 2000, signal =
         return;
       }
 
-      // Deliver any newly completed phases
-      for (const phase of (json.phases_done || [])) {
-        if (!seen.has(phase)) {
-          seen.add(phase);
-          onPhase(phase, (json.partial || {})[phase] || {});
-        }
-      }
-
-      // Deliver intermediate updates from in-progress phases
-      if (onIntermediate) {
-        for (const [key, val] of Object.entries(json.partial || {})) {
-          if (seen.has(key)) continue;
-          if (typeof val?.v === 'number' && val.v !== intermediateVersions[key]) {
-            intermediateVersions[key] = val.v;
-            onIntermediate(key, val);
-          }
+      // Deliver any phase whose partial data has a new version
+      for (const [phase, val] of Object.entries(json.partial || {})) {
+        if (typeof val?.v === 'number' && val.v !== versions[phase]) {
+          versions[phase] = val.v;
+          onUpdate(phase, val);
         }
       }
 
@@ -251,3 +240,4 @@ export async function runOptimisation(planJson, units, opts = {}) {
   if (!start.ok) return start;
   return pollOptimisation(start.job_id, () => {});
 }
+
