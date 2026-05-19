@@ -124,7 +124,7 @@ export function makeWall(id, props = {}) {
     start: { x: 0, y: 0 },  // canvas pixels
     end:   { x: 0, y: 0 },  // canvas pixels
     wallType: 'boundary',    // 'boundary' | 'core' | 'partition'
-    translucent: false,      // false = opaque; true = glazed / translucent
+    translucent: (props.wallType ?? 'boundary') === 'boundary',
     locked: false,
     openings: []             // WallOpening[], sorted by ascending t
   }, props);
@@ -276,50 +276,6 @@ export function makeCeilingZone(id, props = {}) {
 // ─── hvac ─────────────────────────────────────────────────────────────────────
 
 /**
- * Air terminal – supply diffuser, return grille, exhaust point, etc.
- * @param {string} id
- * @param {Object} [props]
- * @param {'supply'|'return'|'exhaust'|'transfer'} [props.terminalKind]
- * @param {{x:number,y:number}} [props.position]
- * @param {string}  [props.zoneId]    – parent ThermalZone id
- * @param {number}  [props.flowRate]  – l/s
- */
-export function makeTerminal(id, props = {}) {
-  return merge({
-    kind: 'terminal',
-    id,
-    terminalKind: 'supply',   // 'supply' | 'return' | 'exhaust' | 'transfer'
-    position: { x: 0, y: 0 },
-    zoneId: null,
-    flowRate: 0               // l/s
-  }, props);
-}
-
-/**
- * Mechanical equipment – FCU, AHU, VAV box, coil, etc.
- * @param {string} id
- * @param {Object} [props]
- * @param {'fcu'|'ahu'|'vav'|'coil'|'fan'|'other'} [props.equipmentKind]
- * @param {{x:number,y:number}} [props.position]
- * @param {number}  [props.rotation]   – degrees
- * @param {string}  [props.zoneId]     – parent ThermalZone id, if applicable
- * @param {number}  [props.capacity]   – kW or l/s depending on type
- * @param {string}  [props.tag]        – engineer's tag reference
- */
-export function makeEquipment(id, props = {}) {
-  return merge({
-    kind: 'equipment',
-    id,
-    equipmentKind: 'fcu',    // 'fcu' | 'ahu' | 'vav' | 'coil' | 'fan' | 'other'
-    position: { x: 0, y: 0 },
-    rotation: 0,
-    zoneId: null,
-    capacity: 0,
-    tag: ''
-  }, props);
-}
-
-/**
  * Discretised routing node (used by grid generation).
  * @param {string} id
  * @param {Object} [props]
@@ -401,8 +357,6 @@ export const ELEMENT_FACTORIES = {
   beam:        makeBeam,
   thermalZone: makeThermalZone,
   ceilingZone: makeCeilingZone,
-  terminal:    makeTerminal,
-  equipment:   makeEquipment,
   gridPoint:   (id, p) => makeGridPoint(id, p),
   gridEdge:    (id, p) => makeGridEdge(id, p.p1, p.p2, p),
   ductSpec:    makeDuctSpec,

@@ -49,7 +49,7 @@ export function floorplanToInstance(planJson, units) {
       id: e.id,
       start:      { x: toMm(e.start.x), y: toMm(e.start.y) },
       end:        { x: toMm(e.end.x),   y: toMm(e.end.y) },
-      translucent: e.translucent ?? false,
+      translucent: e.translucent ?? true,
       openings:   e.openings ?? [],
     })),
   };
@@ -183,8 +183,9 @@ export async function cancelOptimisation(jobId) {
  * @param {AbortSignal} [signal]  - abort to stop polling (treated as cancellation)
  * @returns {Promise<{ ok: boolean, data?: object, error?: string }>}
  */
-export async function pollOptimisation(jobId, onPhase, interval = 2000, signal = null) {
+export async function pollOptimisation(jobId, onPhase, interval = 2000, signal = null, onIntermediate = null) {
   const seen = new Set();
+  const intermediateVersions = {};
 
   return new Promise((resolve) => {
     let timeoutHandle = null;
@@ -216,6 +217,17 @@ export async function pollOptimisation(jobId, onPhase, interval = 2000, signal =
         if (!seen.has(phase)) {
           seen.add(phase);
           onPhase(phase, (json.partial || {})[phase] || {});
+        }
+      }
+
+      // Deliver intermediate updates from in-progress phases
+      if (onIntermediate) {
+        for (const [key, val] of Object.entries(json.partial || {})) {
+          if (seen.has(key)) continue;
+          if (typeof val?.v === 'number' && val.v !== intermediateVersions[key]) {
+            intermediateVersions[key] = val.v;
+            onIntermediate(key, val);
+          }
         }
       }
 

@@ -554,7 +554,7 @@ export function drawWalls(ctx, fp, options = {}) {
     const wallType = wall?.wallType ?? edge.wallType ?? 'boundary';
     const isBoundaryWall = wallType === 'boundary' || (!wall && !edge.wallType);
     const isCoreWall     = wallType === 'core';
-    const isTranslucent  = isBoundaryWall && !!wall?.translucent;
+    const isTranslucent  = isBoundaryWall && (wall ? !!wall.translucent : true);
 
     // When the entire core is selected, highlight all core walls
     if (fp.selectedCore && isCoreWall) isSelected = true;
@@ -1002,20 +1002,30 @@ export function drawGhost(ctx, fp, mouse, { constrain = false } = {}) {
     constrained = true;
   }
 
-  ctx.beginPath();
-  ctx.moveTo(lastX, lastY);
-  ctx.lineTo(ghostX, ghostY);
+  // Draw two parallel thin lines (translucent boundary style)
+  const _dx = ghostX - lastX;
+  const _dy = ghostY - lastY;
+  const _len = Math.hypot(_dx, _dy) || 1;
+  const _nx = -_dy / _len;
+  const _ny =  _dx / _len;
+  const _off = 2;
 
-  if (constrained) {
-    ctx.strokeStyle = "#00e676";
-    ctx.lineWidth = 2;
-    ctx.setLineDash([]);
-  } else {
-    ctx.strokeStyle = "rgba(0, 230, 118, 0.6)";
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([5, 3]);
-  }
+  const _style = constrained ? '#00e676' : 'rgba(0, 230, 118, 0.6)';
+  ctx.strokeStyle = _style;
+  ctx.lineWidth = 1;
+  if (!constrained) ctx.setLineDash([5, 3]);
+  else ctx.setLineDash([]);
+
+  ctx.beginPath();
+  ctx.moveTo(lastX + _nx * _off, lastY + _ny * _off);
+  ctx.lineTo(ghostX + _nx * _off, ghostY + _ny * _off);
   ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(lastX - _nx * _off, lastY - _ny * _off);
+  ctx.lineTo(ghostX - _nx * _off, ghostY - _ny * _off);
+  ctx.stroke();
+
   ctx.setLineDash([]);
 
   if (constrained) {
@@ -1998,10 +2008,14 @@ export function drawBeams(ctx, fp) {
 
 export function drawDuctPlan(ctx, fp) {
   const plan = fp.Duct_Plan;
-  const edges = fp._ductEdges;
   if (!plan || plan.length === 0) return;
-  if (!edges || edges.length === 0) return;
   if (!fp.Points || fp.Points.length === 0) return;
+
+  // Create a map of point IDs to point objects for O(1) lookup
+  const pointMap = new Map();
+  fp.Points.forEach(p => {
+    if (p.id) pointMap.set(p.id, p);
+  });
 
   ctx.save();
 
@@ -2012,62 +2026,128 @@ export function drawDuctPlan(ctx, fp) {
   ];
 
   plan.forEach((riser, ri) => {
-    const colour = RISER_COLOURS[ri % RISER_COLOURS.length];
+    // Colour derived from the thermal zone this riser serves
+    // Note: A riser (riser.vav[0]) corresponds to a control zone.
+    // We search the Thermal_Zones to find the region and control zone that matches.
+    let colour = '#888'; // Default grey
+    if (riser.vav && riser.vav.length > 0) {
+      const firstVavId = typeof riser.vav[0][0] === 'string' ? riser.vav[0][0] : fp.Points[riser.vav[0][0]]?.id;
+      if (firstVavId) {
+        // Find which thermal zone contains this point
+        const region = (fp.Thermal_Zones || []).find(r => 
+          (r.thermalControlZones || []).some(cz => cz.points.includes(firstVavId))
+        );
+        if (region) {
+          // Use explicit color if present, else fallback to zoneColor logic
+          if (region.color && /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/.test(region.color)) {
+            colour = region.color;
+          } else {
+            const ri = fp.Thermal_Zones.indexOf(region);
+            const isInternal = region.type === 'internal' || region.orientation === null;
+            const zoneColor = _zoneColour(ri, isInternal);
+            colour = zoneColor.stroke;
+          }
+        }
+      }
+    }
 
     // Draw duct edges
-    ctx.strokeStyle = colour;
-    ctx.setLineDash([]);
-    (riser.ducts || []).forEach(([edgeIdx, ductSizeIdx, flow]) => {
-      const edge = edges[edgeIdx];
-      if (!edge) return;
-      const [ptA, ptB] = edge;
-      const pA = fp.Points[ptA];
-      const pB = fp.Points[ptB];
+    (riser.ducts || []).forEach((duct) => {
+      let pA, pB, width, height, flow;
+      if (duct.length === 5) {
+        const [ptA_id, ptB_id, w, h, f] = duct;
+        pA = pointMap.get(ptA_id);
+        pB = pointMap.get(ptB_id);
+        width = w;
+        height = h;
+        flow = f;
+      }
+
       if (!pA || !pB) return;
 
-      // Line width based on flow magnitude (clamped 1–6px)
-      ctx.lineWidth = Math.min(6, Math.max(1, Math.log2(flow + 1) * 0.8 + 1));
+      const isSelected = fp.selectedDuct && 
+                         fp.selectedDuct.pA === duct[0] && 
+                         fp.selectedDuct.pB === duct[1] &&
+                         fp.selectedDuct.flow === duct[4];
+
+      ctx.strokeStyle = isSelected ? '#00e676' : colour;
+      ctx.lineWidth = Math.min(4, Math.max(0.5, Math.log2(flow + 1) * 0.5 + 0.5));
       ctx.beginPath();
       ctx.moveTo(pA.x, pA.y);
       ctx.lineTo(pB.x, pB.y);
       ctx.stroke();
     });
 
-    // Draw VAV terminal boxes
-    ctx.fillStyle = colour;
-    (riser.vav || []).forEach(([ptIdx]) => {
-      const pt = fp.Points[ptIdx];
+    // Draw VAV terminal boxes (smaller markers)
+    (riser.vav || []).forEach((vav) => {
+      let pt;
+      if (typeof vav[0] === 'string') {
+        pt = pointMap.get(vav[0]);
+      } else {
+        pt = fp.Points[vav[0]];
+      }
       if (!pt) return;
+      
+      const isSelected = fp.selectedVav && 
+                         fp.selectedVav.ptId === vav[0] && 
+                         fp.selectedVav.load === vav[1];
+
       ctx.beginPath();
-      ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2);
+      ctx.arc(pt.x, pt.y, isSelected ? 6 : 3, 0, Math.PI * 2); // Highlight by size
+      ctx.fillStyle = isSelected ? '#00e676' : colour;
       ctx.fill();
       ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 0.5;
       ctx.stroke();
     });
 
     // Draw entry point (riser root)
     if (riser.entryPoint !== null && riser.entryPoint !== undefined) {
-      const pt = fp.Points[riser.entryPoint];
+      let pt;
+      if (typeof riser.entryPoint === 'string') {
+        pt = pointMap.get(riser.entryPoint);
+      } else {
+        pt = fp.Points[riser.entryPoint];
+      }
       if (pt) {
         ctx.beginPath();
-        ctx.arc(pt.x, pt.y, 9, 0, Math.PI * 2);
+        ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2); // Smaller (5px)
         ctx.fillStyle = colour;
         ctx.globalAlpha = 0.3;
         ctx.fill();
         ctx.globalAlpha = 1;
         ctx.strokeStyle = colour;
-        ctx.lineWidth = 2.5;
+        ctx.lineWidth = 1.5;
         ctx.stroke();
-        // Diamond marker
+        // Diamond marker (smaller)
         ctx.beginPath();
-        ctx.moveTo(pt.x,     pt.y - 6);
-        ctx.lineTo(pt.x + 5, pt.y);
-        ctx.lineTo(pt.x,     pt.y + 6);
-        ctx.lineTo(pt.x - 5, pt.y);
+        ctx.moveTo(pt.x,     pt.y - 4);
+        ctx.lineTo(pt.x + 3, pt.y);
+        ctx.lineTo(pt.x,     pt.y + 4);
+        ctx.lineTo(pt.x - 3, pt.y);
         ctx.closePath();
         ctx.fillStyle = colour;
         ctx.fill();
+      }
+    }
+
+    // Draw return point if applicable
+    if (riser.returnPoint !== null && riser.returnPoint !== undefined) {
+      let pt = typeof riser.returnPoint === 'string' ? pointMap.get(riser.returnPoint) : fp.Points[riser.returnPoint];
+      if (pt) {
+        ctx.save();
+        const _rw = 10, _rh = 7;
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 2]);
+        ctx.strokeRect(pt.x - _rw / 2, pt.y - _rh / 2, _rw, _rh);
+        ctx.setLineDash([]);
+        ctx.font = 'bold 6px sans-serif';
+        ctx.fillStyle = colour;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('R', pt.x, pt.y);
+        ctx.restore();
       }
     }
   });

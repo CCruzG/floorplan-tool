@@ -64,6 +64,35 @@ function refreshInspector(fp, store) {
   const panel = document.getElementById('inspectorPanel');
   if (!panel) return;
 
+  // ── Duct Inspector ──────────────────────────────────────────────────────
+  if (fp?.selectedDuct) {
+    const duct = fp.selectedDuct; // Assuming { pA, pB, width, height, flow }
+    panel.innerHTML = [
+      `<div class="inspector-header"><span class="inspector-kind">Duct Segment</span></div>`,
+      `<div class="inspector-body">`,
+      `<div class="inspector-row"><span class="inspector-label">Width</span><span class="inspector-value">${Math.round(duct.width * 1000)} mm</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Height</span><span class="inspector-value">${Math.round(duct.height * 1000)} mm</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Flow</span><span class="inspector-value">${duct.flow.toFixed(2)} l/s</span></div>`,
+      `</div>`
+    ].join('');
+    return;
+  }
+  
+  // ── VAV Inspector ──────────────────────────────────────────────────────
+  if (fp?.selectedVav) {
+    const vav = fp.selectedVav; // Assuming { ptId, load }
+    const pt = (fp.Points || []).find(p => p.id === vav.ptId);
+    panel.innerHTML = [
+      `<div class="inspector-header"><span class="inspector-kind">VAV Terminal</span></div>`,
+      `<div class="inspector-body">`,
+      `<div class="inspector-row"><span class="inspector-label">Grid ID</span><span class="inspector-value">${vav.ptId}</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Load</span><span class="inspector-value">${vav.load.toFixed(2)} W</span></div>`,
+      pt ? `<div class="inspector-row"><span class="inspector-label">Entry Point</span><span class="inspector-value">${pt.entryPoint ? 'Yes' : 'No'}</span></div>` : '',
+      `</div>`
+    ].join('');
+    return;
+  }
+  
   // ── Grid Point inspector ────────────────────────────────────────────────
   const selPts = fp?.selectedPoints;
   if (selPts?.size > 0) {
@@ -184,14 +213,14 @@ function refreshInspector(fp, store) {
 
   const ensureWall = () => {
     if (!wall && n1 && n2) {
-      fp.addWall(n1, n2, { wallType: 'boundary', translucent: false, locked: edge.locked || false });
+      fp.addWall(n1, n2, { wallType: 'boundary', translucent: true, locked: edge.locked || false });
       wall = fp.Walls[fp.Walls.length - 1];
     }
     return wall;
   };
 
   const wallType    = wall?.wallType    ?? 'boundary';
-  const translucent = wall?.translucent ?? false;
+  const translucent = wall?.translucent ?? (wallType === 'boundary');
   const locked      = edge.locked || false;
   const openings    = wall?.openings    ?? [];
 
@@ -363,7 +392,70 @@ export function bindUI(store, canvas, mouse) {
   const ctx = canvas.getContext('2d');
   let _currentFilePath = null;  // path of the currently open/saved file
 
-  // ── Viewport (zoom / pan) ────────────────────────────────────────────────
+  canvas.addEventListener('mousedown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const world = _toContent(sx, sy);
+    const fp = store.active;
+    if (!fp) return;
+
+    // Hit test Duct Plan
+    let found = false;
+    if (fp.Duct_Plan) {
+      // VAV Terminals (check before ducts so they can be clicked)
+      fp.Duct_Plan.forEach(riser => {
+        (riser.vav || []).forEach(vav => {
+          const ptId = vav[0];
+          const pt = fp.Points.find(p => p.id === ptId);
+          if (pt) {
+            const dist = Math.hypot(world.x - pt.x, world.y - pt.y);
+            if (dist < 8 / vp.scale) {
+              fp.selectedVav = { ptId: vav[0], load: vav[1] };
+              fp.selectedDuct = null;
+              found = true;
+            }
+          }
+        });
+      });
+
+      if (!found) {
+        // Duct Segments
+        fp.Duct_Plan.forEach(riser => {
+          (riser.ducts || []).forEach(duct => {
+            const [ptA_id, ptB_id] = duct;
+            const pA = fp.Points.find(p => p.id === ptA_id);
+            const pB = fp.Points.find(p => p.id === ptB_id);
+            if (pA && pB) {
+              const dx = pB.x - pA.x;
+              const dy = pB.y - pA.y;
+              const segLenSq = dx * dx + dy * dy;
+              const t = ((world.x - pA.x) * dx + (world.y - pA.y) * dy) / segLenSq;
+              
+              // Ensure we are strictly between 0.1 and 0.9 (avoiding endpoints)
+              if (t > 0.1 && t < 0.9) {
+                const projX = pA.x + t * dx;
+                const projY = pA.y + t * dy;
+                const dist = Math.hypot(world.x - projX, world.y - projY);
+                if (dist < 6 / vp.scale) {
+                  fp.selectedDuct = { pA: duct[0], pB: duct[1], width: duct[2], height: duct[3], flow: duct[4] };
+                  fp.selectedVav = null;
+                  found = true;
+                }
+              }
+            }
+          });
+        });
+      }
+    }
+
+    if (!found) {
+      fp.selectedDuct = null;
+      fp.selectedVav = null;
+    }
+    store.update(fp);
+  });
+
   // store.viewport is the live { scale, tx, ty } object shared with index.js.
   const vp = store.viewport;   // shorthand reference — mutate in place
 
@@ -1239,7 +1331,6 @@ export function bindUI(store, canvas, mouse) {
     beamsLayer: 'Beams',
     pointsLayer: 'Points',
     edgesLayer: 'Edges',
-    ductsLayer: 'Ducts',
     ductPlanLayer: 'Duct_Plan'
   };
 
@@ -1564,10 +1655,13 @@ export function bindUI(store, canvas, mouse) {
       const applyData = (d) => {
         if (!d) return;
         if (Array.isArray(d.thermal_zones) && d.thermal_zones.length) {
-          fp.Thermal_Zones = d.thermal_zones.map(({ thermal_region_geometry, vav_control_zones, ...tz }) => ({
+          const prevColors = (fp.Thermal_Zones || []).map(z => ({ color: z.color ?? null, alpha: z.alpha ?? null }));
+          fp.Thermal_Zones = d.thermal_zones.map(({ thermal_region_geometry, vav_control_zones, ...tz }, i) => ({
             ...tz,
             subZones: thermal_region_geometry || [],
             thermalControlZones: vav_control_zones || [],
+            color: tz.color ?? prevColors[i]?.color ?? null,
+            alpha: tz.alpha ?? prevColors[i]?.alpha ?? null,
           }));
         }
         // Refresh the thermal zones panel whenever zone data changes
@@ -1613,15 +1707,11 @@ export function bindUI(store, canvas, mouse) {
         }
 
         // Apply duct-planning results.
-        const rawDuctPlan = d?.mechanical_components?.duct_plan || d?.ductPlan;
+        const rawDuctPlan = d?.mechanical_components?.duct_plan;
         if (Array.isArray(rawDuctPlan)) {
           fp.Duct_Plan = rawDuctPlan;
 
-          if (Array.isArray(d?._ductEdges) && d._ductEdges.length) {
-            fp._ductEdges = d._ductEdges
-              .map(e => Array.isArray(e) && e.length >= 2 ? [e[0], e[1], e[2]] : null)
-              .filter(Boolean);
-          } else if (Array.isArray(fp.Edges) && fp.Edges.length && Array.isArray(fp.Points) && fp.Points.length) {
+          if (Array.isArray(fp.Edges) && fp.Edges.length && Array.isArray(fp.Points) && fp.Points.length) {
             const pointIndexById = new Map(fp.Points.map((p, i) => [p.id, i]));
             const idxOf = (v) => {
               if (typeof v === 'number') return v;
@@ -1692,7 +1782,11 @@ export function bindUI(store, canvas, mouse) {
           _currentPhase = _phaseOrder[Math.min(_phaseOrder.indexOf(phase) + 1, _phaseOrder.length - 1)];
           applyData(partial);
           store.notify();
-        }, 2000, abortCtrl.signal);
+        }, 2000, abortCtrl.signal, (_key, data) => {
+          // Intermediate result from in-progress phase — update canvas immediately
+          applyData(data);
+          store.notify();
+        });
 
         if (!result.ok) {
           if (!result.cancelled && !abortCtrl.signal.aborted) {
@@ -1706,12 +1800,6 @@ export function bindUI(store, canvas, mouse) {
         store.notify();
         if (aiError) aiError.style.display = 'none';
 
-        // Auto-save back to the opened file if we have a path
-        if (_currentFilePath && window.electronAPI?.saveFloorplanSilent) {
-          window.electronAPI.saveFloorplanSilent({ filePath: _currentFilePath, payload: fp.toJSON() })
-            .then(r => { if (r?.success) console.log('Auto-saved optimisation results to', _currentFilePath); })
-            .catch(err => console.warn('Auto-save failed:', err));
-        }
       } catch (err) {
         if (aiError && !abortCtrl.signal.aborted) {
           aiError.style.display = 'block';

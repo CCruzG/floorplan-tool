@@ -387,9 +387,7 @@ import {
   makeWall, makeWallOpening,
   makeCore, makeOpening,
   makeColumn, makeBeam,
-  makeThermalZone, makeCeilingZone,
-  makeTerminal, makeEquipment,
-  makeGridPoint, makeGridEdge, makeDuctSpec, makeDuctSegment
+  makeThermalZone, makeCeilingZone
 } from './elements.js';
 
 export class FloorPlan {
@@ -431,10 +429,6 @@ export class FloorPlan {
 
     // spaces
     this.ceilingZones = [];  // makeCeilingZone – plenum / suspended-ceiling areas
-
-    // hvac (schema-defined; no drawing tool yet)
-    this.terminals  = [];  // makeTerminal  – supply / return / exhaust points
-    this.equipment  = [];  // makeEquipment – FCU / AHU / VAV boxes
     // Layer visibility defaults
     this.layers = {
       Plan_Boundary: true,
@@ -691,21 +685,7 @@ export class FloorPlan {
     return id;
   }
 
-  /** Place an air terminal (diffuser / grille / exhaust) at a canvas position. */
-  addTerminal(x, y, props = {}) {
-    const id = this._genId('tm');
-    const terminal = makeTerminal(id, { position: { x, y }, ...props });
-    this.terminals.push(terminal);
-    return id;
-  }
 
-  /** Place a mechanical equipment item (FCU / AHU / VAV …) at a canvas position. */
-  addEquipment(x, y, props = {}) {
-    const id = this._genId('eq');
-    const equip = makeEquipment(id, { position: { x, y }, ...props });
-    this.equipment.push(equip);
-    return id;
-  }
 
   // ─── Wall CRUD ─────────────────────────────────────────────────────────
 
@@ -989,6 +969,8 @@ export class FloorPlan {
 
   clearGrid() {
     this.Points = [];
+    this.Duct_Plan = [];
+    this.layers.Duct_Plan = false;
     console.log('Grid cleared');
   }
 
@@ -1153,8 +1135,8 @@ export class FloorPlan {
       closed: this.partitions?.closed || false
     };
     fp.ceilingZones = (this.ceilingZones || []).map(z => ({ ...z, vertices: (z.vertices || []).map(v => ({ ...v })) }));
-    fp.terminals    = (this.terminals    || []).map(t => ({ ...t, position: { ...t.position } }));
-    fp.equipment    = (this.equipment    || []).map(e => ({ ...e, position: { ...e.position } }));
+    fp.selectedDuct = this.selectedDuct ? { ...this.selectedDuct } : null;
+    fp.selectedVav  = this.selectedVav ? { ...this.selectedVav } : null;
     
     // Copy layer visibility settings
     if (this.layers) {
@@ -1202,7 +1184,7 @@ export class FloorPlan {
           start: { x: u(n1.x), y: u(n1.y) },
           end:   { x: u(n2.x), y: u(n2.y) },
           type: 'boundary',
-          translucent: wall?.translucent ?? false,
+          translucent: wall?.translucent ?? true,
           locked: !!e.locked,
           openings: serializeOpenings(wall?.openings)
         };
@@ -1294,10 +1276,8 @@ export class FloorPlan {
       },
 
       mechanical_components: {
-        ducts: this.Ducts || [],
-        duct_plan: this.Duct_Plan || [],
-        terminals: (this.terminals || []).map(t => ({ ...t, position: { x: u(t.position.x), y: u(t.position.y) } })),
-        equipment: (this.equipment || []).map(e => ({ ...e, position: { x: u(e.position.x), y: u(e.position.y) } }))
+        duct_configs: this.Ducts || [],
+        duct_plan: this.Duct_Plan || []
       },
 
       layers
@@ -1803,6 +1783,7 @@ export class FloorPlan {
     // Map backend key thermal_region_geometry to frontend property subZones
     fp.Thermal_Zones = (obj.thermal_zones || []).map(({ thermal_region_geometry, vav_control_zones, ...tz }) => ({
       ...tz,
+      color: tz.color ?? null,
       subZones: thermal_region_geometry || [],
       thermalControlZones: vav_control_zones || []
     }));
@@ -1842,14 +1823,8 @@ export class FloorPlan {
     });
 
     // ── mechanical ────────────────────────────────────────────────────────
-    fp.Ducts = obj.mechanical_components?.ducts || [];
+    fp.Ducts = obj.mechanical_components?.duct_configs || obj.mechanical_components?.ducts || [];
     fp.Duct_Plan = obj.mechanical_components?.duct_plan || [];
-    fp.terminals = (obj.mechanical_components?.terminals || []).map(t => ({
-      ...t, position: { x: px(t.position?.x || 0), y: px(t.position?.y || 0) }
-    }));
-    fp.equipment = (obj.mechanical_components?.equipment || []).map(e => ({
-      ...e, position: { x: px(e.position?.x || 0), y: px(e.position?.y || 0) }
-    }));
 
     // ── openings ──────────────────────────────────────────────────────────
     fp.openings = (obj.openings || []).map(o => ({
