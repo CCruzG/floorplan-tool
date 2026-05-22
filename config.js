@@ -1,9 +1,9 @@
 // config.js
-// Runtime-configurable unit formatting. By default we report pixels.
-let UNIT_SCALE = 1; // multiplier to convert px -> unit (e.g., mm)
-let UNIT_LABEL = "px";
+// Runtime-configurable unit formatting. The frontend defaults to meters.
+let UNIT_SCALE = 1; // multiplier to convert px -> unit (e.g., m)
+let UNIT_LABEL = "m";
 
-export function setScalePixelsPerUnit(pixelsPerUnit, label = 'mm') {
+export function setScalePixelsPerUnit(pixelsPerUnit, label = 'm') {
   if (!pixelsPerUnit || typeof pixelsPerUnit !== 'number' || !isFinite(pixelsPerUnit)) return;
   UNIT_SCALE = 1 / pixelsPerUnit; // px * UNIT_SCALE => units
   UNIT_LABEL = label;

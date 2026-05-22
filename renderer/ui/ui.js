@@ -8,6 +8,7 @@ import { setScalePixelsPerUnit, getPixelsPerUnit, getUnitLabel } from '../../con
 import { validateFloorPlan } from '../models/validation.js';
 import { renderPrompt } from '../models/promptRenderer.js';
 import { View3D } from '../drawing/view3d.js';
+import { checkHealth, startOptimisation, pollOptimisation, cancelOptimisation } from '../api/apiService.js';
 
 // import { DrawingService, findClosestBoundaryPoint } from '../drawing/drawingService.js';
 
@@ -63,6 +64,35 @@ function refreshInspector(fp, store) {
   const panel = document.getElementById('inspectorPanel');
   if (!panel) return;
 
+  // ── Duct Inspector ──────────────────────────────────────────────────────
+  if (fp?.selectedDuct) {
+    const duct = fp.selectedDuct; // Assuming { pA, pB, width, height, flow }
+    panel.innerHTML = [
+      `<div class="inspector-header"><span class="inspector-kind">Duct Segment</span></div>`,
+      `<div class="inspector-body">`,
+      `<div class="inspector-row"><span class="inspector-label">Width</span><span class="inspector-value">${Math.round(duct.width * 1000)} mm</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Height</span><span class="inspector-value">${Math.round(duct.height * 1000)} mm</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Flow</span><span class="inspector-value">${duct.flow.toFixed(2)} l/s</span></div>`,
+      `</div>`
+    ].join('');
+    return;
+  }
+  
+  // ── VAV Inspector ──────────────────────────────────────────────────────
+  if (fp?.selectedVav) {
+    const vav = fp.selectedVav; // Assuming { ptId, load }
+    const pt = (fp.Points || []).find(p => p.id === vav.ptId);
+    panel.innerHTML = [
+      `<div class="inspector-header"><span class="inspector-kind">VAV Terminal</span></div>`,
+      `<div class="inspector-body">`,
+      `<div class="inspector-row"><span class="inspector-label">Grid ID</span><span class="inspector-value">${vav.ptId}</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Load</span><span class="inspector-value">${vav.load.toFixed(2)} W</span></div>`,
+      pt ? `<div class="inspector-row"><span class="inspector-label">Entry Point</span><span class="inspector-value">${pt.entryPoint ? 'Yes' : 'No'}</span></div>` : '',
+      `</div>`
+    ].join('');
+    return;
+  }
+  
   // ── Grid Point inspector ────────────────────────────────────────────────
   const selPts = fp?.selectedPoints;
   if (selPts?.size > 0) {
@@ -81,6 +111,7 @@ function refreshInspector(fp, store) {
         `<div class="inspector-row"><span class="inspector-label">Y</span><span class="inspector-value">${fmt(pt.y)}&nbsp;${unitLabel}</span></div>`,
         `<div class="inspector-row"><span class="inspector-label">Column</span><input id="insp-pt-column" type="checkbox"${pt.column !== false ? ' checked' : ''}></div>`,
         `<div class="inspector-row"><span class="inspector-label">Mechanical</span><input id="insp-pt-mechanical" type="checkbox"${pt.mechanical !== false ? ' checked' : ''}></div>`,
+        `<div class="inspector-row"><span class="inspector-label">Entry Point</span><input id="insp-pt-entrypoint" type="checkbox"${pt.entryPoint === true ? ' checked' : ''}></div>`,
         `</div>`
       ].join('');
       panel.querySelector('#insp-pt-column').addEventListener('change', e => {
@@ -89,12 +120,17 @@ function refreshInspector(fp, store) {
       panel.querySelector('#insp-pt-mechanical').addEventListener('change', e => {
         pt.mechanical = e.target.checked; store.update(fp);
       });
+      panel.querySelector('#insp-pt-entrypoint').addEventListener('change', e => {
+        pt.entryPoint = e.target.checked; store.update(fp);
+      });
     } else {
       // Mixed-value helpers: true if all match, null if mixed
       const allColumn     = selected.every(p => p.column !== false);
       const allNotColumn  = selected.every(p => p.column === false);
       const allMech       = selected.every(p => p.mechanical !== false);
       const allNotMech    = selected.every(p => p.mechanical === false);
+      const allEntry      = selected.every(p => p.entryPoint === true);
+      const allNotEntry   = selected.every(p => p.entryPoint !== true);
       panel.innerHTML = [
         `<div class="inspector-header"><span class="inspector-kind">Grid Points</span><span class="inspector-value">${selected.length} selected</span></div>`,
         `<div class="inspector-body">`,
@@ -102,18 +138,25 @@ function refreshInspector(fp, store) {
         `<input id="insp-pt-column" type="checkbox"${allColumn ? ' checked' : ''}${(!allColumn && !allNotColumn) ? ' data-mixed="true"' : ''}></div>`,
         `<div class="inspector-row"><span class="inspector-label">Mechanical</span>`,
         `<input id="insp-pt-mechanical" type="checkbox"${allMech ? ' checked' : ''}${(!allMech && !allNotMech) ? ' data-mixed="true"' : ''}></div>`,
+        `<div class="inspector-row"><span class="inspector-label">Entry Point</span>`,
+        `<input id="insp-pt-entrypoint" type="checkbox"${allEntry ? ' checked' : ''}${(!allEntry && !allNotEntry) ? ' data-mixed="true"' : ''}></div>`,
         `</div>`
       ].join('');
       // Show indeterminate state for mixed values
       const colCb = panel.querySelector('#insp-pt-column');
       const mechCb = panel.querySelector('#insp-pt-mechanical');
+      const entryPointCb = panel.querySelector('#insp-pt-entrypoint');
       if (!allColumn && !allNotColumn) colCb.indeterminate = true;
       if (!allMech && !allNotMech) mechCb.indeterminate = true;
+      if (!allEntry && !allNotEntry) entryPointCb.indeterminate = true;
       colCb.addEventListener('change', e => {
         selected.forEach(p => { p.column = e.target.checked; }); store.update(fp);
       });
       mechCb.addEventListener('change', e => {
         selected.forEach(p => { p.mechanical = e.target.checked; }); store.update(fp);
+      });
+      entryPointCb.addEventListener('change', e => {
+        selected.forEach(p => { p.entryPoint = e.target.checked; }); store.update(fp);
       });
     }
     return;
@@ -170,14 +213,14 @@ function refreshInspector(fp, store) {
 
   const ensureWall = () => {
     if (!wall && n1 && n2) {
-      fp.addWall(n1, n2, { wallType: 'boundary', translucent: false, locked: edge.locked || false });
+      fp.addWall(n1, n2, { wallType: 'boundary', translucent: true, locked: edge.locked || false });
       wall = fp.Walls[fp.Walls.length - 1];
     }
     return wall;
   };
 
   const wallType    = wall?.wallType    ?? 'boundary';
-  const translucent = wall?.translucent ?? false;
+  const translucent = wall?.translucent ?? (wallType === 'boundary');
   const locked      = edge.locked || false;
   const openings    = wall?.openings    ?? [];
 
@@ -347,6 +390,101 @@ function setupCanvasGridPanel(onUpdate) {
 
 export function bindUI(store, canvas, mouse) {
   const ctx = canvas.getContext('2d');
+  let _currentFilePath = null;  // path of the currently open/saved file
+
+  canvas.addEventListener('mousedown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const world = _toContent(sx, sy);
+    const fp = store.active;
+    if (!fp) return;
+
+    // Hit test Duct Plan
+    let found = false;
+    if (fp.Duct_Plan) {
+      // VAV Terminals (check before ducts so they can be clicked)
+      fp.Duct_Plan.forEach(riser => {
+        (riser.vav || []).forEach(vav => {
+          const ptId = vav[0];
+          const pt = fp.Points.find(p => p.id === ptId);
+          if (pt) {
+            const dist = Math.hypot(world.x - pt.x, world.y - pt.y);
+            if (dist < 8 / vp.scale) {
+              fp.selectedVav = { ptId: vav[0], load: vav[1] };
+              fp.selectedDuct = null;
+              found = true;
+            }
+          }
+        });
+      });
+
+      if (!found) {
+        // Duct Segments
+        fp.Duct_Plan.forEach(riser => {
+          (riser.ducts || []).forEach(duct => {
+            const [ptA_id, ptB_id] = duct;
+            const pA = fp.Points.find(p => p.id === ptA_id);
+            const pB = fp.Points.find(p => p.id === ptB_id);
+            if (pA && pB) {
+              const dx = pB.x - pA.x;
+              const dy = pB.y - pA.y;
+              const segLenSq = dx * dx + dy * dy;
+              const t = ((world.x - pA.x) * dx + (world.y - pA.y) * dy) / segLenSq;
+              
+              // Ensure we are strictly between 0.1 and 0.9 (avoiding endpoints)
+              if (t > 0.1 && t < 0.9) {
+                const projX = pA.x + t * dx;
+                const projY = pA.y + t * dy;
+                const dist = Math.hypot(world.x - projX, world.y - projY);
+                if (dist < 6 / vp.scale) {
+                  fp.selectedDuct = { pA: duct[0], pB: duct[1], width: duct[2], height: duct[3], flow: duct[4] };
+                  fp.selectedVav = null;
+                  found = true;
+                }
+              }
+            }
+          });
+        });
+      }
+    }
+
+    if (!found) {
+      fp.selectedDuct = null;
+      fp.selectedVav = null;
+    }
+    store.update(fp);
+  });
+
+  // store.viewport is the live { scale, tx, ty } object shared with index.js.
+  const vp = store.viewport;   // shorthand reference — mutate in place
+
+  // Convert canvas-relative screen coordinates to content (plan) space.
+  function _toContent(sx, sy) {
+    return { x: (sx - vp.tx) / vp.scale, y: (sy - vp.ty) / vp.scale };
+  }
+
+  // Fit all plan content to the canvas with padding.
+  function _zoomExtents() {
+    const fp = store.active;
+    if (!fp) return;
+    const xs = [], ys = [];
+    (fp.wall_graph?.nodes || []).forEach(n => { xs.push(n.x); ys.push(n.y); });
+    (fp.Points || []).forEach(p => { xs.push(p.x); ys.push(p.y); });
+    if (!xs.length) return;
+    const W = canvas.width, H = canvas.height;
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const cW = Math.max(1, maxX - minX), cH = Math.max(1, maxY - minY);
+    const pad = 48;
+    vp.scale = Math.min((W - 2 * pad) / cW, (H - 2 * pad) / cH);
+    vp.tx = (W - cW * vp.scale) / 2 - minX * vp.scale;
+    vp.ty = (H - cH * vp.scale) / 2 - minY * vp.scale;
+    store.notify();
+  }
+
+  let _panStart = null; // { sx, sy, tx0, ty0 } for middle-button pan
+
   // initialize Canvas Grid panel controls
   setupCanvasGridPanel(() => store.notify());
 
@@ -390,10 +528,11 @@ export function bindUI(store, canvas, mouse) {
       showVertices: true,
       ghost: mouse,
       constrain: mouse.constrain,
+      viewport: store.viewport,
       tempArea: store.tempAreaActive ? store.tempArea : null,
       tempCore: store.tempCoreActive ? store.tempCore : null,
       // In area/core mode we should not show or highlight selected segments
-      selectedSegment: (store.mode === 'area' || store.mode === 'core') ? null : store.active.selectedSegment,
+      selectedSegment: (store.mode === 'area' || store.mode === 'core') ? null : store.active?.selectedSegment,
       gridSettings,
     });
 
@@ -431,6 +570,9 @@ export function bindUI(store, canvas, mouse) {
     if (jsonEl && store.active) {
       jsonEl.textContent = JSON.stringify(store.active.toJSON(), null, 2);
     }
+
+    // Refresh thermal zones panel
+    refreshThermalZonesList(store);
   });
 
   // Mode controls (example buttons)
@@ -539,8 +681,20 @@ export function bindUI(store, canvas, mouse) {
   // Track mouse movement and constraint flag (Shift key)
   canvas.addEventListener('mousemove', (e) => {
     const rect = canvas.getBoundingClientRect();
-    mouse.x = e.clientX - rect.left;
-    mouse.y = e.clientY - rect.top;
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+
+    // Middle-button pan
+    if (_panStart) {
+      vp.tx = _panStart.tx0 + (e.clientX - _panStart.sx);
+      vp.ty = _panStart.ty0 + (e.clientY - _panStart.sy);
+      store.notify();
+      return;
+    }
+
+    const c = _toContent(sx, sy);
+    mouse.x = c.x;
+    mouse.y = c.y;
     // We only read modifier state during movement for visual cue
     mouse.constrain = e.shiftKey;
 
@@ -574,17 +728,25 @@ export function bindUI(store, canvas, mouse) {
   });
 
   canvas.addEventListener('mousedown', (e) => {
+    // Middle button: start panning
+    if (e.button === 1) {
+      e.preventDefault();
+      _panStart = { sx: e.clientX, sy: e.clientY, tx0: vp.tx, ty0: vp.ty };
+      return;
+    }
     if (store.mode === "select" && store.active.selectedSegment) {
       const rect = canvas.getBoundingClientRect();
-      store.dragStart = {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top
-      };
+      const c = _toContent(e.clientX - rect.left, e.clientY - rect.top);
+      store.dragStart = { x: c.x, y: c.y };
       store.active.draggingSegment = store.active.selectedSegment;
     }
   });
 
-  canvas.addEventListener('mouseup', () => {
+  canvas.addEventListener('mouseup', (e) => {
+    if (e.button === 1) {
+      _panStart = null;
+      return;
+    }
     if (store.mode === "select" && store.active) {
       store.active.draggingSegment = null;
       store.dragStart = null;
@@ -608,9 +770,7 @@ export function bindUI(store, canvas, mouse) {
     if (!store.active) return;
 
     const rect = canvas.getBoundingClientRect();
-    let x = e.clientX - rect.left;
-    let y = e.clientY - rect.top;
-
+    let { x, y } = _toContent(e.clientX - rect.left, e.clientY - rect.top);
     // GRID ORIGIN PICKING MODE
     if (store.mode === 'grid-origin') {
       // Snap to nearest wall node (vertex endpoint)
@@ -625,6 +785,9 @@ export function bindUI(store, canvas, mouse) {
       const spacing = store._pendingGridSpacing || 1000;
       const gridPoints = store.active.generateGrid(spacing, origin);
       if (gridPoints?.length > 0) {
+        if (typeof store.active.markCoreAdjacentPointsAsEntry === 'function') {
+          store.active.markCoreAdjacentPointsAsEntry();
+        }
         store.active.setLayerVisibility('Points', true);
         const originDisplay = document.getElementById('gridOriginDisplay');
         if (originDisplay) originDisplay.textContent = `Origin: (${best.x.toFixed(1)}, ${best.y.toFixed(1)}) — ${gridPoints.length} pts`;
@@ -639,8 +802,7 @@ export function bindUI(store, canvas, mouse) {
 
     if (store.mode === "area") {
       const rect = canvas.getBoundingClientRect();
-      let x = e.clientX - rect.left;
-      let y = e.clientY - rect.top;
+      let { x, y } = _toContent(e.clientX - rect.left, e.clientY - rect.top);
 
       // Prefer node snap, then area vertex snap, then edge projection
       const nodeSnap = findClosestNode(store.active, { x, y }, SNAP_TO_NODE_DIST);
@@ -752,8 +914,7 @@ export function bindUI(store, canvas, mouse) {
     // CORE MODE: similar to area drawing but for core boundaries
     if (store.mode === "core") {
       const rect = canvas.getBoundingClientRect();
-      let x = e.clientX - rect.left;
-      let y = e.clientY - rect.top;
+      let { x, y } = _toContent(e.clientX - rect.left, e.clientY - rect.top);
       // Prefer node snap, then edge projection
       const nodeSnap = findClosestNode(store.active, { x, y }, SNAP_TO_NODE_DIST);
       const edgeSnap = nodeSnap ? null : findClosestEdgeProjection(store.active, { x, y }, SNAP_TO_EDGE_DIST);
@@ -828,8 +989,8 @@ export function bindUI(store, canvas, mouse) {
 
     // SELECT MODE: select segment and return
     if (store.mode === "select") {
-      // Check for nearby grid point first (within 8px)
-      const pts = store.active.Points || [];
+      // Check for nearby grid point first (within 8px) — only when layer is visible
+      const pts = store.active.layers?.Points !== false ? (store.active.Points || []) : [];
       let nearPt = null, nearDist = 8;
       pts.forEach(p => { const d = Math.hypot(x - p.x, y - p.y); if (d < nearDist) { nearDist = d; nearPt = p; } });
       if (nearPt) {
@@ -878,7 +1039,7 @@ export function bindUI(store, canvas, mouse) {
               .sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3)))
               .map(k => coreBdry[k])
           : [];
-        if (corePoly.length >= 3 && store.active._isPointInPolygon(x, y, corePoly)) {
+        if (corePoly.length >= 3 && store.active.layers?.Core_Boundary !== false && store.active._isPointInPolygon(x, y, corePoly)) {
           store.active.selectedCore = true;
           store.active.selectedSegment = null;
           store.active.selectedPoints = new Set();
@@ -1065,6 +1226,31 @@ export function bindUI(store, canvas, mouse) {
     }
   });
 
+  // Scroll wheel: zoom in/out centred on cursor
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    const newScale = Math.max(0.02, Math.min(100, vp.scale * factor));
+    // Keep the content point under the cursor fixed
+    vp.tx = sx - (sx - vp.tx) * (newScale / vp.scale);
+    vp.ty = sy - (sy - vp.ty) * (newScale / vp.scale);
+    vp.scale = newScale;
+    store.notify();
+  }, { passive: false });
+
+  // Keyboard: Shift+E = zoom extents
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'E' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      // Ignore if focus is inside a text input
+      const tag = document.activeElement?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      _zoomExtents();
+    }
+  });
+
   canvas.addEventListener('dblclick', () => {
     if (store.mode === "area") {
       commitArea(store);
@@ -1141,10 +1327,10 @@ export function bindUI(store, canvas, mouse) {
     coreAreaLayer: 'Core_Area',
     columnsLayer: 'Columns',
     exclusionAreasLayer: 'Exclusion_Areas',
+    thermalZonesLayer: 'Thermal_Zones',
     beamsLayer: 'Beams',
     pointsLayer: 'Points',
     edgesLayer: 'Edges',
-    ductsLayer: 'Ducts',
     ductPlanLayer: 'Duct_Plan'
   };
 
@@ -1152,7 +1338,7 @@ export function bindUI(store, canvas, mouse) {
     const checkbox = document.getElementById(checkboxId);
     if (checkbox) {
       // Set initial state - use default if store.active is null
-      checkbox.checked = store.active?.layers?.[layerName] ?? (layerName === 'Plan_Boundary' || layerName === 'Boundary_Area' || layerName === 'Core_Boundary' || layerName === 'Core_Area' || layerName === 'Columns' || layerName === 'Exclusion_Areas');
+      checkbox.checked = store.active?.layers?.[layerName] ?? (layerName === 'Plan_Boundary' || layerName === 'Boundary_Area' || layerName === 'Core_Boundary' || layerName === 'Core_Area' || layerName === 'Columns' || layerName === 'Exclusion_Areas' || layerName === 'Thermal_Zones');
       
       // Add event listener
       checkbox.addEventListener('change', () => {
@@ -1196,6 +1382,7 @@ export function bindUI(store, canvas, mouse) {
         });
         if (result?.success) {
           console.log("Floorplan saved:", result.path);
+          _currentFilePath = result.path;
         } else {
           console.warn("Save cancelled or failed.");
         }
@@ -1343,6 +1530,10 @@ export function bindUI(store, canvas, mouse) {
                     const offsetX = (canvas.width - (bbW * viewScale)) / 2 - (bbMinX * viewScale);
                     const offsetY = (canvas.height - (bbH * viewScale)) / 2 - (bbMinY * viewScale);
                     fp._view = { scale: viewScale, offsetX, offsetY };
+                    // Sync the interactive viewport so zoom/pan starts from the fitted view
+                    vp.scale = viewScale;
+                    vp.tx    = offsetX;
+                    vp.ty    = offsetY;
                     console.log('View transform:', fp._view);
                     console.log('Canvas size:', canvas.width, 'x', canvas.height);
                     console.log('Bounding box:', { bbMinX, bbMinY, bbMaxX, bbMaxY, bbW, bbH });
@@ -1358,6 +1549,7 @@ export function bindUI(store, canvas, mouse) {
           }
           store.add(fp);          // set as active + push to history
           store.setActive(fp);    // triggers notify()
+          _currentFilePath = result.path;
 
           // Restore saved scale (if present) so measurements and GUI reflect
           // the plan's intended physical dimensions.
@@ -1416,7 +1608,7 @@ export function bindUI(store, canvas, mouse) {
   }
 
   const btnOptimise = document.getElementById('optimiseBtn');
-  const aiDebug = document.getElementById('ai-debug');
+  const btnStop     = document.getElementById('stopOptBtn');
   const aiError = document.getElementById('ai-error');
 
   if (btnOptimise) {
@@ -1424,138 +1616,199 @@ export function bindUI(store, canvas, mouse) {
       const fp = store.active;
       if (!fp) return;
 
-    // 1) Serialize
-    const planJson = fp.toJSON();
+      // Abort controller — used to stop polling and signal the stop button
+      const abortCtrl = new AbortController();
 
-    // // 2) Validate
-    // const result = validateFloorPlan(planJson);
-    // if (!result.ok) {
-    //   aiError.style.display = 'block';
-    //   aiError.textContent = `Validation failed:\n- ${result.errors.join('\n- ')}`;
-    //   aiDebug.style.display = 'none';
-    //   return;
-    // } else {
-    //   aiError.style.display = 'none';
-    // }
+      // Disable optimise button, show stop button
+      btnOptimise.disabled = true;
+      btnOptimise.textContent = 'running… 0s';
+      if (btnStop) btnStop.style.display = '';
+      if (aiError) aiError.style.display = 'none';
 
-    // 3) Render prompt
-    const prompt = renderPrompt(fp);
-    // console.log("Generated prompt:\n", prompt);
+      let _activeJobId = null;
 
-    // 5) Send to local AI service (no validation for now)
-    try {
-      const res = await fetch("http://localhost:11434/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          // model: "gpt-oss",
-          model: "mistral-nemo",
-          prompt: prompt,   // <-- your dynamic string
-          stream: false
-        })
-      });
-
-      if (!res.ok) {
-        console.log("res not ok");
-        throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      if (btnStop) {
+        btnStop.onclick = async () => {
+          abortCtrl.abort();
+          if (_activeJobId) await cancelOptimisation(_activeJobId);
+          if (aiError) { aiError.style.display = 'block'; aiError.textContent = 'Optimisation stopped.'; }
+        };
       }
-      
-      
-      const data = await res.json();
-      // const raw = await res.text();
-      console.log("Raw service response: ", data.response);
 
-      // Try to validate the returned JSON and perform a best-effort
-      // sanitisation if it doesn't comply with the schema (common issues:
-      // missing `units`, missing `entrances.edgeRef`).
-      let candidate = typeof data.response === 'string' ? JSON.parse(data.response) : data.response;
+      const statusEl = document.getElementById('optimiseStatus');
+      const _optStart = Date.now();
+      const _phaseLabels = { segmentation: 'segmentation', structural: 'structural', zones: 'zone partition', duct: 'duct routing' };
+      const _phaseOrder  = ['segmentation', 'structural', 'zones', 'duct'];
+      let _currentPhase = _phaseOrder[0];
+      if (statusEl) {
+        statusEl.style.display = 'block';
+        statusEl.textContent = `phase 1/${_phaseOrder.length}: segmentation  0s`;
+      }
+      const _timerInterval = setInterval(() => {
+        const elapsed = Math.round((Date.now() - _optStart) / 1000);
+        const idx = _phaseOrder.indexOf(_currentPhase);
+        if (statusEl) statusEl.textContent = `phase ${idx + 1}/${_phaseOrder.length}: ${_phaseLabels[_currentPhase]}  ${elapsed}s`;
+        btnOptimise.textContent = `running… ${elapsed}s`;
+      }, 1000);
 
-      // If `units` missing, try to infer the unit used by the AI from the
-      // magnitude of the returned coordinates, then set candidate.units and
-      // an appropriate pxPerUnit so FloorPlan.fromJSON converts correctly.
-      if (!candidate.units) {
-        const nodes = (candidate.wall_graph && candidate.wall_graph.nodes) || [];
-        let maxVal = 0;
-        nodes.forEach(n => {
-          if (n && typeof n.x === 'number' && typeof n.y === 'number') {
-            maxVal = Math.max(maxVal, Math.abs(n.x), Math.abs(n.y));
+      // Helper: apply a partial or full data dict to the active floorplan
+      const applyData = (d) => {
+        if (!d) return;
+        if (Array.isArray(d.thermal_zones) && d.thermal_zones.length) {
+          const prevColors = (fp.Thermal_Zones || []).map(z => ({ color: z.color ?? null, alpha: z.alpha ?? null }));
+          fp.Thermal_Zones = d.thermal_zones.map(({ thermal_region_geometry, vav_control_zones, ...tz }, i) => ({
+            ...tz,
+            subZones: thermal_region_geometry || [],
+            thermalControlZones: vav_control_zones || [],
+            color: tz.color ?? prevColors[i]?.color ?? null,
+            alpha: tz.alpha ?? prevColors[i]?.alpha ?? null,
+          }));
+        }
+        // Refresh the thermal zones panel whenever zone data changes
+        if (d.thermal_zones) refreshThermalZonesList(store);
+
+        // Apply structural solver results using declared structural units.
+        if (d.structural_components) {
+          const sc = d.structural_components;
+          const mmMap = { mm: 1, cm: 10, m: 1000, 'in': 25.4, ft: 304.8 };
+          const srcUnit = sc?.units?.length || d?.units?.length || fp.units?.length || 'm';
+          const mmPerSrc = mmMap[srcUnit] ?? 1000;
+          const mmPerCanvas = mmMap[fp.units?.length ?? 'm'] ?? 1000;
+          const lenToPx = v => v * (fp.units?.pxPerUnit ?? 1) * mmPerSrc / mmPerCanvas;
+          if (Array.isArray(sc.columns) && sc.columns.length) {
+            fp.Columns = sc.columns
+              .map((c, i) => {
+                if (Array.isArray(c)) {
+                  const pts = c.filter(p => p && typeof p.x === 'number' && typeof p.y === 'number');
+                  if (!pts.length) return null;
+                  const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+                  const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+                  return { id: `Column_${i}`, x: lenToPx(cx), y: lenToPx(cy) };
+                }
+                return { ...c, x: lenToPx(c.x), y: lenToPx(c.y) };
+              })
+              .filter(Boolean);
           }
-        });
-
-        // Heuristic: if coordinates are large (>50) treat as mm, if medium
-        // (10-50) treat as cm, otherwise meters.
-        let inferredUnit = 'm';
-        if (maxVal > 50) inferredUnit = 'mm';
-        else if (maxVal > 10) inferredUnit = 'cm';
-
-        const METERS = { mm: 0.001, cm: 0.01, m: 1 };
-        const appUnit = getUnitLabel() || 'm';
-        const pxPerApp = getPixelsPerUnit() || 1; // pixels per app unit
-        // pxPerCandidate = pxPerApp * (metersPerCandidate / metersPerApp)
-        const pxPerCandidate = pxPerApp * (METERS[inferredUnit] / METERS[appUnit]);
-
-        candidate.units = { length: inferredUnit, pxPerUnit: pxPerCandidate };
-      }
-
-      // Ensure edges include a locked flag (default false) so schema validation
-      // and subsequent code expecting the flag do not break.
-      if (candidate.wall_graph && Array.isArray(candidate.wall_graph.edges)) {
-        candidate.wall_graph.edges = candidate.wall_graph.edges.map(e => ({ ...e, locked: typeof e.locked === 'boolean' ? e.locked : false }));
-      }
-
-      // Ensure entrances have an edgeRef (best-effort: match nearest edge by projection)
-      if (Array.isArray(candidate.entrances) && candidate.wall_graph && Array.isArray(candidate.wall_graph.edges) && Array.isArray(candidate.wall_graph.nodes)) {
-        // helper: project point onto segment and compute distance
-        function projPointToSeg(px, py, ax, ay, bx, by) {
-          const vx = bx - ax, vy = by - ay;
-          const wx = px - ax, wy = py - ay;
-          const vv = vx*vx + vy*vy;
-          const t = vv === 0 ? 0 : Math.max(0, Math.min(1, (wx*vx + wy*vy) / vv));
-          const qx = ax + t*vx, qy = ay + t*vy;
-          const dx = px - qx, dy = py - qy;
-          return Math.hypot(dx, dy);
+          if (Array.isArray(sc.beams) && sc.beams.length) {
+            fp.Beams = sc.beams
+              .map(b => {
+                if (!b?.start || !b?.end) return null;
+                return {
+                  ...b,
+                  start: { x: lenToPx(b.start.x), y: lenToPx(b.start.y) },
+                  end:   { x: lenToPx(b.end.x),   y: lenToPx(b.end.y) },
+                };
+              })
+              .filter(Boolean);
+          }
+          // Auto-enable Beams and Columns layers so results are immediately visible
+          fp.layers.Beams   = true;
+          fp.layers.Columns = true;
         }
 
-        const nodesById = Object.fromEntries(candidate.wall_graph.nodes.map(n => [n.id, n]));
-        candidate.entrances = candidate.entrances.map(ent => {
-          if (!ent.edgeRef) {
-            // find closest edge
-            let best = null; let bestDist = Infinity;
-            candidate.wall_graph.edges.forEach(edge => {
-              const n1 = nodesById[edge.v1];
-              const n2 = nodesById[edge.v2];
-              if (!n1 || !n2) return;
-              const d = projPointToSeg(ent.position.x, ent.position.y, n1.x, n1.y, n2.x, n2.y);
-              if (d < bestDist) { bestDist = d; best = edge.id; }
-            });
-            if (best) ent.edgeRef = best;
+        // Apply duct-planning results.
+        const rawDuctPlan = d?.mechanical_components?.duct_plan;
+        if (Array.isArray(rawDuctPlan)) {
+          fp.Duct_Plan = rawDuctPlan;
+
+          if (Array.isArray(fp.Edges) && fp.Edges.length && Array.isArray(fp.Points) && fp.Points.length) {
+            const pointIndexById = new Map(fp.Points.map((p, i) => [p.id, i]));
+            const idxOf = (v) => {
+              if (typeof v === 'number') return v;
+              return pointIndexById.get(v);
+            };
+            fp._ductEdges = fp.Edges
+              .map(e => {
+                const a = idxOf(e?.v1);
+                const b = idxOf(e?.v2);
+                if (!Number.isInteger(a) || !Number.isInteger(b)) return null;
+                return [a, b, e?.length ?? e?.step ?? 1];
+              })
+              .filter(Boolean);
           }
-          return ent;
-        });
+
+          fp.layers.Duct_Plan = true;
+        }
+      };
+
+      try {
+        // ── Pre-flight validation ────────────────────────────────────────────
+        const _issues = [];
+        if (!fp.boundaryClosed || (fp.wall_graph?.nodes?.length ?? 0) < 3) {
+          _issues.push('No closed boundary — draw a wall outline first.');
+        }
+        if (!fp.Points || fp.Points.length === 0) {
+          _issues.push('No routing grid — generate a grid (Grid → Generate) first.');
+        }
+        if (_issues.length) {
+          if (aiError) { aiError.style.display = 'block'; aiError.style.color = ''; aiError.textContent = _issues.join(' '); }
+          return;
+        }
+        // Soft warning: no entry point — server will fall back but user should know
+        if (!fp.Points.some(p => p.entryPoint)) {
+          if (aiError) {
+            aiError.style.display = 'block';
+            aiError.style.color   = '#e6a817';
+            aiError.textContent   = 'No entry point selected — the server will auto-pick one. ' +
+              'Select a grid point and tick Entry Point in the inspector to set it manually.';
+          }
+        } else if (aiError) {
+          aiError.style.color = ''; // reset warning colour for subsequent runs
+        }
+
+        // Check server is reachable first
+        const alive = await checkHealth();
+        if (!alive) {
+          if (aiError) {
+            aiError.style.display = 'block';
+            aiError.style.color   = '';
+            aiError.textContent = 'Optimisation server not reachable. Start it with: python server.py (in Project-71/)';
+          }
+          return;
+        }
+
+        const planJson = fp.toJSON();
+        const units = fp.units || { length: getUnitLabel() || 'm', pxPerUnit: getPixelsPerUnit() || 1 };
+
+        const started = await startOptimisation(planJson, units);
+        if (!started.ok) {
+          if (aiError) { aiError.style.display = 'block'; aiError.textContent = `Optimisation failed: ${started.error}`; }
+          return;
+        }
+        _activeJobId = started.job_id;
+
+        const result = await pollOptimisation(started.job_id, (phase, data) => {
+          // New data for a phase (in-progress or just completed) — apply and redraw
+          _currentPhase = _phaseOrder[Math.min(_phaseOrder.indexOf(phase) + 1, _phaseOrder.length - 1)];
+          applyData(data);
+          store.notify();
+        }, 2000, abortCtrl.signal);
+
+        if (!result.ok) {
+          if (!result.cancelled && !abortCtrl.signal.aborted) {
+            if (aiError) { aiError.style.display = 'block'; aiError.textContent = `Optimisation failed: ${result.error}`; }
+          }
+          return;
+        }
+
+        // Final full result
+        applyData(result.data);
+        store.notify();
+        if (aiError) aiError.style.display = 'none';
+
+      } catch (err) {
+        if (aiError && !abortCtrl.signal.aborted) {
+          aiError.style.display = 'block';
+          aiError.textContent = `Optimisation error: ${err.message}`;
+        }
+      } finally {
+        clearInterval(_timerInterval);
+        btnOptimise.disabled = false;
+        btnOptimise.textContent = 'optimise';
+        if (btnStop) btnStop.style.display = 'none';
+        if (statusEl) statusEl.style.display = 'none';
       }
-
-      // Validate the candidate plan JSON
-      const valid = validateFloorPlan(candidate);
-      if (!valid.ok) {
-        // If still invalid, show errors and abort applying the plan
-        aiError.style.display = 'block';
-        aiError.textContent = `AI returned an invalid plan:\n- ${valid.errors.join('\n- ')}`;
-        aiDebug.style.display = 'block';
-        aiDebug.textContent = JSON.stringify(candidate, null, 2);
-        return;
-      }
-
-      // Convert into a FloorPlan and apply
-      const refined = FloorPlan.fromJSON(candidate);
-      store.update(refined);
-
-      aiError.style.display = "none"; // hide any previous error
-    } catch (err) {
-      aiError.style.display = "block";
-      aiError.textContent = `AI service error: ${err.message}`;
-    }
-
-  });
+    });
   }
 
   // Wire color picker apply button (inside bindUI so `store` is available)
@@ -1564,8 +1817,8 @@ export function bindUI(store, canvas, mouse) {
   if (applyBtn && colorPicker) {
     applyBtn.addEventListener('click', () => {
       if (!store.active) return;
-      // Resolve selected area id across boundaryArea, Temperature_Regions, and legacy areas
-      const fallbackId = store.active.Temperature_Regions && store.active.Temperature_Regions.length ? store.active.Temperature_Regions[0].id : (store.active.areas && store.active.areas.length ? store.active.areas[0].id : null);
+      // Resolve selected area id across boundaryArea and thermal_zones
+      const fallbackId = store.active.Thermal_Zones && store.active.Thermal_Zones.length ? store.active.Thermal_Zones[0].id : null;
       const sel = store.selectedAreaId || fallbackId;
       if (!sel) return;
 
@@ -1575,8 +1828,8 @@ export function bindUI(store, canvas, mouse) {
         return;
       }
 
-      // try Temperature_Regions
-      let region = (store.active.Temperature_Regions || []).find(r => r.id === sel);
+      // try thermal_zones
+      let region = (store.active.Thermal_Zones || []).find(r => r.id === sel);
       if (region) {
         const alphaInput = document.getElementById('areaAlphaRange');
         const alphaValueInput = document.getElementById('areaAlphaValue');
@@ -1593,22 +1846,6 @@ export function bindUI(store, canvas, mouse) {
         return;
       }
 
-      // fallback to legacy areas
-      const area = store.active.areas.find(a => a.id === sel);
-      if (area) {
-        const alphaInput = document.getElementById('areaAlphaRange');
-        const alphaValueInput = document.getElementById('areaAlphaValue');
-        const airInput = document.getElementById('areaAirReq');
-        const labelInput = document.getElementById('areaLabelInput');
-        const alpha = alphaInput ? parseFloat(alphaInput.value) : (area.alpha || 0.3);
-        area.color = colorPicker.value;
-        area.alpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 0.3;
-        if (labelInput && labelInput.value) area.label = labelInput.value;
-        if (airInput) area.air_requirement = Number.isFinite(parseFloat(airInput.value)) ? parseFloat(airInput.value) : area.air_requirement || 7.5;
-        if (alphaValueInput) alphaValueInput.value = area.alpha.toFixed(2);
-        store.update(store.active);
-        refreshAreasList(store);
-      }
     });
   }
 
@@ -1653,7 +1890,7 @@ function refreshAreasList(store) {
   if (!listEl) return;
   listEl.innerHTML = '';
 
-  const areas = store.active.Exclusion_Areas || [];
+  const areas = store.active?.Exclusion_Areas || [];
   if (areas.length === 0) {
     listEl.innerHTML = '<li style="color:#888; font-size:0.9em;">None</li>';
     return;
@@ -1670,6 +1907,91 @@ function refreshAreasList(store) {
       store.active.Exclusion_Areas.splice(idx, 1);
       store.update(store.active);
       refreshAreasList(store);
+    };
+    li.appendChild(del);
+    listEl.appendChild(li);
+  });
+}
+
+// Colour palette matching renderers.js _ZONE_HUES for swatch display
+const _TZ_HUES = [200, 145, 25, 280, 170, 50, 320, 90, 0, 245, 340, 120, 60, 190, 300];
+
+function _tzColour(idx, isInternal) {
+  if (isInternal) return '#888';
+  const h = _TZ_HUES[idx % _TZ_HUES.length];
+  return `hsl(${h},60%,42%)`;
+}
+
+function _subregionVertexCount(sub) {
+  if (!Array.isArray(sub)) return 0;
+  return sub.filter(v => v && typeof v.x === 'number' && typeof v.y === 'number').length;
+}
+
+function _subregionFormat(sub) {
+  if (!Array.isArray(sub)) return 'invalid';
+  return (sub.length && sub[0] && typeof sub[0].x === 'number') ? '{x,y}' : 'unknown';
+}
+
+export function refreshThermalZonesList(store) {
+  const listEl = document.getElementById('thermalZonesList');
+  if (!listEl) return;
+  listEl.innerHTML = '';
+
+  const regions = store.active?.Thermal_Zones || [];
+  if (regions.length === 0) {
+    listEl.innerHTML = '<li style="color:#888; font-size:0.9em;">None — run optimisation to generate zones</li>';
+    return;
+  }
+
+  regions.forEach((region, ri) => {
+    const isInternal = region.type === 'internal' || region.orientation === null || region.orientation === undefined;
+    const colour = _tzColour(ri, isInternal);
+
+    const li = document.createElement('li');
+    li.style.cssText = 'display:flex; align-items:flex-start; gap:6px; padding:4px 0; border-bottom:1px solid #2a2a2a;';
+
+    // Colour swatch
+    const swatch = document.createElement('span');
+    swatch.style.cssText = `display:inline-block; width:12px; height:12px; border-radius:2px; background:${colour}; flex-shrink:0; margin-top:2px;`;
+    li.appendChild(swatch);
+
+    // Info block
+    const info = document.createElement('span');
+    info.style.cssText = 'font-size:0.82em; line-height:1.5; color:#ccc;';
+
+    const type = region.type || 'perimeter';
+    const orient = region.orientation !== null && region.orientation !== undefined
+      ? `${region.orientation.toFixed(0)}°` : 'internal';
+    const vavCount = Array.isArray(region.thermalControlZones) ? region.thermalControlZones.length : 0;
+    const airReqPerArea = Number.isFinite(region.air_requirement)
+      ? region.air_requirement
+      : (Number.isFinite(region.airRequirement) ? region.airRequirement : null);
+    const summedVavLoad = Array.isArray(region.thermalControlZones)
+      ? region.thermalControlZones.reduce((s, z) => s + (Number.isFinite(z?.load) ? z.load : 0), 0)
+      : null;
+    const totalLoad = (Number.isFinite(region.total_load) && region.total_load > 0)
+      ? region.total_load
+      : (vavCount > 0 ? summedVavLoad : null);
+    const air = totalLoad !== null
+      ? `${totalLoad.toFixed(0)} L/s`
+      : (airReqPerArea !== null ? `${airReqPerArea.toFixed(2)} L/s·m²` : '—');
+
+    info.innerHTML =
+      `<strong>Zone ${ri + 1}</strong> · ${type} · ${orient}<br>` +
+      `vav zones: ${vavCount}<br>` +
+      `air req: ${air}`;
+
+    li.appendChild(info);
+
+    // Delete button
+    const del = document.createElement('button');
+    del.textContent = '×';
+    del.title = 'Remove zone';
+    del.style.cssText = 'margin-left:auto; background:none; border:none; color:#888; cursor:pointer; font-size:14px; flex-shrink:0;';
+    del.onclick = () => {
+      store.active.Thermal_Zones.splice(ri, 1);
+      store.update(store.active);
+      refreshThermalZonesList(store);
     };
     li.appendChild(del);
     listEl.appendChild(li);
@@ -1712,52 +2034,26 @@ function commitCore(store) {
   console.log("Core boundary added successfully");
 }
 
-// Find closest vertex from existing areas (Temperature_Regions and legacy areas)
+// Find closest vertex from existing thermal zone polygons
 function findClosestAreaVertex(fp, point, maxDist = SNAP_TO_NODE_DIST) {
   if (!fp) return null;
   let best = null;
   let bestDist = maxDist;
 
-  // Temperature_Regions subregion vertices (Pt_* keyed objects)
-  (fp.Temperature_Regions || []).forEach(region => {
-    (region.subregions || []).forEach(sub => {
-      Object.values(sub).forEach(v => {
-        if (Array.isArray(v) && v.length >= 2) {
-          const dx = point.x - v[0];
-          const dy = point.y - v[1];
+  // thermal_zones sub-zone vertices ({x,y} objects)
+  (fp.Thermal_Zones || []).forEach(region => {
+    (region.subZones || []).forEach(sub => {
+      (sub || []).forEach(v => {
+        if (v && typeof v.x === 'number' && typeof v.y === 'number') {
+          const dx = point.x - v.x;
+          const dy = point.y - v.y;
           const d = Math.hypot(dx, dy);
           if (d < bestDist) {
             bestDist = d;
-            best = { x: v[0], y: v[1], source: 'temperature' };
+            best = { x: v.x, y: v.y, source: 'temperature' };
           }
         }
       });
-    });
-  });
-
-  // Legacy areas vertices
-  (fp.areas || []).forEach(area => {
-    (area.vertices || []).forEach(v => {
-      if (typeof v === 'string') {
-        const n = fp.wall_graph.nodes.find(n => n.id === v);
-        if (n) {
-          const dx = point.x - n.x;
-          const dy = point.y - n.y;
-          const d = Math.hypot(dx, dy);
-          if (d < bestDist) {
-            bestDist = d;
-            best = { x: n.x, y: n.y, source: 'legacy-node' };
-          }
-        }
-      } else if (Array.isArray(v) && v.length >= 2) {
-        const dx = point.x - v[0];
-        const dy = point.y - v[1];
-        const d = Math.hypot(dx, dy);
-        if (d < bestDist) {
-          bestDist = d;
-          best = { x: v[0], y: v[1], source: 'legacy-vertex' };
-        }
-      }
     });
   });
 

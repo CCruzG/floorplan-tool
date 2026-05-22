@@ -26,8 +26,8 @@ export function drawEdgeWithDimension(ctx, fp, edge) {
   const len = edgeLength(fp, edge);
   const mid = edgeMidpoint(fp, edge);
   ctx.save();
-  ctx.fillStyle = "#444";
-  ctx.font = "11px sans-serif";
+  ctx.fillStyle = "#333";
+  ctx.font = "11px monospace";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(formatLen(len), mid.x, mid.y);
@@ -80,37 +80,30 @@ export function drawBoundaryArea(ctx, fp) {
 }
 
 export function drawAreas(ctx, fp) {
-  // Build a unified list of area-like objects: Temperature_Regions and legacy areas
   const unified = [];
 
-  // Temperature_Regions: convert Pt_* subregions to coordinate arrays
-  (fp.Temperature_Regions || []).forEach(region => {
-    // pick the first subregion for rendering
-    const sub = (region.subregions && region.subregions[0]) || {};
-    const coords = Object.keys(sub).sort((a,b)=>{
-      const ai = parseInt(a.replace(/^Pt_/,''),10);
-      const bi = parseInt(b.replace(/^Pt_/,''),10);
-      return ai - bi;
-    }).map(k => {
-      const v = sub[k];
-      if (!v) return null;
-      return [v[0], v[1]];
-    }).filter(Boolean);
+  // thermal_zones: take first subZone polygon ([{x,y}, ...]) for compact area rendering.
+  // subZones coordinates are always in mm (from backend) — convert to canvas pixels.
+  const _mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
+  const _pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const _toCanvas = mm => mm * _pxPerUnit / _mmPerUnit;
+
+  (fp.Thermal_Zones || []).forEach(region => {
+    const sub = (region.subZones && region.subZones[0]) || [];
+    const coords = sub
+      .map((v) => {
+        if (!v || typeof v.x !== 'number' || typeof v.y !== 'number') return null;
+        return [_toCanvas(v.x), _toCanvas(v.y)];
+      })
+      .filter(Boolean);
     if (coords.length) unified.push({ label: region.name || 'temp', vertices: coords, color: region.color, alpha: region.alpha });
   });
 
-  // legacy areas
-  (fp.areas || []).forEach(area => unified.push({ label: area.label, vertices: area.vertices, color: area.color, alpha: area.alpha }));
-
   unified.forEach(area => {
-    // normalize vertices (may be node ids or coordinate pairs)
+    // normalize vertices to coordinate pairs
     const ptsRaw = area.vertices || [];
     if (ptsRaw.length === 0) return;
     const resolved = ptsRaw.map(v => {
-      if (typeof v === 'string') {
-        const n = getNodeById(fp.wall_graph.nodes, v);
-        return n ? [n.x, n.y] : null;
-      }
       if (Array.isArray(v) && v.length >= 2) return [v[0], v[1]];
       if (v && typeof v.x === 'number' && typeof v.y === 'number') return [v.x, v.y];
       return null;
@@ -142,8 +135,8 @@ export function drawAreas(ctx, fp) {
 
     const cx = pts.reduce((s, v) => s + v[0], 0) / pts.length;
     const cy = pts.reduce((s, v) => s + v[1], 0) / pts.length;
-    ctx.fillStyle = '#000';
-    ctx.font = '12px sans-serif';
+    ctx.fillStyle = '#1a1a1a';
+    ctx.font = '12px monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(area.label, cx, cy - 8);
@@ -151,8 +144,8 @@ export function drawAreas(ctx, fp) {
     try {
       const areaPx = polygonArea(pts);
       const areaText = formatArea(areaPx);
-      ctx.font = '11px sans-serif';
-      ctx.fillStyle = '#222';
+      ctx.font = '11px monospace';
+      ctx.fillStyle = '#333';
       ctx.fillText(areaText, cx, cy + 10);
     } catch (err) {
       console.warn('Area formatting failed', err);
@@ -184,9 +177,9 @@ export function drawExclusionAreas(ctx, fp) {
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     ctx.closePath();
-    ctx.fillStyle = 'rgba(220, 50, 50, 0.12)';
+    ctx.fillStyle = 'rgba(255, 68, 68, 0.1)';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(200, 40, 40, 0.75)';
+    ctx.strokeStyle = 'rgba(255, 68, 68, 0.7)';
     ctx.setLineDash([7, 4]);
     ctx.lineWidth = 1.5;
     ctx.stroke();
@@ -194,7 +187,7 @@ export function drawExclusionAreas(ctx, fp) {
     // Label centroid
     const cx = pts.reduce((s, v) => s + v[0], 0) / pts.length;
     const cy = pts.reduce((s, v) => s + v[1], 0) / pts.length;
-    ctx.fillStyle = 'rgba(180, 30, 30, 0.9)';
+    ctx.fillStyle = 'rgba(255, 68, 68, 0.9)';
     ctx.font = 'bold 11px monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -206,7 +199,7 @@ export function drawExclusionAreas(ctx, fp) {
 export function drawAreaGhost(ctx, fp, points, mouse) {
   if (!points.length) return;
   ctx.save();
-  ctx.strokeStyle = "#007acc";
+  ctx.strokeStyle = "#00e676";
   ctx.setLineDash([4, 4]);
   ctx.lineWidth = 2;
 
@@ -306,23 +299,23 @@ export function drawAreaGhost(ctx, fp, points, mouse) {
     if (px == null || py == null) return;
     ctx.beginPath();
     ctx.arc(px, py, 3, 0, Math.PI * 2);
-    ctx.fillStyle = "#007acc";
+    ctx.fillStyle = "#00e676";
     ctx.fill();
   });
 
   // Draw preview marker for the next vertex
   if (previewX != null && previewY != null) {
-    let fill = '#999';
-    if (previewMode === 'node') fill = '#2a9d8f';
-    else if (previewMode === 'edge') fill = '#007acc';
-    else if (previewMode === 'constrained') fill = '#e76f51';
+    let fill = '#888';
+    if (previewMode === 'node') fill = '#00e676';
+    else if (previewMode === 'edge') fill = '#00a152';
+    else if (previewMode === 'constrained') fill = '#ffaa00';
 
     ctx.beginPath();
     ctx.arc(previewX, previewY, 5, 0, Math.PI * 2);
     ctx.fillStyle = fill;
     ctx.fill();
     ctx.lineWidth = 1;
-    ctx.strokeStyle = '#fff';
+    ctx.strokeStyle = '#ffffff';
     ctx.stroke();
 
     // Show length from last point to preview when possible
@@ -333,7 +326,7 @@ export function drawAreaGhost(ctx, fp, points, mouse) {
       const midX = (previewX + lastX) / 2;
       const midY = (previewY + lastY) / 2;
       const text = formatLen(d);
-      ctx.font = '11px sans-serif';
+      ctx.font = '11px monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
       // draw subtle background box
@@ -341,14 +334,14 @@ export function drawAreaGhost(ctx, fp, points, mouse) {
       const padding = 6;
       const bw = metrics.width + padding;
       const bh = 16;
-      ctx.fillStyle = 'rgba(255,255,255,0.9)';
-      ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+      ctx.fillStyle = 'rgba(255,255,255,0.92)';
+      ctx.strokeStyle = 'rgba(0,0,0,0.12)';
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.rect(midX - bw/2, midY - bh - 6, bw, bh);
       ctx.fill();
       ctx.stroke();
-      ctx.fillStyle = '#000';
+      ctx.fillStyle = '#1a1a1a';
       ctx.fillText(text, midX, midY - 2);
     }
   }
@@ -376,7 +369,7 @@ export function drawAreaGhost(ctx, fp, points, mouse) {
       ctx.fill();
       ctx.stroke();
       ctx.fillStyle = '#fff';
-      ctx.font = '12px sans-serif';
+      ctx.font = '12px monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('\u21E7', ix + w / 2, iy + h / 2); // up-pointing double arrow as shift symbol
@@ -390,14 +383,14 @@ export function drawAreaGhost(ctx, fp, points, mouse) {
 
 export function areaColour(label) {
   const map = {
-    private: { fill: "rgba(200,0,0,0.2)", stroke: "#a22" },
-    common: { fill: "rgba(0,150,0,0.2)", stroke: "#2a2" },
-    circulation: { fill: "rgba(0,0,200,0.2)", stroke: "#22a" }
+    private: { fill: "rgba(255,68,68,0.15)", stroke: "#ff4444" },
+    common: { fill: "rgba(0,230,118,0.12)", stroke: "#00e676" },
+    circulation: { fill: "rgba(0,180,230,0.15)", stroke: "#00b4e6" }
   };
   // Special casing for the canonical boundary area so it is visually
   // distinct and users understand it's the plan boundary (non-deletable).
-  if (label === 'boundary') return { fill: 'rgba(46,204,113,0.06)', stroke: '#2ecc71', strokeWidth: 2, dashed: false };
-  return map[label] || { fill: "rgba(120,120,120,0.2)", stroke: "#666" };
+  if (label === 'boundary') return { fill: 'rgba(0,230,118,0.06)', stroke: '#00e676', strokeWidth: 2, dashed: false };
+  return map[label] || { fill: "rgba(120,120,120,0.15)", stroke: "#888" };
 }
 
 // ── Door symbol helper (not exported) ────────────────────────────────────
@@ -418,9 +411,9 @@ function _drawDoorSymbol(ctx, n1x, n1y, n2x, n2y, t, widthPx, opts = {}) {
 
   if (ghost) {
     // Semi-transparent rectangle preview
-    ctx.fillStyle = 'rgba(80,140,255,0.25)';
+    ctx.fillStyle = 'rgba(0,230,118,0.15)';
     ctx.fillRect(-hw, -halfWall, hw * 2, halfWall * 2);
-    ctx.strokeStyle = 'rgba(80,140,255,0.9)';
+    ctx.strokeStyle = 'rgba(0,230,118,0.85)';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([4, 3]);
     ctx.strokeRect(-hw, -halfWall, hw * 2, halfWall * 2);
@@ -476,40 +469,64 @@ function _niceGridIntervalPx(pxPerUnit) {
  * Called as the very first draw operation so all geometry renders on top.
  * @param {object} gridSettings - optional overrides: spacingOverride (plan units), lineOpacity (0-1)
  */
-export function drawBackgroundGrid(ctx, fp, gridSettings = {}) {
+export function drawBackgroundGrid(ctx, fp, gridSettings = {}, viewport = null) {
   const W = ctx.canvas.width;
   const H = ctx.canvas.height;
 
-  // White background
-  ctx.fillStyle = '#fafafa';
-  ctx.fillRect(0, 0, W, H);
+  // The white fill is painted by the caller before the transform is applied.
+  // If no viewport is active (legacy call path), fill here as a fallback.
+  if (!viewport) {
+    ctx.fillStyle = '#fafafa';
+    ctx.fillRect(0, 0, W, H);
+  }
 
   const pxPerUnit = fp?.units?.pxPerUnit || 1;
 
   // Use manual spacing override (plan units) if provided, otherwise auto-compute
   let intervalPx;
-  const spacing = gridSettings.spacingOverride;
+  const spacing = gridSettings?.spacingOverride;
   if (spacing > 0) {
     intervalPx = spacing * pxPerUnit;
   } else {
     intervalPx = _niceGridIntervalPx(pxPerUnit);
   }
-  if (intervalPx < 4) return; // too dense to be useful
 
-  const opacity = gridSettings.lineOpacity ?? 0.5;
+  // Check apparent pixel size to avoid an invisible or too-dense grid
+  const apparentPx = viewport ? intervalPx * viewport.scale : intervalPx;
+  if (apparentPx < 4) return;
+
+  const opacity = gridSettings?.lineOpacity ?? 0.5;
   ctx.save();
   ctx.strokeStyle = `rgba(160, 160, 160, ${Math.max(0, Math.min(1, opacity))})`;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let x = 0; x <= W + intervalPx; x += intervalPx) {
-    const px = Math.round(x) + 0.5;
-    ctx.moveTo(px, 0);
-    ctx.lineTo(px, H);
+
+  // Keep lines visually 1 px wide regardless of zoom level
+  ctx.lineWidth = viewport ? 1 / viewport.scale : 1;
+
+  // Compute draw range in the current coordinate space.
+  // When a viewport transform is active we're in content coords, so compute
+  // the visible content region from the inverse transform.
+  let xStart, xEnd, yStart, yEnd;
+  if (viewport) {
+    const s = viewport.scale, tx = viewport.tx, ty = viewport.ty;
+    xStart = Math.floor((-tx / s) / intervalPx) * intervalPx;
+    xEnd   = (W - tx) / s + intervalPx;
+    yStart = Math.floor((-ty / s) / intervalPx) * intervalPx;
+    yEnd   = (H - ty) / s + intervalPx;
+  } else {
+    xStart = 0; xEnd = W + intervalPx;
+    yStart = 0; yEnd = H + intervalPx;
   }
-  for (let y = 0; y <= H + intervalPx; y += intervalPx) {
-    const py = Math.round(y) + 0.5;
-    ctx.moveTo(0, py);
-    ctx.lineTo(W, py);
+
+  ctx.beginPath();
+  for (let x = xStart; x <= xEnd; x += intervalPx) {
+    const px = viewport ? x : Math.round(x) + 0.5;
+    ctx.moveTo(px, yStart);
+    ctx.lineTo(px, yEnd);
+  }
+  for (let y = yStart; y <= yEnd; y += intervalPx) {
+    const py = viewport ? y : Math.round(y) + 0.5;
+    ctx.moveTo(xStart, py);
+    ctx.lineTo(xEnd, py);
   }
   ctx.stroke();
   ctx.restore();
@@ -537,29 +554,34 @@ export function drawWalls(ctx, fp, options = {}) {
     const wallType = wall?.wallType ?? edge.wallType ?? 'boundary';
     const isBoundaryWall = wallType === 'boundary' || (!wall && !edge.wallType);
     const isCoreWall     = wallType === 'core';
-    const isTranslucent  = isBoundaryWall && !!wall?.translucent;
+    const isTranslucent  = isBoundaryWall && (wall ? !!wall.translucent : true);
 
     // When the entire core is selected, highlight all core walls
     if (fp.selectedCore && isCoreWall) isSelected = true;
+
+    // Respect layer visibility: skip core walls if Core_Boundary layer is off,
+    // skip boundary walls if Plan_Boundary layer is off.
+    if (isCoreWall     && fp.layers?.Core_Boundary  === false) return;
+    if (isBoundaryWall && fp.layers?.Plan_Boundary   === false) return;
 
     ctx.beginPath();
     ctx.moveTo(n1.x, n1.y);
     ctx.lineTo(n2.x, n2.y);
 
     if (isSelected) {
-      ctx.strokeStyle = "#ff8800"; // highlight color
+      ctx.strokeStyle = "#00e676"; // highlight color
       ctx.lineWidth = 4;
       ctx.stroke();
       // draw an inner stroke for the edge itself
       ctx.beginPath();
       ctx.moveTo(n1.x, n1.y);
       ctx.lineTo(n2.x, n2.y);
-      ctx.strokeStyle = "#222";
+      ctx.strokeStyle = "#1a1a1a";
       ctx.lineWidth = 2;
       ctx.stroke();
     } else {
       // Locked edges use red instead of black but keep the same line style
-      const baseColor = isLocked ? '#c22' : '#000';
+      const baseColor = isLocked ? '#ff4444' : '#1a1a1a';
 
       if (isBoundaryWall && isTranslucent) {
         // Two parallel thin lines (translucent boundary wall)
@@ -581,7 +603,7 @@ export function drawWalls(ctx, fp, options = {}) {
         ctx.stroke();
       } else if (isCoreWall) {
         // Core walls: thick line in a distinct core colour
-        ctx.strokeStyle = isLocked ? '#c22' : '#cc5500';
+        ctx.strokeStyle = isLocked ? '#ff4444' : '#ffaa00';
         ctx.lineWidth = 4;
         ctx.stroke();
       } else if (isBoundaryWall) {
@@ -590,7 +612,7 @@ export function drawWalls(ctx, fp, options = {}) {
         ctx.lineWidth = 5;
         ctx.stroke();
       } else {
-        ctx.strokeStyle = isLocked ? '#c22' : '#222';
+        ctx.strokeStyle = isLocked ? '#ff4444' : '#333';
         ctx.lineWidth = 2;
         ctx.stroke();
       }
@@ -600,8 +622,8 @@ export function drawWalls(ctx, fp, options = {}) {
         const len = edgeLength(fp, edge);
         const mid = edgeMidpoint(fp, edge);
 
-        ctx.fillStyle = "#000";
-        ctx.font = "11px sans-serif";
+        ctx.fillStyle = "#1a1a1a";
+        ctx.font = "11px monospace";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(formatLen(len), mid.x, mid.y);
@@ -612,7 +634,7 @@ export function drawWalls(ctx, fp, options = {}) {
       // o.width is stored in mm; convert to canvas pixels before drawing
       const _pxU  = fp.units?.pxPerUnit || 1;
       const _mmPU = fp.units?.length === 'm' ? 1000 : 1; // mm per plan-unit
-      const doorColor = isLocked ? '#c22' : '#333';
+      const doorColor = isLocked ? '#ff4444' : '#333';
       const wallThickPx = isBoundaryWall ? 5 : isCoreWall ? 4 : 2;
       wall.openings.forEach(o => {
         if (o.openingKind === 'door' || o.openingKind === 'entrance') {
@@ -693,7 +715,7 @@ export function drawGridOriginGhost(ctx, fp, mouse) {
   const snapping = !!best;
 
   ctx.save();
-  const color = snapping ? '#e67e22' : 'rgba(230,126,34,0.4)';
+  const color = snapping ? '#ffaa00' : 'rgba(255,170,0,0.4)';
   ctx.strokeStyle = color;
   ctx.lineWidth = snapping ? 1.5 : 1;
   const r = 6;
@@ -710,7 +732,7 @@ export function drawGridOriginGhost(ctx, fp, mouse) {
 }
 
 export function drawVertices(ctx, fp) {
-  ctx.fillStyle = "rgba(180, 60, 60, 0.35)";
+  ctx.fillStyle = "rgba(255, 68, 68, 0.3)";
   fp.wall_graph.nodes.forEach(node => {
     ctx.beginPath();
     ctx.arc(node.x, node.y, 2.5, 0, Math.PI * 2);
@@ -772,13 +794,13 @@ export function drawBoundaryVertices(ctx, fp) {
         else ctx.lineTo(sx, sy);
       });
       ctx.closePath();
-      ctx.strokeStyle = '#2ecc71';
+      ctx.strokeStyle = '#00e676';
       ctx.lineWidth = 2;
       ctx.stroke();
     }
     
     // Draw vertex markers
-    ctx.fillStyle = '#2ecc71';
+    ctx.fillStyle = '#00e676';
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 1;
     screenVertices.forEach(([sx, sy]) => {
@@ -803,13 +825,13 @@ export function drawBoundaryVertices(ctx, fp) {
       else ctx.lineTo(x, y);
     });
     ctx.closePath();
-    ctx.strokeStyle = '#2ecc71';
+    ctx.strokeStyle = '#00e676';
     ctx.lineWidth = 2;
     ctx.stroke();
   }
   
   // Draw vertex markers
-  ctx.fillStyle = '#2ecc71';
+  ctx.fillStyle = '#00e676';
   ctx.strokeStyle = '#ffffff';
   ctx.lineWidth = 1;
   resolvedVertices.forEach(([x, y]) => {
@@ -870,13 +892,13 @@ export function drawCoreVertices(ctx, fp) {
         else ctx.lineTo(sx, sy);
       });
       ctx.closePath();
-      ctx.strokeStyle = '#e74c3c'; // red color for core
+      ctx.strokeStyle = '#ff4444'; // danger red for core
       ctx.lineWidth = 2;
       ctx.stroke();
     }
     
     // Draw vertex markers
-    ctx.fillStyle = '#e74c3c';
+    ctx.fillStyle = '#ff4444';
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 1;
     screenVertices.forEach(([sx, sy]) => {
@@ -901,13 +923,13 @@ export function drawCoreVertices(ctx, fp) {
       else ctx.lineTo(x, y);
     });
     ctx.closePath();
-    ctx.strokeStyle = '#e74c3c'; // red color for core
+    ctx.strokeStyle = '#ff4444'; // danger red for core
     ctx.lineWidth = 2;
     ctx.stroke();
   }
   
   // Draw vertex markers
-  ctx.fillStyle = '#e74c3c';
+  ctx.fillStyle = '#ff4444';
   ctx.strokeStyle = '#ffffff';
   ctx.lineWidth = 1;
   resolvedVertices.forEach(([x, y]) => {
@@ -931,8 +953,8 @@ export function drawHoverDimensions(ctx, fp, options) {
     const len = edgeLength(fp, hovered);
     const mid = edgeMidpoint(fp, hovered);
     ctx.save();
-    ctx.fillStyle = "#007acc";
-    ctx.font = "12px sans-serif";
+    ctx.fillStyle = "#00e676";
+    ctx.font = "12px monospace";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(formatLen(len), mid.x, mid.y);
@@ -947,7 +969,7 @@ export function drawHoverTooltip(ctx, fp, options) {
   if (hit.dist > 8) return;
   const len = edgeLength(fp, hit.edge);
   drawTooltip(ctx, `${formatLen(len)}`, ghost.x, ghost.y, {
-    font: "12px sans-serif",
+    font: "12px monospace",
     bg: "rgba(30,30,35,0.95)",
     fg: "#fff",
     offsetX: 14,
@@ -980,24 +1002,34 @@ export function drawGhost(ctx, fp, mouse, { constrain = false } = {}) {
     constrained = true;
   }
 
-  ctx.beginPath();
-  ctx.moveTo(lastX, lastY);
-  ctx.lineTo(ghostX, ghostY);
+  // Draw two parallel thin lines (translucent boundary style)
+  const _dx = ghostX - lastX;
+  const _dy = ghostY - lastY;
+  const _len = Math.hypot(_dx, _dy) || 1;
+  const _nx = -_dy / _len;
+  const _ny =  _dx / _len;
+  const _off = 2;
 
-  if (constrained) {
-    ctx.strokeStyle = "green";
-    ctx.lineWidth = 2;
-    ctx.setLineDash([]);
-  } else {
-    ctx.strokeStyle = "blue";
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([5, 3]);
-  }
+  const _style = constrained ? '#00e676' : 'rgba(0, 230, 118, 0.6)';
+  ctx.strokeStyle = _style;
+  ctx.lineWidth = 1;
+  if (!constrained) ctx.setLineDash([5, 3]);
+  else ctx.setLineDash([]);
+
+  ctx.beginPath();
+  ctx.moveTo(lastX + _nx * _off, lastY + _ny * _off);
+  ctx.lineTo(ghostX + _nx * _off, ghostY + _ny * _off);
   ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(lastX - _nx * _off, lastY - _ny * _off);
+  ctx.lineTo(ghostX - _nx * _off, ghostY - _ny * _off);
+  ctx.stroke();
+
   ctx.setLineDash([]);
 
   if (constrained) {
-    ctx.fillStyle = "green";
+    ctx.fillStyle = "#00e676";
     ctx.beginPath();
     ctx.arc(ghostX, ghostY, 4, 0, Math.PI * 2);
     ctx.fill();
@@ -1024,7 +1056,7 @@ export function drawGhost(ctx, fp, mouse, { constrain = false } = {}) {
       ctx.fill();
       ctx.stroke();
       ctx.fillStyle = '#fff';
-      ctx.font = '11px sans-serif';
+      ctx.font = '11px monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('\u21E7', ix + w / 2, iy + h / 2);
@@ -1033,7 +1065,7 @@ export function drawGhost(ctx, fp, mouse, { constrain = false } = {}) {
 
   if (isNearFirstNode(fp, mouse)) {
     const first = fp.wall_graph.nodes[0];
-    ctx.fillStyle = "orange";
+    ctx.fillStyle = "#ffaa00";
     ctx.beginPath();
     ctx.arc(first.x, first.y, 6, 0, Math.PI * 2);
     ctx.fill();
@@ -1045,7 +1077,7 @@ export function drawEntranceProjection(ctx, fp, mouse) {
   const closest = findClosestBoundaryPoint(fp, mouse);
   if (!closest) return;
 
-  ctx.fillStyle = "purple";
+  ctx.fillStyle = "#00a152";
   ctx.beginPath();
   ctx.arc(closest.x, closest.y, 6, 0, Math.PI * 2);
   ctx.fill();
@@ -1078,7 +1110,7 @@ export function drawEntranceProjection(ctx, fp, mouse) {
   if (len > 0) {
     const nx = -dy / len;
     const ny = dx / len;
-    ctx.strokeStyle = "purple";
+    ctx.strokeStyle = "#00a152";
     ctx.beginPath();
     ctx.moveTo(closest.x, closest.y);
     ctx.lineTo(closest.x + nx * 15, closest.y + ny * 15);
@@ -1087,7 +1119,7 @@ export function drawEntranceProjection(ctx, fp, mouse) {
 }
 
 export function drawEntrances(ctx, fp) {
-  ctx.strokeStyle = "purple";
+  ctx.strokeStyle = "#00a152";
   ctx.lineWidth = 3;
   fp.entrances.forEach(ent => {
     const { x, y } = ent.position;
@@ -1130,7 +1162,7 @@ export function drawProjectionGuides(ctx, fp, mouse) {
   const proj = findClosestProjection(fp, mouse);
   if (!proj) return;
 
-  ctx.strokeStyle = "rgba(0,0,255,0.3)";
+  ctx.strokeStyle = "rgba(0,230,118,0.3)";
   ctx.setLineDash([2, 2]);
 
   ctx.beginPath();
@@ -1145,7 +1177,7 @@ export function drawProjectionGuides(ctx, fp, mouse) {
 
   ctx.setLineDash([]);
 
-  ctx.fillStyle = "blue";
+  ctx.fillStyle = "#00e676";
   ctx.beginPath();
   ctx.arc(proj.x, proj.y, 4, 0, Math.PI * 2);
   ctx.fill();
@@ -1159,7 +1191,7 @@ export function drawCoreAreas(ctx, fp) {
   if (!fp.Core_Boundary || fp.Core_Boundary.length === 0) return;
   
   ctx.save();
-  ctx.fillStyle = "rgba(255, 107, 107, 0.15)"; // Light red fill for core areas
+  ctx.fillStyle = "rgba(255, 68, 68, 0.12)"; // danger-tinted fill for core areas
   
   fp.Core_Boundary.forEach(core => {
     const points = Object.values(core);
@@ -1185,7 +1217,7 @@ export function drawCoreBoundaries(ctx, fp) {
   if (!fp.Core_Boundary || fp.Core_Boundary.length === 0) return;
   
   ctx.save();
-  ctx.strokeStyle = "#ff6b6b"; // Red color for core boundaries
+  ctx.strokeStyle = "#ff4444"; // danger red for core boundaries
   ctx.lineWidth = 2;
   
   fp.Core_Boundary.forEach(core => {
@@ -1212,10 +1244,10 @@ export function drawCoreGhost(ctx, fp, tempCore, mouse, constrain = false) {
   if (!tempCore || tempCore.length === 0) return;
 
   ctx.save();
-  ctx.strokeStyle = "#ff6b6b";
+  ctx.strokeStyle = "#ff4444";
   ctx.lineWidth = 2;
   ctx.setLineDash([5, 5]);
-  ctx.fillStyle = "rgba(255, 107, 107, 0.05)";
+  ctx.fillStyle = "rgba(255, 68, 68, 0.05)";
 
   // Draw temp core boundary
   ctx.beginPath();
@@ -1280,7 +1312,7 @@ export function drawCoreGhost(ctx, fp, tempCore, mouse, constrain = false) {
     // Guide line between last point and constrained cursor
     const last = tempCore[tempCore.length - 1];
     ctx.setLineDash([]);
-    ctx.strokeStyle = 'rgba(255,107,107,0.6)';
+    ctx.strokeStyle = 'rgba(255,68,68,0.6)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(last[0], last[1]);
@@ -1288,13 +1320,13 @@ export function drawCoreGhost(ctx, fp, tempCore, mouse, constrain = false) {
     ctx.stroke();
 
     // Draw small locked marker (crosshair)
-    ctx.fillStyle = 'rgba(255,107,107,0.95)';
+    ctx.fillStyle = 'rgba(255,68,68,0.95)';
     ctx.beginPath();
     ctx.arc(cx, cy, 4, 0, Math.PI * 2);
     ctx.fill();
 
     // label the lock state near the cursor
-    ctx.font = '12px sans-serif';
+    ctx.font = '12px monospace';
     ctx.fillStyle = 'rgba(0,0,0,0.7)';
     ctx.fillText('Locked', cx + 8, cy - 8);
   }
@@ -1369,7 +1401,7 @@ export function drawCoreProjectionGuides(ctx, fp, tempCore, mouse) {
   if (!tempCore || tempCore.length === 0 || !mouse) return;
   
   ctx.save();
-  ctx.strokeStyle = "rgba(255, 107, 107, 0.3)"; // Light red for guides
+  ctx.strokeStyle = "rgba(255, 68, 68, 0.3)"; // danger-tinted guides
   ctx.lineWidth = 1;
   ctx.setLineDash([4, 4]);
 
@@ -1428,7 +1460,7 @@ export function drawCoreProjectionGuides(ctx, fp, tempCore, mouse) {
     ctx.stroke();
     
     // Highlight the aligned vertex with color based on type
-    const color = alignedVertex.type === 'boundary' ? "rgba(46, 204, 113, 0.6)" : "rgba(255, 107, 107, 0.5)";
+    const color = alignedVertex.type === 'boundary' ? "rgba(0, 230, 118, 0.6)" : "rgba(255, 68, 68, 0.5)";
     ctx.fillStyle = color;
     ctx.beginPath();
     ctx.arc(alignedVertex.x, alignedVertex.y, 4, 0, Math.PI * 2);
@@ -1443,7 +1475,7 @@ export function drawCoreProjectionGuides(ctx, fp, tempCore, mouse) {
     ctx.stroke();
     
     // Highlight the aligned vertex with color based on type
-    const color = alignedVertex.type === 'boundary' ? "rgba(46, 204, 113, 0.6)" : "rgba(255, 107, 107, 0.5)";
+    const color = alignedVertex.type === 'boundary' ? "rgba(0, 230, 118, 0.6)" : "rgba(255, 68, 68, 0.5)";
     ctx.fillStyle = color;
     ctx.beginPath();
     ctx.arc(alignedVertex.x, alignedVertex.y, 4, 0, Math.PI * 2);
@@ -1456,30 +1488,22 @@ export function drawCoreProjectionGuides(ctx, fp, tempCore, mouse) {
 
 export function drawColumns(ctx, fp) {
   if (!fp.Columns || fp.Columns.length === 0) return;
-  
+
+  const half = Math.max(4, (fp.units?.pxPerUnit ?? 1) * 0.25);
   ctx.save();
-  ctx.strokeStyle = "#4a4a4a"; // Dark gray for columns
-  ctx.lineWidth = 1;
-  ctx.fillStyle = "rgba(74, 74, 74, 0.3)"; // Semi-transparent gray fill
-  
-  fp.Columns.forEach(column => {
-    const points = Object.values(column);
-    if (points.length < 3) return;
-    
+  ctx.fillStyle   = 'rgba(50, 50, 70, 0.85)';
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth   = 1;
+
+  fp.Columns.forEach(col => {
+    const { x, y } = col;
+    if (x === undefined || y === undefined) return;
     ctx.beginPath();
-    const [startX, startY] = points[0];
-    ctx.moveTo(startX, startY);
-    
-    for (let i = 1; i < points.length; i++) {
-      const [x, y] = points[i];
-      ctx.lineTo(x, y);
-    }
-    
-    ctx.closePath();
+    ctx.rect(x - half, y - half, half * 2, half * 2);
     ctx.fill();
     ctx.stroke();
   });
-  
+
   ctx.restore();
 }
 
@@ -1519,15 +1543,15 @@ export function drawColumnsVertices(ctx, fp) {
           else ctx.lineTo(sx, sy);
         });
         ctx.closePath();
-        ctx.fillStyle = 'rgba(128, 128, 128, 0.6)'; // gray fill for columns
+        ctx.fillStyle = 'rgba(100, 100, 100, 0.5)'; // gray fill for columns
         ctx.fill();
-        ctx.strokeStyle = '#666666'; // darker gray outline
+        ctx.strokeStyle = '#555'; // darker gray outline
         ctx.lineWidth = 1;
         ctx.stroke();
       }
       
       // Draw vertex markers
-      ctx.fillStyle = '#666666';
+      ctx.fillStyle = '#555';
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 1;
       screenVertices.forEach(([sx, sy]) => {
@@ -1556,15 +1580,15 @@ export function drawColumnsVertices(ctx, fp) {
         else ctx.lineTo(x, y);
       });
       ctx.closePath();
-      ctx.fillStyle = 'rgba(128, 128, 128, 0.6)'; // gray fill for columns
+      ctx.fillStyle = 'rgba(100, 100, 100, 0.5)'; // gray fill for columns
       ctx.fill();
-      ctx.strokeStyle = '#666666'; // darker gray outline
+      ctx.strokeStyle = '#555'; // darker gray outline
       ctx.lineWidth = 1;
       ctx.stroke();
     }
     
     // Draw vertex markers
-    ctx.fillStyle = '#666666';
+    ctx.fillStyle = '#555';
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 1;
     column.vertices.forEach(([x, y]) => {
@@ -1586,12 +1610,13 @@ export function drawGridPoints(ctx, fp) {
   ctx.lineWidth = 1;
   
   fp.Points.forEach(point => {
-    const isSelected = fp.selectedPoints?.has(point.id) ?? fp.selectedPoint === point.id;
-    const isColumn   = point.column !== false; // default true
+    const isSelected  = fp.selectedPoints?.has(point.id) ?? fp.selectedPoint === point.id;
+    const isColumn    = point.column !== false; // default true
+    const isEntry     = point.entryPoint === true;
 
     if (isColumn) {
       // Filled muted blue dot — column vertex
-      ctx.fillStyle   = isSelected ? '#f39c12' : '#6b8caa';
+      ctx.fillStyle   = isSelected ? '#ffaa00' : '#6b8caa';
       ctx.strokeStyle = isSelected ? '#fff' : 'rgba(255,255,255,0.5)';
       ctx.beginPath();
       ctx.arc(point.x, point.y, isSelected ? 5 : 2.5, 0, Math.PI * 2);
@@ -1599,10 +1624,19 @@ export function drawGridPoints(ctx, fp) {
       ctx.stroke();
     } else {
       // Hollow muted ring — non-column vertex
-      ctx.strokeStyle = isSelected ? '#f39c12' : '#555f73';
+      ctx.strokeStyle = isSelected ? '#ffaa00' : '#555f73';
       ctx.fillStyle   = 'transparent';
       ctx.beginPath();
       ctx.arc(point.x, point.y, isSelected ? 5 : 2.5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // Green outer ring for entry points
+    if (isEntry) {
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 7, 0, Math.PI * 2);
+      ctx.strokeStyle = '#4caf50';
+      ctx.lineWidth = 1.5;
       ctx.stroke();
     }
   });
@@ -1615,7 +1649,7 @@ export function drawGridEdges(ctx, fp) {
   if (!fp.Edges || fp.Edges.length === 0) return;
   
   ctx.save();
-  ctx.strokeStyle = 'rgba(52, 152, 219, 0.3)'; // Semi-transparent blue
+  ctx.strokeStyle = 'rgba(0, 230, 118, 0.2)'; // accent-tinted grid edges
   ctx.lineWidth = 1;
   
   fp.Edges.forEach(edge => {
@@ -1658,15 +1692,466 @@ export function drawSplitPreview(ctx, fp, mouse) {
   ctx.arc(cx, cy, 6, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
   ctx.fill();
-  // Orange border matching selection colour
-  ctx.strokeStyle = '#ff8800';
+  // Accent border matching selection colour
+  ctx.strokeStyle = '#00e676';
   ctx.lineWidth = 2;
   ctx.stroke();
   // Small centre dot
   ctx.beginPath();
   ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
-  ctx.fillStyle = '#ff8800';
+  ctx.fillStyle = '#00e676';
   ctx.fill();
+  ctx.restore();
+}
+
+// ── Thermal zone renderer (BuildWeave segmentation + zone phases) ─────────────
+// Draws fp.Thermal_Zones: [{type, orientation, subZones:[[{x,y},...],...],...}]
+// Coordinates are in backend/world units, mapped to canvas by fp.units when needed.
+
+// Distinct HSL hues spread across the spectrum, one per zone index.
+// Internal zones get a grey tone regardless of index.
+const _ZONE_HUES = [200, 145, 25, 280, 170, 50, 320, 90, 0, 245, 340, 120, 60, 190, 300];
+
+function _zoneColour(zoneIndex, isInternal) {
+  if (isInternal) {
+    return { fill: 'rgba(120,120,120,0.15)', stroke: 'rgba(90,90,90,0.55)' };
+  }
+  const hue = _ZONE_HUES[zoneIndex % _ZONE_HUES.length];
+  return {
+    fill:   `hsla(${hue},65%,55%,0.22)`,
+    stroke: `hsla(${hue},60%,38%,0.85)`,
+  };
+}
+
+function _orientationName(azimuth) {
+  if (azimuth === null || azimuth === undefined) return 'internal';
+  // BuildWeave uses y-up (mathematical) coords; canvas y-axis is flipped (y-down),
+  // so north (azimuth 0) maps to the visual bottom and south (180) to the visual top.
+  // Swap north ↔ south so labels match the visual orientation on screen.
+  const map = [[0, 'south'], [90, 'east'], [180, 'north'], [270, 'west']];
+  let best = 'internal', minD = Infinity;
+  for (const [deg, name] of map) {
+    const d = Math.abs(((azimuth - deg + 540) % 360) - 180);
+    if (d < minD) { minD = d; best = name; }
+  }
+  return best;
+}
+
+export function drawThermalZones(ctx, fp) {
+  const regions = fp.Thermal_Zones;
+  if (!regions || regions.length === 0) return;
+
+  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
+  const pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const toCanvas = mm => mm * pxPerUnit / mmPerUnit;
+
+  ctx.save();
+
+  regions.forEach((region, ri) => {
+    const subZones = region.subZones || [];
+    const isInternal = region.type === 'internal' || region.orientation === null || region.orientation === undefined;
+    const palette = _zoneColour(ri, isInternal);
+    const label = _orientationName(region.orientation);
+    const validRings = [];
+
+    (subZones || []).forEach((subZone) => {
+      const coords = (subZone || [])
+        .map((pt) => {
+          if (!pt || typeof pt.x !== 'number' || typeof pt.y !== 'number') return null;
+          return [pt.x, pt.y];
+        })
+        .filter(Boolean);
+      if (!coords || coords.length < 3) return;
+      validRings.push(coords);
+    });
+
+    if (!validRings.length) return;
+
+    // Draw one merged fill per thermal region so sub-zone seams are not visible.
+    ctx.beginPath();
+    validRings.forEach((coords) => {
+      coords.forEach((pt, i) => {
+        const cx = toCanvas(pt[0]);
+        const cy = toCanvas(pt[1]);
+        if (i === 0) ctx.moveTo(cx, cy);
+        else ctx.lineTo(cx, cy);
+      });
+      ctx.closePath();
+    });
+
+    ctx.fillStyle = palette.fill;
+    ctx.fill();
+
+    const first = validRings[0];
+    const xs = first.map(p => toCanvas(p[0]));
+    const ys = first.map(p => toCanvas(p[1]));
+    const cx = xs.reduce((a, b) => a + b, 0) / xs.length;
+    const cy = ys.reduce((a, b) => a + b, 0) / ys.length;
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = palette.stroke;
+    ctx.fillText(label, cx, cy);
+  });
+
+  ctx.restore();
+}
+
+// ── Thermal control zone renderer ───────────────────────────────────────────
+// Draws the thermalControlZones sub-divisions that live inside each thermal zone.
+// Each control zone is a list of grid-point indices (into fp.Points).
+// Strategy: cell-expansion + rectilinear boundary tracing.
+//   • Fill  – fillRect(x-h, y-h, step, step) per point; adjacent cells merge.
+//   • Outline – for each cell, emit boundary segments on sides facing empty
+//               neighbours; draw all segments in one path pass.
+
+/** Infer the grid step in canvas pixels from fp._ductEdges or fp.Points. */
+function _gridStepPx(fp) {
+  if (fp._ductEdges && fp._ductEdges.length > 0) {
+    const [a, b] = fp._ductEdges[0];
+    const pa = fp.Points?.[a], pb = fp.Points?.[b];
+    if (pa && pb) {
+      const d = Math.max(Math.abs(pb.x - pa.x), Math.abs(pb.y - pa.y));
+      if (d > 0) return d;
+    }
+  }
+  // Fallback: minimum non-zero difference between sorted unique x-coords
+  if (fp.Points && fp.Points.length > 1) {
+    const xs = [...new Set(fp.Points.map(p => p.x))].sort((a, b) => a - b);
+    const diffs = xs.slice(1).map((x, i) => x - xs[i]).filter(d => d > 1);
+    if (diffs.length) return Math.min(...diffs);
+  }
+  return 1;
+}
+
+export function drawThermalControlZones(ctx, fp) {
+  const regions = fp.Thermal_Zones;
+  if (!regions || regions.length === 0) return;
+  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
+  const pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const toCanvas = mm => mm * pxPerUnit / mmPerUnit;
+
+  ctx.save();
+
+  regions.forEach((region, ri) => {
+    const isInternal = region.type === 'internal' ||
+                       region.orientation === null ||
+                       region.orientation === undefined;
+    const hue = isInternal ? 0 : _ZONE_HUES[ri % _ZONE_HUES.length];
+    const sat = isInternal ? '0%' : '70%';
+
+    const controlZones = region.thermalControlZones ?? [];
+    if (!controlZones.length) return;
+
+    controlZones.forEach((cz, ci) => {
+      const polygon = cz.polygon;
+      if (Array.isArray(polygon) && polygon.length >= 3) {
+        const coords = polygon
+          .map((pt) => {
+            if (!pt || typeof pt.x !== 'number' || typeof pt.y !== 'number') return null;
+            return [toCanvas(pt.x), toCanvas(pt.y)];
+          })
+          .filter(Boolean);
+        if (coords.length >= 3) {
+          const lightness = 55 + (ci % 3) * 8;
+          const fillAlpha = 0.20;
+          const strokeAlpha = 0.90;
+          ctx.beginPath();
+          coords.forEach(([x, y], i) => {
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.closePath();
+          ctx.fillStyle = isInternal
+            ? `rgba(140,140,140,${fillAlpha})`
+            : `hsla(${hue},${sat},${lightness}%,${fillAlpha})`;
+          ctx.fill();
+          ctx.strokeStyle = isInternal
+            ? `rgba(90,90,90,${strokeAlpha})`
+            : `hsla(${hue},${sat},${Math.max(30, lightness - 20)}%,${strokeAlpha})`;
+          ctx.lineWidth = 1.2;
+          ctx.setLineDash([4, 2]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          const cx = coords.reduce((s, p) => s + p[0], 0) / coords.length;
+          const cy = coords.reduce((s, p) => s + p[1], 0) / coords.length;
+          const loadStr = cz.load != null ? `${Math.round(cz.load)} W` : `cz${ci}`;
+          ctx.font = '9px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = isInternal
+            ? `rgba(90,90,90,0.9)`
+            : `hsla(${hue},${sat},${Math.max(25, lightness - 25)}%,0.9)`;
+          ctx.fillText(loadStr, cx, cy);
+          return;
+        }
+      }
+
+      const ptIndices = cz.points;
+      if (!ptIndices || ptIndices.length === 0) return;
+      if (!fp.Points || fp.Points.length === 0) return;
+
+      const step = _gridStepPx(fp);
+      if (step <= 0) return;
+      const h = step / 4; // quarter-step margin — cells share edges visually
+
+      // Build set of occupied cell keys (using rounded grid index as key)
+      // key = "gx,gy" where gx = round(x / step), gy = round(y / step)
+      const occupied = new Set();
+      const gridCoords = [];
+      for (const idx of ptIndices) {
+        const pt = fp.Points[idx];
+        if (!pt) continue;
+        const gx = Math.round(pt.x / step);
+        const gy = Math.round(pt.y / step);
+        occupied.add(`${gx},${gy}`);
+        gridCoords.push({ gx, gy, x: pt.x, y: pt.y });
+      }
+      if (!gridCoords.length) return;
+
+      // Lightness cycles slightly per control zone within the same thermal zone
+      const lightness = 55 + (ci % 3) * 8;
+      const fillAlpha  = 0.20;
+      const strokeAlpha = 0.90;
+
+      // ── Fill: one rect per cell ───────────────────────────────────────────
+      ctx.fillStyle = isInternal
+        ? `rgba(140,140,140,${fillAlpha})`
+        : `hsla(${hue},${sat},${lightness}%,${fillAlpha})`;
+      ctx.beginPath();
+      for (const { x, y } of gridCoords) {
+        ctx.rect(x - h, y - h, step, step);
+      }
+      ctx.fill();
+
+      // ── Outline: boundary segments of rectilinear cell union ──────────────
+      ctx.strokeStyle = isInternal
+        ? `rgba(90,90,90,${strokeAlpha})`
+        : `hsla(${hue},${sat},${Math.max(30, lightness - 20)}%,${strokeAlpha})`;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 2]);
+
+      ctx.beginPath();
+      for (const { gx, gy, x, y } of gridCoords) {
+        // top edge    (gy-1 empty)
+        if (!occupied.has(`${gx},${gy - 1}`)) {
+          ctx.moveTo(x - h, y - h);
+          ctx.lineTo(x + h, y - h);
+        }
+        // bottom edge (gy+1 empty)
+        if (!occupied.has(`${gx},${gy + 1}`)) {
+          ctx.moveTo(x + h, y + h);
+          ctx.lineTo(x - h, y + h);
+        }
+        // left edge   (gx-1 empty)
+        if (!occupied.has(`${gx - 1},${gy}`)) {
+          ctx.moveTo(x - h, y + h);
+          ctx.lineTo(x - h, y - h);
+        }
+        // right edge  (gx+1 empty)
+        if (!occupied.has(`${gx + 1},${gy}`)) {
+          ctx.moveTo(x + h, y - h);
+          ctx.lineTo(x + h, y + h);
+        }
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // ── Load label at centroid ────────────────────────────────────────────
+      const cx = gridCoords.reduce((s, p) => s + p.x, 0) / gridCoords.length;
+      const cy = gridCoords.reduce((s, p) => s + p.y, 0) / gridCoords.length;
+      const loadStr = cz.load != null ? `${Math.round(cz.load)} W` : `cz${ci}`;
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = isInternal
+        ? `rgba(90,90,90,0.9)`
+        : `hsla(${hue},${sat},${Math.max(25, lightness - 25)}%,0.9)`;
+      ctx.fillText(loadStr, cx, cy);
+    });
+  });
+
+  ctx.restore();
+}
+
+// ── Structural solver renderers ───────────────────────────────────────────────
+
+/**
+ * Draw solver-placed beams as lines reading fp.Beams: [{start:{x,y}, end:{x,y}}]
+ * Coordinates are in canvas pixels.
+ */
+export function drawBeams(ctx, fp) {
+  if (!fp.Beams || fp.Beams.length === 0) return;
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(50, 50, 70, 0.55)';
+  ctx.lineWidth   = Math.max(1, (fp.units?.pxPerUnit ?? 1) * 0.06);
+  ctx.lineCap     = 'round';
+
+  fp.Beams.forEach(beam => {
+    const { start, end } = beam;
+    if (!start || !end) return;
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+  });
+
+  ctx.restore();
+}
+
+// ── Duct plan renderer (BuildWeave duct phase) ────────────────────────────────
+// Draws fp.Duct_Plan: [{entryPoint, ducts:[[edgeIdx,ductSizeIdx,flow],...], vav:[[ptIdx,load],...]}]
+// Requires fp._ductEdges: [[ptA, ptB, step], ...] (indices into fp.Points)
+// fp.Points contains canvas-pixel coordinates.
+
+export function drawDuctPlan(ctx, fp) {
+  const plan = fp.Duct_Plan;
+  if (!plan || plan.length === 0) return;
+  if (!fp.Points || fp.Points.length === 0) return;
+
+  // Create a map of point IDs to point objects for O(1) lookup
+  const pointMap = new Map();
+  fp.Points.forEach(p => {
+    if (p.id) pointMap.set(p.id, p);
+  });
+
+  ctx.save();
+
+  // Colour palette per riser/plant index
+  const RISER_COLOURS = [
+    '#00bcd4', '#ff9800', '#8bc34a', '#e91e63', '#9c27b0',
+    '#03a9f4', '#ff5722', '#4caf50', '#f44336', '#3f51b5',
+  ];
+
+  plan.forEach((riser, ri) => {
+    // Colour derived from the thermal zone this riser serves
+    // Note: A riser (riser.vav[0]) corresponds to a control zone.
+    // We search the Thermal_Zones to find the region and control zone that matches.
+    let colour = '#888'; // Default grey
+    if (riser.vav && riser.vav.length > 0) {
+      const firstVavId = typeof riser.vav[0][0] === 'string' ? riser.vav[0][0] : fp.Points[riser.vav[0][0]]?.id;
+      if (firstVavId) {
+        // Find which thermal zone contains this point
+        const region = (fp.Thermal_Zones || []).find(r => 
+          (r.thermalControlZones || []).some(cz => cz.points.includes(firstVavId))
+        );
+        if (region) {
+          // Use explicit color if present, else fallback to zoneColor logic
+          if (region.color && /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/.test(region.color)) {
+            colour = region.color;
+          } else {
+            const ri = fp.Thermal_Zones.indexOf(region);
+            const isInternal = region.type === 'internal' || region.orientation === null;
+            const zoneColor = _zoneColour(ri, isInternal);
+            colour = zoneColor.stroke;
+          }
+        }
+      }
+    }
+
+    // Draw duct edges
+    (riser.ducts || []).forEach((duct) => {
+      let pA, pB, width, height, flow;
+      if (duct.length === 5) {
+        const [ptA_id, ptB_id, w, h, f] = duct;
+        pA = pointMap.get(ptA_id);
+        pB = pointMap.get(ptB_id);
+        width = w;
+        height = h;
+        flow = f;
+      }
+
+      if (!pA || !pB) return;
+
+      const isSelected = fp.selectedDuct && 
+                         fp.selectedDuct.pA === duct[0] && 
+                         fp.selectedDuct.pB === duct[1] &&
+                         fp.selectedDuct.flow === duct[4];
+
+      ctx.strokeStyle = isSelected ? '#00e676' : colour;
+      ctx.lineWidth = Math.min(4, Math.max(0.5, Math.log2(flow + 1) * 0.5 + 0.5));
+      ctx.beginPath();
+      ctx.moveTo(pA.x, pA.y);
+      ctx.lineTo(pB.x, pB.y);
+      ctx.stroke();
+    });
+
+    // Draw VAV terminal boxes (smaller markers)
+    (riser.vav || []).forEach((vav) => {
+      let pt;
+      if (typeof vav[0] === 'string') {
+        pt = pointMap.get(vav[0]);
+      } else {
+        pt = fp.Points[vav[0]];
+      }
+      if (!pt) return;
+      
+      const isSelected = fp.selectedVav && 
+                         fp.selectedVav.ptId === vav[0] && 
+                         fp.selectedVav.load === vav[1];
+
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, isSelected ? 6 : 3, 0, Math.PI * 2); // Highlight by size
+      ctx.fillStyle = isSelected ? '#00e676' : colour;
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+    });
+
+    // Draw entry point (riser root)
+    if (riser.entryPoint !== null && riser.entryPoint !== undefined) {
+      let pt;
+      if (typeof riser.entryPoint === 'string') {
+        pt = pointMap.get(riser.entryPoint);
+      } else {
+        pt = fp.Points[riser.entryPoint];
+      }
+      if (pt) {
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2); // Smaller (5px)
+        ctx.fillStyle = colour;
+        ctx.globalAlpha = 0.3;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        // Diamond marker (smaller)
+        ctx.beginPath();
+        ctx.moveTo(pt.x,     pt.y - 4);
+        ctx.lineTo(pt.x + 3, pt.y);
+        ctx.lineTo(pt.x,     pt.y + 4);
+        ctx.lineTo(pt.x - 3, pt.y);
+        ctx.closePath();
+        ctx.fillStyle = colour;
+        ctx.fill();
+      }
+    }
+
+    // Draw return point if applicable
+    if (riser.returnPoint !== null && riser.returnPoint !== undefined) {
+      let pt = typeof riser.returnPoint === 'string' ? pointMap.get(riser.returnPoint) : fp.Points[riser.returnPoint];
+      if (pt) {
+        ctx.save();
+        const _rw = 10, _rh = 7;
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 2]);
+        ctx.strokeRect(pt.x - _rw / 2, pt.y - _rh / 2, _rw, _rh);
+        ctx.setLineDash([]);
+        ctx.font = 'bold 6px sans-serif';
+        ctx.fillStyle = colour;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('R', pt.x, pt.y);
+        ctx.restore();
+      }
+    }
+  });
+
   ctx.restore();
 }
 
@@ -1702,5 +2187,9 @@ export default {
   drawDoorGhost,
   drawBackgroundGrid,
   drawGridOriginGhost,
-  drawSplitPreview
+  drawSplitPreview,
+  drawThermalZones,
+  drawThermalControlZones,
+  drawDuctPlan,
+  drawBeams
 };

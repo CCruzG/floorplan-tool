@@ -59,7 +59,7 @@ export function computeBoundaryAreaPx(fp) {
 
 export function pxAreaToSquareMeters(pxArea, fp) {
   const pxPerUnit = getPxPerUnit(fp) || 1; // pixels per unit
-  const unitLabel = (fp.units && fp.units.length) || 'mm';
+  const unitLabel = (fp.units && fp.units.length) || 'm';
   const unitMeters = unitToMeter(unitLabel);
   // area in unit^2 = pxArea / (pxPerUnit^2)
   const areaInUnitsSq = pxArea / (pxPerUnit * pxPerUnit);
@@ -185,7 +185,7 @@ export function evaluateRequirements(fp, options = {}) {
   // --- Spatial / side checks using axis-aligned bounding box (heuristic) ---
   // Compute bounding box of boundary in meters to check side/width constraints.
   const pxPerUnit = getPxPerUnit(fp) || 1;
-  const unitLabel = (fp.units && fp.units.length) || 'mm';
+  const unitLabel = (fp.units && fp.units.length) || 'm';
   const unitMeters = unitToMeter(unitLabel);
 
   // Resolve boundary points (prefer explicit boundaryArea special object)

@@ -142,8 +142,12 @@ export function findClosestSegment(fp, pt, threshold = 8) {
   let minDist = Infinity;
 
   fp.wall_graph.edges.forEach((edge, i) => {
-    // const [x1, y1] = edge.v1;
-    // const [x2, y2] = edge.v2;
+    // Skip edges whose layer is hidden
+    const wallType = edge.wallType ?? 'boundary';
+    const isCoreEdge = wallType === 'core';
+    if (isCoreEdge  && fp.layers?.Core_Boundary  === false) return;
+    if (!isCoreEdge && fp.layers?.Plan_Boundary   === false) return;
+
     const n1 = getNodeById(fp.wall_graph.nodes, edge.v1);
     const n2 = getNodeById(fp.wall_graph.nodes, edge.v2);
     if (!n1 || !n2) return null;

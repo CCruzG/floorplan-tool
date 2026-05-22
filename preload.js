@@ -8,6 +8,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld('electronAPI', {
   saveFloorplan: (args) => ipcRenderer.invoke('save-floorplan', args),
+  saveFloorplanSilent: (args) => ipcRenderer.invoke('save-floorplan-silent', args),
   openFloorplan: () => ipcRenderer.invoke('open-floorplan'),
 
   // // new validator API

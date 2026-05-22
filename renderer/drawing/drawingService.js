@@ -11,18 +11,24 @@ export const DrawingService = {
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     if (!fp) return;
 
-    // Draw scale-aware background grid first so all geometry renders on top
-    R.drawBackgroundGrid(ctx, fp, options.gridSettings);
+    // White background in screen space — always covers the full canvas.
+    const _W = ctx.canvas.width, _H = ctx.canvas.height;
+    ctx.fillStyle = '#fafafa';
+    ctx.fillRect(0, 0, _W, _H);
 
-    // Apply an optional view transform (scale + offset) so large imported
-    // plans can be fitted into the canvas. The transform is stored on the
-    // FloorPlan as `_view` by the UI loader when appropriate.
-    let appliedView = false;
-    if (fp._view && typeof fp._view.scale === 'number') {
-      appliedView = true;
+    // Apply the interactive viewport (zoom/pan) around all content drawing.
+    // Falls back to fp._view (set by the open-plan fit-to-canvas flow) when
+    // no explicit viewport is provided.
+    const _vp = options.viewport
+      ?? (fp._view ? { scale: fp._view.scale, tx: fp._view.offsetX || 0, ty: fp._view.offsetY || 0 } : null);
+    const _hasVP = _vp && (_vp.scale !== 1 || _vp.tx !== 0 || _vp.ty !== 0);
+    if (_hasVP) {
       ctx.save();
-      ctx.setTransform(fp._view.scale, 0, 0, fp._view.scale, fp._view.offsetX || 0, fp._view.offsetY || 0);
+      ctx.setTransform(_vp.scale, 0, 0, _vp.scale, _vp.tx, _vp.ty);
     }
+
+    // Grid drawn inside the transform so it zooms / pans with the plan.
+    R.drawBackgroundGrid(ctx, fp, options.gridSettings, _vp);
 
     // If the plan was loaded in "boundary-only" visual mode, draw only
     // the boundary vertices, core vertices, and columns (if present) and nothing else. 
@@ -38,34 +44,39 @@ export const DrawingService = {
       if (fp.layers?.Columns !== false && typeof R.drawColumnsVertices === 'function') {
         R.drawColumnsVertices(ctx, fp);
       }
-      if (appliedView) ctx.restore();
+      if (_hasVP) ctx.restore();
       return;
     }
-
-    // Do not paint an opaque canvas background here — drawBackgroundGrid
-    // already fills the canvas before this point.
 
     // Delegate to modular render functions - respecting layer visibility
     if (fp.layers?.Boundary_Area !== false) {
       R.drawBoundaryArea(ctx, fp);
     }
+    // Thermal zones (BuildWeave segmentation/zone results) — behind walls
+    if (fp.layers?.Thermal_Zones !== false) {
+      R.drawThermalZones(ctx, fp);
+      R.drawThermalControlZones(ctx, fp);
+    }
     if (fp.layers?.Exclusion_Areas !== false) {
       R.drawExclusionAreas(ctx, fp);
     }
-    console.log('Rendering Plan_Boundary:', fp.layers?.Plan_Boundary);
+    // console.log('Rendering Plan_Boundary:', fp.layers?.Plan_Boundary);
     if (fp.layers?.Plan_Boundary !== false) {
       R.drawWalls(ctx, fp, options);
     }
     if (fp.layers?.Core_Area !== false) {
       R.drawCoreAreas(ctx, fp);
     }
-    console.log('Rendering Core_Boundary:', fp.layers?.Core_Boundary);
+    // console.log('Rendering Core_Boundary:', fp.layers?.Core_Boundary);
     if (fp.layers?.Core_Boundary !== false) {
       R.drawCoreBoundaries(ctx, fp);
     }
-    console.log('Rendering Columns:', fp.layers?.Columns);
+    // console.log('Rendering Columns:', fp.layers?.Columns);
     if (fp.layers?.Columns !== false) {
       R.drawColumns(ctx, fp);
+    }
+    if (fp.layers?.Beams !== false) {
+      R.drawBeams(ctx, fp);
     }
     // Draw grid points if layer is enabled
     if (fp.layers?.Points !== false) {
@@ -74,6 +85,10 @@ export const DrawingService = {
     // Draw grid edges if layer is enabled
     if (fp.layers?.Edges !== false) {
       R.drawGridEdges(ctx, fp);
+    }
+    // Duct plan (BuildWeave duct routing results) — on top of grid
+    if (fp.layers?.Duct_Plan !== false) {
+      R.drawDuctPlan(ctx, fp);
     }
     R.drawEntrances(ctx, fp);
     if (options.showVertices) R.drawVertices(ctx, fp);
@@ -121,7 +136,7 @@ export const DrawingService = {
       R.drawGridOriginGhost(ctx, fp, options.ghost);
     }
 
-    if (appliedView) ctx.restore();
+    if (_hasVP) ctx.restore();
   },
 
   // keep convenient re-exports for existing callers
