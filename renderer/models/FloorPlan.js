@@ -303,8 +303,13 @@ export class FloorPlan {
     // and rename backend key thermal_region_geometry to frontend property subZones
     fp.Thermal_Zones = (obj.thermal_zones || []).map(({ thermal_region_geometry, vav_control_zones, ...tz }) => ({
       ...tz,
-      subZones: thermal_region_geometry || [],
-      thermalControlZones: vav_control_zones || []
+      // Accept both backend and frontend key variants when opening saved plans.
+      subZones: Array.isArray(thermal_region_geometry)
+        ? thermal_region_geometry
+        : (Array.isArray(tz.subZones) ? tz.subZones : []),
+      thermalControlZones: Array.isArray(vav_control_zones)
+        ? vav_control_zones
+        : (Array.isArray(tz.thermalControlZones) ? tz.thermalControlZones : [])
     }));
     fp.Beams = obj.Beams || [];
     fp.Points = obj.Points || [];
@@ -392,7 +397,7 @@ import {
 
 export class FloorPlan {
   constructor(name = Date.now()) {
-    this.schema_version = "1.0.0";
+    this.schema_version = "2.1.0";
     // Initialize units from the global config so new floorplans created
     // after the app starts inherit the current pxPerUnit and unit label.
     const pxPerUnit = getPixelsPerUnit() || 1;
@@ -503,16 +508,174 @@ export class FloorPlan {
       const lastId = this.wall_graph.nodes.at(-1).id;
       this.addEdge(lastId, firstId, false);
       this.boundaryClosed = true;
+      this._normalizeBoundaryClockwise();
       // Ensure the floorplan boundary is also represented as an area so
       // its surface can be measured and treated like other areas.
       this._updateBoundaryArea();
     }
   }
 
-  _updateBoundaryArea() {
-    // Build an ordered list of node ids describing the boundary polygon
+  _isBoundaryEdge(edge) {
+    return !!edge && (!edge.wallType || edge.wallType === 'boundary');
+  }
+
+  _nodePairKey(a, b) {
+    return (a < b) ? `${a}|${b}` : `${b}|${a}`;
+  }
+
+  _coordPairKey(a, b) {
+    const ak = `${a.x.toFixed(4)},${a.y.toFixed(4)}`;
+    const bk = `${b.x.toFixed(4)},${b.y.toFixed(4)}`;
+    return (ak < bk) ? `${ak}|${bk}` : `${bk}|${ak}`;
+  }
+
+  _polygonSignedArea(nodeIds) {
+    const nodesById = new Map((this.wall_graph.nodes || []).map(n => [n.id, n]));
+    let sum = 0;
+    for (let i = 0; i < nodeIds.length; i++) {
+      const a = nodesById.get(nodeIds[i]);
+      const b = nodesById.get(nodeIds[(i + 1) % nodeIds.length]);
+      if (!a || !b) continue;
+      sum += (a.x * b.y) - (b.x * a.y);
+    }
+    return sum / 2;
+  }
+
+  _traceBoundaryCycle() {
+    const boundaryEdges = (this.wall_graph.edges || []).filter(e => this._isBoundaryEdge(e));
+    if (boundaryEdges.length < 3) return null;
+
+    const adjacency = new Map();
+    for (const e of boundaryEdges) {
+      if (!adjacency.has(e.v1)) adjacency.set(e.v1, []);
+      if (!adjacency.has(e.v2)) adjacency.set(e.v2, []);
+      adjacency.get(e.v1).push({ edgeId: e.id, other: e.v2 });
+      adjacency.get(e.v2).push({ edgeId: e.id, other: e.v1 });
+    }
+
+    const start = (this.wall_graph.nodes || []).find(n => adjacency.has(n.id))?.id || boundaryEdges[0].v1;
+    if (!start) return null;
+
+    const visitedEdgeIds = new Set();
+    const nodeIds = [start];
+    const edgeIds = [];
+    let current = start;
+    let previousNode = null;
+
+    while (visitedEdgeIds.size < boundaryEdges.length) {
+      const choices = (adjacency.get(current) || []).filter(c => !visitedEdgeIds.has(c.edgeId));
+      if (choices.length === 0) break;
+
+      const choice = choices.find(c => c.other !== previousNode) || choices[0];
+      visitedEdgeIds.add(choice.edgeId);
+      edgeIds.push(choice.edgeId);
+      previousNode = current;
+      current = choice.other;
+
+      if (current === start) break;
+      nodeIds.push(current);
+    }
+
+    if (current !== start) return null;
+    if (edgeIds.length !== boundaryEdges.length) return null;
+    if (nodeIds.length < 3) return null;
+    return { nodeIds, edgeIds };
+  }
+
+  _normalizeBoundaryClockwise() {
     if (!this.boundaryClosed) return;
-    const nodeIds = this.wall_graph.nodes.map(n => n.id);
+
+    const cycle = this._traceBoundaryCycle();
+    if (!cycle) return;
+
+    const { nodeIds } = cycle;
+    const area = this._polygonSignedArea(nodeIds);
+    // In screen coordinates (Y down), positive signed area corresponds to clockwise winding.
+    const clockwiseIds = area >= 0 ? nodeIds : [nodeIds[0], ...nodeIds.slice(1).reverse()];
+
+    const nodesById = new Map((this.wall_graph.nodes || []).map(n => [n.id, n]));
+    const existingBoundaryEdges = (this.wall_graph.edges || []).filter(e => this._isBoundaryEdge(e));
+    const nonBoundaryEdges = (this.wall_graph.edges || []).filter(e => !this._isBoundaryEdge(e));
+
+    const edgeByPair = new Map();
+    for (const e of existingBoundaryEdges) {
+      edgeByPair.set(this._nodePairKey(e.v1, e.v2), e);
+    }
+
+    const rebuiltBoundaryEdges = [];
+    for (let i = 0; i < clockwiseIds.length; i++) {
+      const v1 = clockwiseIds[i];
+      const v2 = clockwiseIds[(i + 1) % clockwiseIds.length];
+      const oldEdge = edgeByPair.get(this._nodePairKey(v1, v2));
+      rebuiltBoundaryEdges.push({
+        ...(oldEdge || { id: this._genId('e'), locked: false }),
+        v1,
+        v2
+      });
+    }
+
+    const selectedEdgeId = this.selectedSegment != null
+      ? this.wall_graph.edges[this.selectedSegment]?.id
+      : null;
+
+    this.wall_graph.edges = [...rebuiltBoundaryEdges, ...nonBoundaryEdges];
+
+    const boundaryNodeSet = new Set(clockwiseIds);
+    const otherNodes = (this.wall_graph.nodes || []).filter(n => !boundaryNodeSet.has(n.id));
+    this.wall_graph.nodes = [
+      ...clockwiseIds.map(id => nodesById.get(id)).filter(Boolean),
+      ...otherNodes
+    ];
+
+    if (this.boundaryArea) {
+      const usesIds = (this.boundaryArea.vertices || []).every(v => typeof v === 'string');
+      this.boundaryArea.vertices = usesIds
+        ? [...clockwiseIds]
+        : clockwiseIds
+            .map(id => {
+              const n = nodesById.get(id);
+              return n ? [n.x, n.y] : null;
+            })
+            .filter(Boolean);
+    }
+
+    // Keep boundary wall direction aligned with boundary edge direction so wall metadata
+    // (openings, translucency) remains attached during serialization.
+    const boundaryWalls = (this.Walls || []).filter(w => !w.wallType || w.wallType === 'boundary');
+    const otherWalls = (this.Walls || []).filter(w => w.wallType && w.wallType !== 'boundary');
+    const wallByPair = new Map();
+    boundaryWalls.forEach(w => {
+      wallByPair.set(this._coordPairKey(w.start, w.end), w);
+    });
+
+    const usedWallIds = new Set();
+    const orderedBoundaryWalls = [];
+    for (let i = 0; i < clockwiseIds.length; i++) {
+      const a = nodesById.get(clockwiseIds[i]);
+      const b = nodesById.get(clockwiseIds[(i + 1) % clockwiseIds.length]);
+      if (!a || !b) continue;
+      const wall = wallByPair.get(this._coordPairKey(a, b));
+      if (!wall) continue;
+      wall.start = { x: a.x, y: a.y };
+      wall.end = { x: b.x, y: b.y };
+      orderedBoundaryWalls.push(wall);
+      usedWallIds.add(wall.id);
+    }
+    const unmatchedBoundaryWalls = boundaryWalls.filter(w => !usedWallIds.has(w.id));
+    this.Walls = [...orderedBoundaryWalls, ...unmatchedBoundaryWalls, ...otherWalls];
+
+    if (selectedEdgeId) {
+      const idx = this.wall_graph.edges.findIndex(e => e.id === selectedEdgeId);
+      this.selectedSegment = idx >= 0 ? idx : null;
+    }
+  }
+
+  _updateBoundaryArea() {
+    // Build an ordered list of boundary node ids from the closed boundary cycle.
+    if (!this.boundaryClosed) return;
+    const cycle = this._traceBoundaryCycle();
+    if (!cycle) return;
+    const nodeIds = cycle.nodeIds;
 
     // Ensure there are at least 3 nodes
     if (nodeIds.length < 3) return;
@@ -1035,6 +1198,8 @@ export class FloorPlan {
       this.addWall(cNode, n2, wallProps);
     }
 
+    this._normalizeBoundaryClockwise();
+
     this.clearSelection();
     return cId;
   }
@@ -1190,7 +1355,7 @@ export class FloorPlan {
         };
       }).filter(Boolean);
 
-    // ── core edges ────────────────────────────────────────────────────────
+    // ── core edges / cores ────────────────────────────────────────────────
     // From Walls with wallType === 'core'; skip degenerate zero-length walls
     const coreEdges = (this.Walls || [])
       .filter(w => w.wallType === 'core' && (w.start.x !== w.end.x || w.start.y !== w.end.y))
@@ -1203,6 +1368,47 @@ export class FloorPlan {
         locked: !!w.locked,
         openings: serializeOpenings(w.openings)
       }));
+
+    // Group disconnected core-edge sets into multiple core objects.
+    const corePointKey = (p) => `${p.x.toFixed(4)},${p.y.toFixed(4)}`;
+    const endpointToEdges = new Map();
+    coreEdges.forEach((e, i) => {
+      const a = corePointKey(e.start);
+      const b = corePointKey(e.end);
+      if (!endpointToEdges.has(a)) endpointToEdges.set(a, []);
+      if (!endpointToEdges.has(b)) endpointToEdges.set(b, []);
+      endpointToEdges.get(a).push(i);
+      endpointToEdges.get(b).push(i);
+    });
+
+    const visitedCoreEdge = new Set();
+    const cores = [];
+    for (let i = 0; i < coreEdges.length; i++) {
+      if (visitedCoreEdge.has(i)) continue;
+      const stack = [i];
+      const component = [];
+      while (stack.length) {
+        const idx = stack.pop();
+        if (visitedCoreEdge.has(idx)) continue;
+        visitedCoreEdge.add(idx);
+        component.push(coreEdges[idx]);
+        const e = coreEdges[idx];
+        const a = corePointKey(e.start);
+        const b = corePointKey(e.end);
+        (endpointToEdges.get(a) || []).forEach(j => { if (!visitedCoreEdge.has(j)) stack.push(j); });
+        (endpointToEdges.get(b) || []).forEach(j => { if (!visitedCoreEdge.has(j)) stack.push(j); });
+      }
+
+      const degree = new Map();
+      component.forEach(e => {
+        const a = corePointKey(e.start);
+        const b = corePointKey(e.end);
+        degree.set(a, (degree.get(a) || 0) + 1);
+        degree.set(b, (degree.get(b) || 0) + 1);
+      });
+      const closed = degree.size >= 3 && [...degree.values()].every(d => d === 2);
+      cores.push({ closed, edges: component });
+    }
 
     // ── grid points ───────────────────────────────────────────────────────
     const gridPoints = (this.Points || []).map(p => ({
@@ -1248,16 +1454,13 @@ export class FloorPlan {
     };
 
     return {
-      schema_version: "2.0.0",
+      schema_version: "2.1.0",
       name: this.name,
       units: this.units,
 
       boundary: { closed: this.boundaryClosed, edges: boundaryEdges },
 
-      core: {
-        closed: (this.Core_Boundary?.length > 0 || coreEdges.length > 0),
-        edges: coreEdges
-      },
+      cores,
 
       grid_points: gridPoints,
 
@@ -1286,7 +1489,7 @@ export class FloorPlan {
 
   static fromJSON(obj, options = {}) {
     // ── v2 schema detection ───────────────────────────────────────────────
-    if (obj.schema_version === "2.0.0" || obj.boundary?.edges) {
+    if ((typeof obj.schema_version === 'string' && obj.schema_version.startsWith('2.')) || obj.boundary?.edges) {
       return FloorPlan._fromJSONv2(obj, options);
     }
 
@@ -1491,11 +1694,15 @@ export class FloorPlan {
     .filter(a => a.vertices && a.vertices.length >= 3);
 
     // Use canonical Thermal_Zones only (no legacy migration fallback).
-    // Map backend key thermal_region_geometry to frontend property subZones
+    // Accept both backend and frontend key variants when opening saved plans.
     fp.Thermal_Zones = (obj.thermal_zones || []).map(({ thermal_region_geometry, vav_control_zones, ...tz }) => ({
       ...tz,
-      subZones: thermal_region_geometry || [],
-      thermalControlZones: vav_control_zones || []
+      subZones: Array.isArray(thermal_region_geometry)
+        ? thermal_region_geometry
+        : (Array.isArray(tz.subZones) ? tz.subZones : []),
+      thermalControlZones: Array.isArray(vav_control_zones)
+        ? vav_control_zones
+        : (Array.isArray(tz.thermalControlZones) ? tz.thermalControlZones : [])
     }));
     fp.Exclusion_Areas = (obj.Exclusion_Areas || []).map(ea => ({
       id: ea.id,
@@ -1670,13 +1877,15 @@ export class FloorPlan {
       fp._updateBoundaryArea();
     }
 
+    fp._normalizeBoundaryClockwise();
+
     return fp;
   }
 
   // ── v2 schema loader ──────────────────────────────────────────────────────
   static _fromJSONv2(obj, options = {}) {
     const fp = new FloorPlan(obj.name);
-    fp.schema_version = "2.0.0";
+    fp.schema_version = obj.schema_version || "2.1.0";
     fp.units = obj.units || { length: "m" };
     const ppu = obj.units?.pxPerUnit || 1;
     const px = v => v * ppu;
@@ -1738,34 +1947,46 @@ export class FloorPlan {
       };
     }
 
-    // ── core ──────────────────────────────────────────────────────────────
-    const cEdgesIn = obj.core?.edges || [];
-    const corePtObj = {};
-    for (let i = 0; i < cEdgesIn.length; i++) {
-      const e = cEdgesIn[i];
-      const sx = px(e.start.x), sy = px(e.start.y);
-      const ex = px(e.end.x),   ey = px(e.end.y);
-      const wallId = e.id || fp._genId('w');
-      fp.Walls.push(makeWall(wallId, {
-        start: { x: sx, y: sy }, end: { x: ex, y: ey },
-        wallType: 'core', translucent: e.translucent ?? false,
-        locked: !!e.locked, openings: deserializeOpenings(e.openings)
-      }));
-      // Add core edges to wall_graph so findClosestSegment can hit-test them.
-      // orCreate deduplicates nodes by coordinate, shared with boundary nodes.
-      const cn1 = orCreate(e.start.x, e.start.y);
-      const cn2 = orCreate(e.end.x, e.end.y);
-      if (cn1.id !== cn2.id) {
-        fp.wall_graph.edges.push({ id: wallId, v1: cn1.id, v2: cn2.id,
-          locked: !!e.locked, translucent: e.translucent ?? false, wallType: 'core' });
+    // ── cores ─────────────────────────────────────────────────────────────
+    // New schema: cores: [{ closed, edges:[...] }, ...]
+    // Backward compatibility: core: { closed, edges:[...] }
+    const coresIn = Array.isArray(obj.cores)
+      ? obj.cores
+      : (obj.core?.edges ? [obj.core] : []);
+    const coreBoundaryList = [];
+    coresIn.forEach((coreIn) => {
+      const cEdgesIn = coreIn?.edges || [];
+      if (!cEdgesIn.length) return;
+
+      const corePtObj = {};
+      for (let i = 0; i < cEdgesIn.length; i++) {
+        const e = cEdgesIn[i];
+        const sx = px(e.start.x), sy = px(e.start.y);
+        const ex = px(e.end.x),   ey = px(e.end.y);
+        const wallId = e.id || fp._genId('w');
+        fp.Walls.push(makeWall(wallId, {
+          start: { x: sx, y: sy }, end: { x: ex, y: ey },
+          wallType: 'core', translucent: e.translucent ?? false,
+          locked: !!e.locked, openings: deserializeOpenings(e.openings)
+        }));
+        // Add core edges to wall_graph so findClosestSegment can hit-test them.
+        // orCreate deduplicates nodes by coordinate, shared with boundary nodes.
+        const cn1 = orCreate(e.start.x, e.start.y);
+        const cn2 = orCreate(e.end.x, e.end.y);
+        if (cn1.id !== cn2.id) {
+          fp.wall_graph.edges.push({ id: wallId, v1: cn1.id, v2: cn2.id,
+            locked: !!e.locked, translucent: e.translucent ?? false, wallType: 'core' });
+        }
+        corePtObj[`Pt_${i}`] = [sx, sy, 0];
       }
-      corePtObj[`Pt_${i}`] = [sx, sy, 0];
-    }
+
+      corePtObj[`Pt_${cEdgesIn.length}`] = [px(cEdgesIn[0].start.x), px(cEdgesIn[0].start.y), 0];
+      coreBoundaryList.push(corePtObj);
+    });
     // wall_graph.nodes may have grown — keep it in sync
     fp.wall_graph.nodes = [...nodeByKey.values()];
-    if (cEdgesIn.length > 0) {
-      corePtObj[`Pt_${cEdgesIn.length}`] = [px(cEdgesIn[0].start.x), px(cEdgesIn[0].start.y), 0];
-      fp.Core_Boundary = [corePtObj];
+    if (coreBoundaryList.length > 0) {
+      fp.Core_Boundary = coreBoundaryList;
     }
 
     // ── grid points ───────────────────────────────────────────────────────
@@ -1784,8 +2005,13 @@ export class FloorPlan {
     fp.Thermal_Zones = (obj.thermal_zones || []).map(({ thermal_region_geometry, vav_control_zones, ...tz }) => ({
       ...tz,
       color: tz.color ?? null,
-      subZones: thermal_region_geometry || [],
-      thermalControlZones: vav_control_zones || []
+      // Accept both backend and frontend key variants when opening saved plans.
+      subZones: Array.isArray(thermal_region_geometry)
+        ? thermal_region_geometry
+        : (Array.isArray(tz.subZones) ? tz.subZones : []),
+      thermalControlZones: Array.isArray(vav_control_zones)
+        ? vav_control_zones
+        : (Array.isArray(tz.thermalControlZones) ? tz.thermalControlZones : [])
     }));
 
     // ── structural ────────────────────────────────────────────────────────
@@ -1849,6 +2075,7 @@ export class FloorPlan {
     };
 
     fp.requirements = obj.requirements || { bathrooms: 1 };
+    fp._normalizeBoundaryClockwise();
     return fp;
   }
 

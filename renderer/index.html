@@ -48,6 +48,7 @@
         <button id="saveFloorplanBtn">Save Floorplan</button>
         <button id="optimiseBtn">optimise</button>
         <button id="stopOptBtn" style="display:none; background:#c0392b; color:#fff; border:none; border-radius:4px; padding:4px 10px; cursor:pointer;">stop</button>
+        <button id="continueOptBtn" style="display:none; background:#0f5f2e; color:#fff; border:none; border-radius:4px; padding:4px 10px; cursor:pointer;">continue</button>
         <div id="optimiseStatus" style="display:none; font-family:'Courier New',monospace; font-size:10px; color:#aaa; margin-top:6px; line-height:1.5;"></div>
       </div>
     </div>
@@ -139,6 +140,12 @@
         <div class="cg-header">Thermal Zones</div>
         <div class="cg-body">
           <ul id="thermalZonesList" class="ea-list"></ul>
+          <div id="thermalEditor" class="thermal-editor">
+            <div id="thermalSelectionLabel" class="thermal-selection-label">Selected: none</div>
+            <label class="cg-label" for="thermalAirReqInput">Air req (L/s·m²)</label>
+            <input id="thermalAirReqInput" type="number" min="0" step="0.1" placeholder="e.g. 7.5">
+            <button id="applyThermalAirBtn" class="gp-btn" disabled>Apply Air Requirement</button>
+          </div>
         </div>
       </div>
       

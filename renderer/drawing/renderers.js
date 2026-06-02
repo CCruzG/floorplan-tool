@@ -1607,25 +1607,27 @@ export function drawGridPoints(ctx, fp) {
   if (!fp.Points || fp.Points.length === 0) return;
   
   ctx.save();
-  ctx.lineWidth = 1;
   
   fp.Points.forEach(point => {
     const isSelected  = fp.selectedPoints?.has(point.id) ?? fp.selectedPoint === point.id;
     const isColumn    = point.column !== false; // default true
+    const isMechanical = point.mechanical !== false; // default true
     const isEntry     = point.entryPoint === true;
 
     if (isColumn) {
       // Filled muted blue dot — column vertex
-      ctx.fillStyle   = isSelected ? '#ffaa00' : '#6b8caa';
-      ctx.strokeStyle = isSelected ? '#fff' : 'rgba(255,255,255,0.5)';
+      ctx.fillStyle   = isSelected ? '#ffaa00' : (isMechanical ? '#6b8caa' : '#c7ccd4');
+      ctx.strokeStyle = isSelected ? '#fff' : (isMechanical ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.85)');
+      ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.arc(point.x, point.y, isSelected ? 5 : 2.5, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     } else {
       // Hollow muted ring — non-column vertex
-      ctx.strokeStyle = isSelected ? '#ffaa00' : '#555f73';
+      ctx.strokeStyle = isSelected ? '#ffaa00' : (isMechanical ? '#555f73' : '#c3c9d1');
       ctx.fillStyle   = 'transparent';
+      ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.arc(point.x, point.y, isSelected ? 5 : 2.5, 0, Math.PI * 2);
       ctx.stroke();
@@ -1663,6 +1665,24 @@ export function drawGridEdges(ctx, fp) {
     }
   });
   
+  ctx.restore();
+}
+
+export function drawSelectionBox(ctx, start, end) {
+  if (!start || !end) return;
+
+  const x = Math.min(start.x, end.x);
+  const y = Math.min(start.y, end.y);
+  const w = Math.abs(end.x - start.x);
+  const h = Math.abs(end.y - start.y);
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(255, 170, 0, 0.14)';
+  ctx.strokeStyle = 'rgba(255, 170, 0, 0.95)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([6, 4]);
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeRect(x, y, w, h);
   ctx.restore();
 }
 
@@ -1752,6 +1772,10 @@ export function drawThermalZones(ctx, fp) {
     const isInternal = region.type === 'internal' || region.orientation === null || region.orientation === undefined;
     const palette = _zoneColour(ri, isInternal);
     const label = _orientationName(region.orientation);
+    const isSelectedZone = fp.selectedThermalZoneIndex === ri;
+    const selectedSubZone = fp.selectedThermalSubZoneIndex;
+    const selectedSubSource = fp.selectedThermalSubZoneSource || 'sub';
+    const hasControlZones = Array.isArray(region.thermalControlZones) && region.thermalControlZones.length > 0;
     const validRings = [];
 
     (subZones || []).forEach((subZone) => {
@@ -1782,6 +1806,39 @@ export function drawThermalZones(ctx, fp) {
     ctx.fillStyle = palette.fill;
     ctx.fill();
 
+    // Draw boundaries so selected thermal regions are clearly visible.
+    validRings.forEach((coords, subIdx) => {
+      ctx.beginPath();
+      coords.forEach((pt, i) => {
+        const cx = toCanvas(pt[0]);
+        const cy = toCanvas(pt[1]);
+        if (i === 0) ctx.moveTo(cx, cy);
+        else ctx.lineTo(cx, cy);
+      });
+      ctx.closePath();
+
+      const isSelectedSub = isSelectedZone
+        && selectedSubSource === 'sub'
+        && Number.isInteger(selectedSubZone)
+        && selectedSubZone === subIdx;
+      ctx.strokeStyle = isSelectedSub
+        ? '#ffe082'
+        : palette.stroke;
+      ctx.lineWidth = isSelectedSub ? 2.6 : 1.2;
+      ctx.stroke();
+
+      // If control zones are not available, label each sub-region directly.
+      if (!hasControlZones) {
+        const rcx = coords.reduce((s, p) => s + toCanvas(p[0]), 0) / coords.length;
+        const rcy = coords.reduce((s, p) => s + toCanvas(p[1]), 0) / coords.length;
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#1a1a1a';
+        ctx.fillText(`Zone ${ri + 1}.${subIdx + 1}`, rcx, rcy + 11);
+      }
+    });
+
     const first = validRings[0];
     const xs = first.map(p => toCanvas(p[0]));
     const ys = first.map(p => toCanvas(p[1]));
@@ -1791,7 +1848,9 @@ export function drawThermalZones(ctx, fp) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = palette.stroke;
-    ctx.fillText(label, cx, cy);
+    ctx.fillText(`Zone ${ri + 1}`, cx, cy - 8);
+    ctx.font = '10px monospace';
+    ctx.fillText(label, cx, cy + 7);
   });
 
   ctx.restore();
@@ -1842,8 +1901,14 @@ export function drawThermalControlZones(ctx, fp) {
 
     const controlZones = region.thermalControlZones ?? [];
     if (!controlZones.length) return;
+    const isSelectedZone = fp.selectedThermalZoneIndex === ri;
+    const selectedSubZone = fp.selectedThermalSubZoneIndex;
+    const selectedSubSource = fp.selectedThermalSubZoneSource || 'sub';
 
     controlZones.forEach((cz, ci) => {
+      const subAir = Array.isArray(region.subZoneAirRequirements)
+        ? region.subZoneAirRequirements[ci]
+        : null;
       const polygon = cz.polygon;
       if (Array.isArray(polygon) && polygon.length >= 3) {
         const coords = polygon
@@ -1866,10 +1931,16 @@ export function drawThermalControlZones(ctx, fp) {
             ? `rgba(140,140,140,${fillAlpha})`
             : `hsla(${hue},${sat},${lightness}%,${fillAlpha})`;
           ctx.fill();
-          ctx.strokeStyle = isInternal
-            ? `rgba(90,90,90,${strokeAlpha})`
-            : `hsla(${hue},${sat},${Math.max(30, lightness - 20)}%,${strokeAlpha})`;
-          ctx.lineWidth = 1.2;
+          const isSelectedControl = isSelectedZone
+            && selectedSubSource === 'control'
+            && Number.isInteger(selectedSubZone)
+            && selectedSubZone === ci;
+          ctx.strokeStyle = isSelectedControl
+            ? '#ffe082'
+            : (isInternal
+              ? `rgba(90,90,90,${strokeAlpha})`
+              : `hsla(${hue},${sat},${Math.max(30, lightness - 20)}%,${strokeAlpha})`);
+          ctx.lineWidth = isSelectedControl ? 2.4 : 1.2;
           ctx.setLineDash([4, 2]);
           ctx.stroke();
           ctx.setLineDash([]);
@@ -1877,13 +1948,19 @@ export function drawThermalControlZones(ctx, fp) {
           const cx = coords.reduce((s, p) => s + p[0], 0) / coords.length;
           const cy = coords.reduce((s, p) => s + p[1], 0) / coords.length;
           const loadStr = cz.load != null ? `${Math.round(cz.load)} W` : `cz${ci}`;
-          ctx.font = '9px monospace';
+          ctx.font = '10px monospace';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillStyle = isInternal
             ? `rgba(90,90,90,0.9)`
             : `hsla(${hue},${sat},${Math.max(25, lightness - 25)}%,0.9)`;
-          ctx.fillText(loadStr, cx, cy);
+          ctx.fillText(`Zone ${ri + 1}.${ci + 1}`, cx, cy - 6);
+          ctx.font = '9px monospace';
+          ctx.fillText(loadStr, cx, cy + 7);
+          if (Number.isFinite(subAir)) {
+            ctx.font = '8px monospace';
+            ctx.fillText(`${subAir.toFixed(2)} L/s·m²`, cx, cy + 18);
+          }
           return;
         }
       }
@@ -1962,13 +2039,19 @@ export function drawThermalControlZones(ctx, fp) {
       const cx = gridCoords.reduce((s, p) => s + p.x, 0) / gridCoords.length;
       const cy = gridCoords.reduce((s, p) => s + p.y, 0) / gridCoords.length;
       const loadStr = cz.load != null ? `${Math.round(cz.load)} W` : `cz${ci}`;
-      ctx.font = '9px monospace';
+      ctx.font = '10px monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = isInternal
         ? `rgba(90,90,90,0.9)`
         : `hsla(${hue},${sat},${Math.max(25, lightness - 25)}%,0.9)`;
-      ctx.fillText(loadStr, cx, cy);
+      ctx.fillText(`Zone ${ri + 1}.${ci + 1}`, cx, cy - 6);
+      ctx.font = '9px monospace';
+      ctx.fillText(loadStr, cx, cy + 7);
+      if (Number.isFinite(subAir)) {
+        ctx.font = '8px monospace';
+        ctx.fillText(`${subAir.toFixed(2)} L/s·m²`, cx, cy + 18);
+      }
     });
   });
 

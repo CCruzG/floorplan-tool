@@ -391,6 +391,8 @@ function setupCanvasGridPanel(onUpdate) {
 export function bindUI(store, canvas, mouse) {
   const ctx = canvas.getContext('2d');
   let _currentFilePath = null;  // path of the currently open/saved file
+  let _boxSelect = null; // active drag-box in content space
+  let _suppressNextClick = false;
 
   canvas.addEventListener('mousedown', (e) => {
     const rect = canvas.getBoundingClientRect();
@@ -464,6 +466,39 @@ export function bindUI(store, canvas, mouse) {
     return { x: (sx - vp.tx) / vp.scale, y: (sy - vp.ty) / vp.scale };
   }
 
+  function _rectFromPoints(a, b) {
+    return {
+      minX: Math.min(a.x, b.x),
+      minY: Math.min(a.y, b.y),
+      maxX: Math.max(a.x, b.x),
+      maxY: Math.max(a.y, b.y),
+    };
+  }
+
+  function _applyBoxPointSelection(fp, rect, mode) {
+    const pts = fp?.Points || [];
+    const insideIds = new Set(
+      pts
+        .filter(p => p.x >= rect.minX && p.x <= rect.maxX && p.y >= rect.minY && p.y <= rect.maxY)
+        .map(p => p.id)
+    );
+
+    if (!fp.selectedPoints) fp.selectedPoints = new Set();
+
+    if (mode === 'add') {
+      insideIds.forEach(id => fp.selectedPoints.add(id));
+    } else if (mode === 'subtract') {
+      insideIds.forEach(id => fp.selectedPoints.delete(id));
+    } else {
+      fp.selectedPoints = insideIds;
+    }
+
+    fp.selectedPoint = fp.selectedPoints.size === 1 ? [...fp.selectedPoints][0] : null;
+    fp.selectedSegment = null;
+    fp.selectedCore = false;
+    _setThermalSelection(store, null, null);
+  }
+
   // Fit all plan content to the canvas with padding.
   function _zoomExtents() {
     const fp = store.active;
@@ -528,6 +563,7 @@ export function bindUI(store, canvas, mouse) {
       showVertices: true,
       ghost: mouse,
       constrain: mouse.constrain,
+      selectionBox: mouse.selectionBox || null,
       viewport: store.viewport,
       tempArea: store.tempAreaActive ? store.tempArea : null,
       tempCore: store.tempCoreActive ? store.tempCore : null,
@@ -695,6 +731,20 @@ export function bindUI(store, canvas, mouse) {
     const c = _toContent(sx, sy);
     mouse.x = c.x;
     mouse.y = c.y;
+        if (_boxSelect?.active) {
+          _boxSelect.end = { x: c.x, y: c.y };
+          _boxSelect.mode = e.altKey ? 'subtract' : (e.shiftKey ? 'add' : 'replace');
+          const dragDx = sx - _boxSelect.startScreen.x;
+          const dragDy = sy - _boxSelect.startScreen.y;
+          _boxSelect.moved = (dragDx * dragDx + dragDy * dragDy) > 16;
+          mouse.selectionBox = {
+            start: _boxSelect.start,
+            end: _boxSelect.end,
+          };
+          store.notify();
+          return;
+        }
+
     // We only read modifier state during movement for visual cue
     mouse.constrain = e.shiftKey;
 
@@ -739,6 +789,24 @@ export function bindUI(store, canvas, mouse) {
       const c = _toContent(e.clientX - rect.left, e.clientY - rect.top);
       store.dragStart = { x: c.x, y: c.y };
       store.active.draggingSegment = store.active.selectedSegment;
+      return;
+    }
+
+    if (store.mode === 'select' && e.button === 0 && store.active) {
+      const rect = canvas.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const c = _toContent(sx, sy);
+      _boxSelect = {
+        active: true,
+        start: { x: c.x, y: c.y },
+        end: { x: c.x, y: c.y },
+        startScreen: { x: sx, y: sy },
+        moved: false,
+        mode: e.altKey ? 'subtract' : (e.shiftKey ? 'add' : 'replace'),
+      };
+      mouse.selectionBox = { start: _boxSelect.start, end: _boxSelect.end };
+      store.notify();
     }
   });
 
@@ -748,6 +816,21 @@ export function bindUI(store, canvas, mouse) {
       return;
     }
     if (store.mode === "select" && store.active) {
+      if (_boxSelect?.active) {
+        const cRect = _rectFromPoints(_boxSelect.start, _boxSelect.end);
+        const didDrag = _boxSelect.moved;
+        const mode = _boxSelect.mode;
+        _boxSelect = null;
+        mouse.selectionBox = null;
+
+        if (didDrag) {
+          _applyBoxPointSelection(store.active, cRect, mode);
+          _suppressNextClick = true;
+          store.update(store.active);
+          return;
+        }
+      }
+
       store.active.draggingSegment = null;
       store.dragStart = null;
       store.update(store.active); // commit final state
@@ -767,6 +850,11 @@ export function bindUI(store, canvas, mouse) {
   });
 
   canvas.addEventListener('click', (e) => {
+    if (_suppressNextClick) {
+      _suppressNextClick = false;
+      return;
+    }
+
     if (!store.active) return;
 
     const rect = canvas.getBoundingClientRect();
@@ -994,6 +1082,7 @@ export function bindUI(store, canvas, mouse) {
       let nearPt = null, nearDist = 8;
       pts.forEach(p => { const d = Math.hypot(x - p.x, y - p.y); if (d < nearDist) { nearDist = d; nearPt = p; } });
       if (nearPt) {
+        _setThermalSelection(store, null, null);
         store.active.selectedSegment = null;
         if (!store.active.selectedPoints) store.active.selectedPoints = new Set();
         if (e.shiftKey) {
@@ -1011,8 +1100,23 @@ export function bindUI(store, canvas, mouse) {
         store.update(store.active);
         return;
       }
+
+      const thermalHit = store.active.layers?.Thermal_Zones !== false
+        ? pickThermalRegionAtPoint(store.active, x, y)
+        : null;
+      if (thermalHit) {
+        store.active.selectedSegment = null;
+        store.active.selectedCore = false;
+        store.active.selectedPoints = new Set();
+        store.active.selectedPoint = null;
+        _setThermalSelection(store, thermalHit.zoneIndex, thermalHit.subZoneIndex, thermalHit.subZoneSource);
+        store.update(store.active);
+        return;
+      }
+
       const seg = findClosestSegment(store.active, { x, y });
       if (seg) {
+        _setThermalSelection(store, null, null);
         store.active.selectedPoints = new Set();
         store.active.selectedPoint = null;
         store.active.selectedCore = false;
@@ -1040,12 +1144,14 @@ export function bindUI(store, canvas, mouse) {
               .map(k => coreBdry[k])
           : [];
         if (corePoly.length >= 3 && store.active.layers?.Core_Boundary !== false && store.active._isPointInPolygon(x, y, corePoly)) {
+          _setThermalSelection(store, null, null);
           store.active.selectedCore = true;
           store.active.selectedSegment = null;
           store.active.selectedPoints = new Set();
           store.active.selectedPoint = null;
           store.update(store.active);
         } else {
+          _setThermalSelection(store, null, null);
           store.active.clearSelection();
           store.update(store.active);
         }
@@ -1609,6 +1715,7 @@ export function bindUI(store, canvas, mouse) {
 
   const btnOptimise = document.getElementById('optimiseBtn');
   const btnStop     = document.getElementById('stopOptBtn');
+  const btnContinue = document.getElementById('continueOptBtn');
   const aiError = document.getElementById('ai-error');
 
   if (btnOptimise) {
@@ -1623,6 +1730,7 @@ export function bindUI(store, canvas, mouse) {
       btnOptimise.disabled = true;
       btnOptimise.textContent = 'running… 0s';
       if (btnStop) btnStop.style.display = '';
+      if (btnContinue) btnContinue.style.display = 'none';
       if (aiError) aiError.style.display = 'none';
 
       let _activeJobId = null;
@@ -1637,31 +1745,81 @@ export function bindUI(store, canvas, mouse) {
 
       const statusEl = document.getElementById('optimiseStatus');
       const _optStart = Date.now();
-      const _phaseLabels = { segmentation: 'segmentation', structural: 'structural', zones: 'zone partition', duct: 'duct routing' };
+      const _phaseLabels = {
+        segmentation: 'regions',
+        structural: 'structural',
+        zones: 'thermal zones',
+        duct: 'duct routing',
+      };
       const _phaseOrder  = ['segmentation', 'structural', 'zones', 'duct'];
-      let _currentPhase = _phaseOrder[0];
+      let _currentPhase = 'structural';
       if (statusEl) {
         statusEl.style.display = 'block';
-        statusEl.textContent = `phase 1/${_phaseOrder.length}: segmentation  0s`;
+        statusEl.textContent = 'phase: structural  0s';
       }
+      let _isPaused = false;
       const _timerInterval = setInterval(() => {
+        if (_isPaused) return;
         const elapsed = Math.round((Date.now() - _optStart) / 1000);
-        const idx = _phaseOrder.indexOf(_currentPhase);
-        if (statusEl) statusEl.textContent = `phase ${idx + 1}/${_phaseOrder.length}: ${_phaseLabels[_currentPhase]}  ${elapsed}s`;
+        if (statusEl) statusEl.textContent = `phase: ${_phaseLabels[_currentPhase] || _currentPhase}  ${elapsed}s`;
         btnOptimise.textContent = `running… ${elapsed}s`;
       }, 1000);
+
+      const waitForContinue = (buttonLabel, message) => new Promise((resolve) => {
+        if (!btnContinue) {
+          resolve(window.confirm(message));
+          return;
+        }
+
+        _isPaused = true;
+        if (statusEl) statusEl.textContent = `paused: ${message}`;
+        if (aiError) {
+          aiError.style.display = 'block';
+          aiError.style.color = '#e6a817';
+          aiError.textContent = message;
+        }
+
+        btnContinue.textContent = buttonLabel;
+        btnContinue.style.display = '';
+
+        const onAbort = () => {
+          _isPaused = false;
+          btnContinue.style.display = 'none';
+          btnContinue.onclick = null;
+          resolve(false);
+        };
+
+        btnContinue.onclick = () => {
+          _isPaused = false;
+          abortCtrl.signal.removeEventListener('abort', onAbort);
+          btnContinue.style.display = 'none';
+          btnContinue.onclick = null;
+          resolve(true);
+        };
+
+        abortCtrl.signal.addEventListener('abort', onAbort, { once: true });
+      });
 
       // Helper: apply a partial or full data dict to the active floorplan
       const applyData = (d) => {
         if (!d) return;
         if (Array.isArray(d.thermal_zones) && d.thermal_zones.length) {
-          const prevColors = (fp.Thermal_Zones || []).map(z => ({ color: z.color ?? null, alpha: z.alpha ?? null }));
+          const prevMeta = (fp.Thermal_Zones || []).map(z => ({
+            color: z.color ?? null,
+            alpha: z.alpha ?? null,
+            air_requirement: Number.isFinite(z.air_requirement) ? z.air_requirement : null,
+            subZoneAirRequirements: Array.isArray(z.subZoneAirRequirements) ? [...z.subZoneAirRequirements] : [],
+          }));
           fp.Thermal_Zones = d.thermal_zones.map(({ thermal_region_geometry, vav_control_zones, ...tz }, i) => ({
             ...tz,
             subZones: thermal_region_geometry || [],
             thermalControlZones: vav_control_zones || [],
-            color: tz.color ?? prevColors[i]?.color ?? null,
-            alpha: tz.alpha ?? prevColors[i]?.alpha ?? null,
+            color: tz.color ?? prevMeta[i]?.color ?? null,
+            alpha: tz.alpha ?? prevMeta[i]?.alpha ?? null,
+            air_requirement: Number.isFinite(tz.air_requirement) ? tz.air_requirement : prevMeta[i]?.air_requirement,
+            subZoneAirRequirements: Array.isArray(tz.subZoneAirRequirements)
+              ? tz.subZoneAirRequirements
+              : (prevMeta[i]?.subZoneAirRequirements || []),
           }));
         }
         // Refresh the thermal zones panel whenever zone data changes
@@ -1707,7 +1865,10 @@ export function bindUI(store, canvas, mouse) {
         }
 
         // Apply duct-planning results.
-        const rawDuctPlan = d?.mechanical_components?.duct_plan;
+        const rawDuctPlan = d?.mechanical_components?.duct_plan
+          || d?.mechanical_components?.ductPlan
+          || d?.ductPlan
+          || d?.Duct_Plan;
         if (Array.isArray(rawDuctPlan)) {
           fp.Duct_Plan = rawDuctPlan;
 
@@ -1767,34 +1928,151 @@ export function bindUI(store, canvas, mouse) {
           return;
         }
 
-        const planJson = fp.toJSON();
-        const units = fp.units || { length: getUnitLabel() || 'm', pxPerUnit: getPixelsPerUnit() || 1 };
+        const runStage = async (phases, pollIntervalMs = 2000) => {
+          const planJson = fp.toJSON();
+          const units = fp.units || { length: getUnitLabel() || 'm', pxPerUnit: getPixelsPerUnit() || 1 };
 
-        const started = await startOptimisation(planJson, units);
-        if (!started.ok) {
-          if (aiError) { aiError.style.display = 'block'; aiError.textContent = `Optimisation failed: ${started.error}`; }
-          return;
-        }
-        _activeJobId = started.job_id;
+          if (phases.length > 0) _currentPhase = phases[0];
 
-        const result = await pollOptimisation(started.job_id, (phase, data) => {
-          // New data for a phase (in-progress or just completed) — apply and redraw
-          _currentPhase = _phaseOrder[Math.min(_phaseOrder.indexOf(phase) + 1, _phaseOrder.length - 1)];
-          applyData(data);
+          const started = await startOptimisation(planJson, units, { phases });
+          if (!started.ok) {
+            if (aiError) {
+              aiError.style.display = 'block';
+              aiError.textContent = `Optimisation failed: ${started.error}`;
+            }
+            return { ok: false, error: started.error };
+          }
+          _activeJobId = started.job_id;
+
+          const result = await pollOptimisation(started.job_id, (phase, data) => {
+            // Apply each phase result as it arrives.
+            const inStageIdx = phases.indexOf(phase);
+            if (inStageIdx >= 0 && inStageIdx < phases.length - 1) {
+              _currentPhase = phases[inStageIdx + 1];
+            } else {
+              const globalIdx = _phaseOrder.indexOf(phase);
+              _currentPhase = _phaseOrder[Math.min(globalIdx + 1, _phaseOrder.length - 1)] || phase;
+            }
+            applyData(data);
+            store.notify();
+          }, pollIntervalMs, abortCtrl.signal);
+
+          _activeJobId = null;
+
+          if (!result.ok) {
+            if (!result.cancelled && !abortCtrl.signal.aborted && aiError) {
+              aiError.style.display = 'block';
+              aiError.textContent = `Optimisation failed: ${result.error}`;
+            }
+            return result;
+          }
+
+          applyData(result.data);
           store.notify();
-        }, 2000, abortCtrl.signal);
+          return result;
+        };
 
-        if (!result.ok) {
-          if (!result.cancelled && !abortCtrl.signal.aborted) {
-            if (aiError) { aiError.style.display = 'block'; aiError.textContent = `Optimisation failed: ${result.error}`; }
+        const hasExistingStructural =
+          (Array.isArray(fp.Columns) && fp.Columns.length > 0) ||
+          (Array.isArray(fp.Beams) && fp.Beams.length > 0);
+
+        const thermalZoneCount = () => (Array.isArray(fp.Thermal_Zones) ? fp.Thermal_Zones.length : 0);
+        const hasThermalGeometry = () => (fp.Thermal_Zones || []).some(_hasThermalGeometry);
+
+        let shouldRunStructural = true;
+        if (hasExistingStructural) {
+          shouldRunStructural = window.confirm(
+            'Existing structural elements were found. Click OK to re-run structural optimisation, or Cancel to keep them and continue to the next step.'
+          );
+        }
+
+        if (shouldRunStructural) {
+          const structuralResult = await runStage(['structural']);
+          if (!structuralResult.ok) return;
+
+          const continueAfterStructural = await waitForContinue(
+            'continue to thermal decision',
+            'Structural optimisation complete. Review columns/beams, then click Continue.'
+          );
+          if (!continueAfterStructural) {
+            if (aiError) {
+              aiError.style.display = 'block';
+              aiError.style.color = '#e6a817';
+              aiError.textContent = 'Optimisation paused after structural stage.';
+            }
+            return;
+          }
+        }
+
+        let hasThermalZones = thermalZoneCount() > 0;
+        let shouldRunThermal = !hasThermalZones;
+        if (hasThermalZones) {
+          shouldRunThermal = window.confirm(
+            'Existing thermal zones/regions were found. Click OK to re-generate thermal regions + zones, or Cancel to keep existing data and continue to duct routing.'
+          );
+        }
+
+        if (shouldRunThermal) {
+          // Stage 2a: region segmentation only.
+          const segResult = await runStage(['segmentation']);
+          if (!segResult.ok) return;
+
+          const continueToZones = await waitForContinue(
+            'continue to zone partitioning',
+            'Thermal regions are segmented. Review/edit the regions, then click Continue to partition them into thermal zones.'
+          );
+          if (!continueToZones) {
+            if (aiError) {
+              aiError.style.display = 'block';
+              aiError.style.color = '#e6a817';
+              aiError.textContent = 'Optimisation paused after region segmentation for manual region edits.';
+            }
+            return;
+          }
+
+          // Stage 2b: zone partitioning of the segmented regions.
+          const zoneResult = await runStage(['zones']);
+          if (!zoneResult.ok) return;
+
+          const continueToDuct = await waitForContinue(
+            'continue to duct routing',
+            'Thermal zones and regions are ready. Select thermal zones/regions and edit air requirements, then click Continue to run duct routing.'
+          );
+          if (!continueToDuct) {
+            if (aiError) {
+              aiError.style.display = 'block';
+              aiError.style.color = '#e6a817';
+              aiError.textContent = 'Optimisation paused after thermal stage for manual air-flow edits.';
+            }
+            return;
+          }
+        }
+
+        hasThermalZones = thermalZoneCount() > 0;
+        if (hasThermalZones && !hasThermalGeometry()) {
+          if (aiError) {
+            aiError.style.display = 'block';
+            aiError.textContent = 'Thermal zones exist but have no region geometry. Please regenerate thermal zones before duct routing.';
           }
           return;
         }
 
-        // Final full result
-        applyData(result.data);
-        store.notify();
-        if (aiError) aiError.style.display = 'none';
+        // Stage 3: Duct routing when thermal zones are present.
+        if (hasThermalZones) {
+          const ductResult = await runStage(['duct'], 700);
+          if (!ductResult.ok) return;
+        } else {
+          if (aiError) {
+            aiError.style.display = 'block';
+            aiError.textContent = 'Duct routing skipped: thermal zones are still missing.';
+          }
+          return;
+        }
+
+        if (aiError) {
+          aiError.style.display = 'none';
+          aiError.style.color = '';
+        }
 
       } catch (err) {
         if (aiError && !abortCtrl.signal.aborted) {
@@ -1806,6 +2084,10 @@ export function bindUI(store, canvas, mouse) {
         btnOptimise.disabled = false;
         btnOptimise.textContent = 'optimise';
         if (btnStop) btnStop.style.display = 'none';
+        if (btnContinue) {
+          btnContinue.style.display = 'none';
+          btnContinue.onclick = null;
+        }
         if (statusEl) statusEl.style.display = 'none';
       }
     });
@@ -1932,6 +2214,128 @@ function _subregionFormat(sub) {
   return (sub.length && sub[0] && typeof sub[0].x === 'number') ? '{x,y}' : 'unknown';
 }
 
+function _validControlZonePolygons(region) {
+  const controlZones = Array.isArray(region?.thermalControlZones) ? region.thermalControlZones : [];
+  return controlZones
+    .map((cz, i) => ({
+      polygon: Array.isArray(cz?.polygon)
+        ? cz.polygon.filter(pt => pt && typeof pt.x === 'number' && typeof pt.y === 'number')
+        : [],
+      load: Number.isFinite(cz?.load) ? cz.load : null,
+      index: i,
+    }))
+    .filter(cz => cz.polygon.length >= 3);
+}
+
+function _getDisplayedThermalRegions(region) {
+  const controlPolys = _validControlZonePolygons(region);
+  if (controlPolys.length > 0) {
+    return {
+      source: 'control',
+      items: controlPolys.map(cz => cz.polygon),
+      loads: controlPolys.map(cz => cz.load),
+    };
+  }
+  const subZones = Array.isArray(region?.subZones) ? region.subZones : [];
+  return {
+    source: 'sub',
+    items: subZones,
+    loads: [],
+  };
+}
+
+function _hasThermalGeometry(region) {
+  return Array.isArray(region?.subZones) && region.subZones.some(sub => Array.isArray(sub) && sub.length >= 3);
+}
+
+function _setThermalSelection(store, zoneIndex = null, subZoneIndex = null, subZoneSource = null) {
+  if (!store?.active) return;
+  const fp = store.active;
+  if (!Number.isInteger(zoneIndex) || zoneIndex < 0 || zoneIndex >= (fp.Thermal_Zones || []).length) {
+    fp.selectedThermalZoneIndex = null;
+    fp.selectedThermalSubZoneIndex = null;
+    fp.selectedThermalSubZoneSource = null;
+    store.selectedAreaId = null;
+    return;
+  }
+  fp.selectedThermalZoneIndex = zoneIndex;
+  fp.selectedThermalSubZoneIndex = Number.isInteger(subZoneIndex) ? subZoneIndex : null;
+  fp.selectedThermalSubZoneSource = Number.isInteger(subZoneIndex) ? (subZoneSource || 'sub') : null;
+  const region = fp.Thermal_Zones[zoneIndex];
+  store.selectedAreaId = region?.id ?? null;
+}
+
+function _getSelectedThermalRegion(store) {
+  const zi = store?.active?.selectedThermalZoneIndex;
+  if (!Number.isInteger(zi)) return null;
+  const zones = store.active?.Thermal_Zones || [];
+  return zones[zi] || null;
+}
+
+function refreshThermalEditor(store) {
+  const labelEl = document.getElementById('thermalSelectionLabel');
+  const inputEl = document.getElementById('thermalAirReqInput');
+  const applyBtn = document.getElementById('applyThermalAirBtn');
+  if (!labelEl || !inputEl || !applyBtn) return;
+
+  const region = _getSelectedThermalRegion(store);
+  const subIdx = store?.active?.selectedThermalSubZoneIndex;
+  const subSource = store?.active?.selectedThermalSubZoneSource;
+
+  if (!region) {
+    labelEl.textContent = 'Selected: none';
+    inputEl.value = '';
+    inputEl.disabled = true;
+    applyBtn.disabled = true;
+    return;
+  }
+
+  const zoneIdx = store.active.selectedThermalZoneIndex;
+  const zoneLabel = `Zone ${zoneIdx + 1}`;
+  if (Number.isInteger(subIdx)) {
+    const regionLabel = subSource === 'control' ? 'Control Region' : 'Region';
+    labelEl.textContent = `Selected: ${zoneLabel} / ${regionLabel} ${subIdx + 1}`;
+  } else {
+    labelEl.textContent = `Selected: ${zoneLabel}`;
+  }
+
+  if (!Array.isArray(region.subZoneAirRequirements)) {
+    region.subZoneAirRequirements = [];
+  }
+
+  const currentAir = Number.isInteger(subIdx)
+    ? (subSource === 'control'
+      ? (Array.isArray(region.thermalControlZones) ? region.thermalControlZones[subIdx]?.load : null)
+      : region.subZoneAirRequirements[subIdx])
+    : (Number.isFinite(region.air_requirement) ? region.air_requirement : null);
+
+  inputEl.value = Number.isFinite(currentAir) ? String(currentAir) : '';
+  inputEl.disabled = false;
+  applyBtn.disabled = false;
+
+  applyBtn.onclick = () => {
+    const val = parseFloat(inputEl.value);
+    if (!Number.isFinite(val) || val <= 0) {
+      alert('Air flow requirement must be a positive number.');
+      return;
+    }
+    if (Number.isInteger(subIdx)) {
+      if (subSource === 'control') {
+        if (!Array.isArray(region.thermalControlZones)) region.thermalControlZones = [];
+        const cz = region.thermalControlZones[subIdx];
+        if (cz && typeof cz === 'object') {
+          cz.load = val;
+        }
+      } else {
+        region.subZoneAirRequirements[subIdx] = val;
+      }
+    } else {
+      region.air_requirement = val;
+    }
+    store.update(store.active);
+  };
+}
+
 export function refreshThermalZonesList(store) {
   const listEl = document.getElementById('thermalZonesList');
   if (!listEl) return;
@@ -1946,9 +2350,17 @@ export function refreshThermalZonesList(store) {
   regions.forEach((region, ri) => {
     const isInternal = region.type === 'internal' || region.orientation === null || region.orientation === undefined;
     const colour = _tzColour(ri, isInternal);
+    const selectedZone = store.active?.selectedThermalZoneIndex === ri;
+    const displayedRegions = _getDisplayedThermalRegions(region);
+    const subZones = displayedRegions.items;
+    const displayedSource = displayedRegions.source;
 
     const li = document.createElement('li');
-    li.style.cssText = 'display:flex; align-items:flex-start; gap:6px; padding:4px 0; border-bottom:1px solid #2a2a2a;';
+    li.style.cssText = `display:flex; align-items:flex-start; gap:6px; padding:4px 0; border-bottom:1px solid #2a2a2a; cursor:pointer; ${selectedZone ? 'background:#182018;' : ''}`;
+    li.onclick = () => {
+      _setThermalSelection(store, ri, null);
+      store.update(store.active);
+    };
 
     // Colour swatch
     const swatch = document.createElement('span');
@@ -1972,6 +2384,9 @@ export function refreshThermalZonesList(store) {
     const totalLoad = (Number.isFinite(region.total_load) && region.total_load > 0)
       ? region.total_load
       : (vavCount > 0 ? summedVavLoad : null);
+    const zoneAirReq = Number.isFinite(region.air_requirement)
+      ? `${region.air_requirement.toFixed(2)} L/s·m²`
+      : null;
     const air = totalLoad !== null
       ? `${totalLoad.toFixed(0)} L/s`
       : (airReqPerArea !== null ? `${airReqPerArea.toFixed(2)} L/s·m²` : '—');
@@ -1979,9 +2394,36 @@ export function refreshThermalZonesList(store) {
     info.innerHTML =
       `<strong>Zone ${ri + 1}</strong> · ${type} · ${orient}<br>` +
       `vav zones: ${vavCount}<br>` +
-      `air req: ${air}`;
+      `air req: ${air}` +
+      (zoneAirReq ? `<br>edited req: ${zoneAirReq}` : '');
 
     li.appendChild(info);
+
+    if (subZones.length) {
+      const subList = document.createElement('div');
+      subList.style.cssText = 'display:flex; flex-direction:column; gap:2px; margin-left:4px;';
+      subZones.forEach((sub, si) => {
+        const subBtn = document.createElement('button');
+        const isSelectedSub = selectedZone
+          && store.active?.selectedThermalSubZoneIndex === si
+          && (store.active?.selectedThermalSubZoneSource || 'sub') === displayedSource;
+        const subAir = Array.isArray(region.subZoneAirRequirements) ? region.subZoneAirRequirements[si] : null;
+        if (displayedSource === 'control') {
+          const load = displayedRegions.loads[si];
+          subBtn.textContent = `region ${si + 1} (${_subregionVertexCount(sub)} pts${Number.isFinite(load) ? `, ${Math.round(load)} W` : ''}${Number.isFinite(subAir) ? `, ${subAir.toFixed(2)} L/s·m²` : ''})`;
+        } else {
+          subBtn.textContent = `region ${si + 1} (${_subregionVertexCount(sub)} pts${Number.isFinite(subAir) ? `, ${subAir.toFixed(2)} L/s·m²` : ''})`;
+        }
+        subBtn.style.cssText = `font-size:10px; padding:2px 4px; text-align:left; background:${isSelectedSub ? '#223822' : '#1a1a1a'}; color:#bbb; border:1px solid #333; cursor:pointer;`;
+        subBtn.onclick = (ev) => {
+          ev.stopPropagation();
+          _setThermalSelection(store, ri, si, displayedSource);
+          store.update(store.active);
+        };
+        subList.appendChild(subBtn);
+      });
+      li.appendChild(subList);
+    }
 
     // Delete button
     const del = document.createElement('button');
@@ -1989,6 +2431,7 @@ export function refreshThermalZonesList(store) {
     del.title = 'Remove zone';
     del.style.cssText = 'margin-left:auto; background:none; border:none; color:#888; cursor:pointer; font-size:14px; flex-shrink:0;';
     del.onclick = () => {
+      _setThermalSelection(store, null, null);
       store.active.Thermal_Zones.splice(ri, 1);
       store.update(store.active);
       refreshThermalZonesList(store);
@@ -1996,6 +2439,8 @@ export function refreshThermalZonesList(store) {
     li.appendChild(del);
     listEl.appendChild(li);
   });
+
+  refreshThermalEditor(store);
 }
 
 // Helper: commit the core boundary, add to model, and reset temp state
@@ -2058,4 +2503,34 @@ function findClosestAreaVertex(fp, point, maxDist = SNAP_TO_NODE_DIST) {
   });
 
   return best;
+}
+
+function pickThermalRegionAtPoint(fp, x, y) {
+  if (!fp || !Array.isArray(fp.Thermal_Zones) || fp.Thermal_Zones.length === 0) return null;
+
+  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
+  const pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const toCanvas = mm => mm * pxPerUnit / mmPerUnit;
+
+  for (let zi = 0; zi < fp.Thermal_Zones.length; zi++) {
+    const region = fp.Thermal_Zones[zi];
+    const displayedRegions = _getDisplayedThermalRegions(region);
+    const subZones = displayedRegions.items;
+    const source = displayedRegions.source;
+    for (let si = 0; si < subZones.length; si++) {
+      const sub = subZones[si];
+      if (!Array.isArray(sub) || sub.length < 3) continue;
+      const poly = sub
+        .map(pt => (pt && typeof pt.x === 'number' && typeof pt.y === 'number') ? [toCanvas(pt.x), toCanvas(pt.y)] : null)
+        .filter(Boolean);
+      if (poly.length < 3) continue;
+
+      const inside = fp._isPointInPolygon ? fp._isPointInPolygon(x, y, poly) : false;
+      const onEdge = fp._isPointOnPolygonEdge ? fp._isPointOnPolygonEdge(x, y, poly, 3) : false;
+      if (inside || onEdge) {
+        return { zoneIndex: zi, subZoneIndex: si, subZoneSource: source };
+      }
+    }
+  }
+  return null;
 }

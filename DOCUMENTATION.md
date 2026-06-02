@@ -115,18 +115,26 @@ The current application is centered around a canvas editor with a floating tool 
 ## Data Model and JSON
 
 ### Current Export Format
-The active `toJSON()` implementation exports schema version `2.0.0`.
+The active `toJSON()` implementation exports schema version `2.1.0`.
 
 The v2 format includes:
 - top-level metadata such as `schema_version`, `name`, and `units`
 - `boundary.edges`
-- `core.edges`
+- `cores[].edges` (canonical)
 - `grid_points`
 - `exclusion_areas`
 - `thermal_zones`
 - `structural_components`
 - `mechanical_components`
 - `layers`
+
+Backward compatibility notes:
+- Loader accepts legacy `core` and normalizes to `cores` internally.
+- Server accepts both `core` and `cores` payload forms.
+
+Shareable references:
+- JSON Schema (2.1.0): `../examples/floorplan-schema-2.1.0.json`
+- Example payload template (2.1.0): `../examples/floorplan-template-2.1.0.json`
 
 Boundary and core edges are exported as objects with their own properties, including wall type, translucency, lock state, and serialized openings.
 

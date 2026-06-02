@@ -22,7 +22,7 @@ const API_BASE = 'http://127.0.0.1:5001';
  * BuildWeave instance shape (minimum required):
  * {
  *   "boundary": [ { "start": [x, y, 0], "end": [x, y, 0], "open": true }, ... ],
- *   "core":     [ { "Pt_0": [x, y, 0], "Pt_1": ..., ... }, ... ]   // optional
+ *   "cores":     [ { "Pt_0": [x, y, 0], "Pt_1": ..., ... }, ... ]   // optional
  * }
  *
  * Coordinates must be in millimetres.
@@ -54,19 +54,24 @@ export function floorplanToInstance(planJson, units) {
     })),
   };
 
-  // ── core (schema 2.0.0) ──────────────────────────────────────────────────────
-  const rawCore = planJson.core ?? {};
-  // BuildWeave expects core as a list of polygons, each { edges: [...] }
-  instance.core = rawCore.edges?.length
-    ? [{
-        edges: (rawCore.edges).map(e => ({
-          id: e.id,
-          start:      { x: toMm(e.start.x), y: toMm(e.start.y) },
-          end:        { x: toMm(e.end.x),   y: toMm(e.end.y) },
-          translucent: e.translucent ?? false,
-        })),
-      }]
-    : [];
+  // ── cores (schema 2.1.0) ─────────────────────────────────────────────────────
+  // toJSON() now emits `cores` as an array of { closed, edges } objects (one per
+  // disconnected core). Fall back to the legacy single-object { edges } shape.
+  const rawCores = Array.isArray(planJson.cores)
+    ? planJson.cores
+    : (planJson.cores?.edges?.length ? [planJson.cores] : []);
+  // BuildWeave expects cores as a list of polygons, each { edges: [...] }
+  instance.cores = rawCores
+    .filter(core => core?.edges?.length)
+    .map(core => ({
+      closed: core.closed ?? true,
+      edges: core.edges.map(e => ({
+        id: e.id,
+        start:      { x: toMm(e.start.x), y: toMm(e.start.y) },
+        end:        { x: toMm(e.end.x),   y: toMm(e.end.y) },
+        translucent: e.translucent ?? false,
+      })),
+    }));
 
   // ── grid_points (schema 2.0.0) ──────────────────────────────────────────────
   // Pass through to server; server builds points/edges/discretizedSize from these.
@@ -78,6 +83,88 @@ export function floorplanToInstance(planJson, units) {
     mechanical: p.mechanical ?? true,
     entryPoint: p.entryPoint ?? false,
   }));
+
+  // ── structural components (for reuse when skipping structural stage) ──────
+  const rawColumns = Array.isArray(planJson.Columns) ? planJson.Columns : [];
+  const columns = rawColumns
+    .map((c) => {
+      if (c && typeof c.x === 'number' && typeof c.y === 'number') {
+        // Preserve the column footprint width (used by duct routing to keep
+        // ducts out of columns). It shares the plan unit, like x/y.
+        const col = { x: toMm(c.x), y: toMm(c.y) };
+        if (Number.isFinite(c.width)) col.width = toMm(c.width);
+        return col;
+      }
+      if (Array.isArray(c) && c.length >= 2 && Number.isFinite(c[0]) && Number.isFinite(c[1])) {
+        return { x: toMm(c[0]), y: toMm(c[1]) };
+      }
+      if (c && typeof c === 'object') {
+        const polyPts = Object.keys(c)
+          .filter(k => /^Pt_\d+$/.test(k))
+          .sort((a, b) => parseInt(a.slice(3), 10) - parseInt(b.slice(3), 10))
+          .map(k => c[k])
+          .filter(v => Array.isArray(v) && Number.isFinite(v[0]) && Number.isFinite(v[1]));
+        if (polyPts.length > 0) {
+          const cx = polyPts.reduce((s, p) => s + p[0], 0) / polyPts.length;
+          const cy = polyPts.reduce((s, p) => s + p[1], 0) / polyPts.length;
+          return { x: toMm(cx), y: toMm(cy) };
+        }
+      }
+      return null;
+    })
+    .filter(Boolean);
+
+  const rawBeams = Array.isArray(planJson.Beams) ? planJson.Beams : [];
+  const beams = rawBeams
+    .map((b) => {
+      if (b?.start && b?.end) {
+        return {
+          start: { x: toMm(b.start.x), y: toMm(b.start.y) },
+          end: { x: toMm(b.end.x), y: toMm(b.end.y) },
+        };
+      }
+      if (b && typeof b === 'object' && Array.isArray(b.Pt_0) && Array.isArray(b.Pt_1)) {
+        return {
+          start: { x: toMm(b.Pt_0[0]), y: toMm(b.Pt_0[1]) },
+          end: { x: toMm(b.Pt_1[0]), y: toMm(b.Pt_1[1]) },
+        };
+      }
+      return null;
+    })
+    .filter(Boolean);
+
+  if (columns.length || beams.length) {
+    instance.structural_components = {
+      ...(instance.structural_components || {}),
+      units: { length: 'mm' },
+      columns,
+      beams,
+    };
+  }
+
+  // ── thermal zones (for reuse when skipping segmentation/zones stage) ──────
+  const rawThermalZones = Array.isArray(planJson.thermal_zones) ? planJson.thermal_zones : [];
+  if (rawThermalZones.length) {
+    instance.thermal_zones = rawThermalZones.map(zone => ({
+      ...zone,
+      // Accept both backend keys and frontend aliases.
+      thermal_region_geometry: ((zone.thermal_region_geometry || zone.subZones) || []).map(sub =>
+        (sub || [])
+          .map(pt => {
+            if (!pt) return null;
+            if (Number.isFinite(pt.x) && Number.isFinite(pt.y)) {
+              return { x: pt.x, y: pt.y };
+            }
+            if (Array.isArray(pt) && Number.isFinite(pt[0]) && Number.isFinite(pt[1])) {
+              return { x: pt[0], y: pt[1] };
+            }
+            return null;
+          })
+          .filter(Boolean)
+      ),
+      vav_control_zones: zone.vav_control_zones || zone.thermalControlZones || [],
+    }));
+  }
 
   // ── exclusion areas ───────────────────────────────────────────────────────
   // v2 toJSON() outputs 'exclusion_areas' (snake_case); fall back to PascalCase for legacy plans.
@@ -230,7 +317,8 @@ export async function pollOptimisation(jobId, onUpdate, interval = 2000, signal 
         timeoutHandle = setTimeout(tick, interval);
       }
     };
-    setTimeout(tick, interval);
+    // Poll once immediately so partial results are surfaced without initial delay.
+    tick();
   });
 }
 

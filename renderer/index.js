@@ -59,6 +59,7 @@ store.onChange(() => {
       showVertices: true,
       ghost: mouse,
       constrain: mouse.constrain,
+      selectionBox: mouse.selectionBox || null,
       viewport: store.viewport,
     });
     // console.log('[renderer] DrawingService.render invoked', {

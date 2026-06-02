@@ -509,6 +509,37 @@ body {
     color: var(--danger);
 }
 
+.thermal-editor {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.thermal-selection-label {
+    font-size: var(--fs-xs);
+    color: var(--text-dim);
+}
+
+#thermalAirReqInput {
+    width: 100%;
+    background: var(--bg-input);
+    color: var(--text);
+    border: 1px solid var(--border-mid);
+    border-radius: 0;
+    font-family: var(--font);
+    font-size: var(--fs-sm);
+    padding: 2px 4px;
+    outline: none;
+}
+
+#applyThermalAirBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 #layersPanel {
     background: var(--bg-panel);
     color: var(--text);

@@ -136,6 +136,10 @@ export const DrawingService = {
       R.drawGridOriginGhost(ctx, fp, options.ghost);
     }
 
+    if (options.selectionBox?.start && options.selectionBox?.end) {
+      R.drawSelectionBox(ctx, options.selectionBox.start, options.selectionBox.end);
+    }
+
     if (_hasVP) ctx.restore();
   },
 
