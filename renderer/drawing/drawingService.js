@@ -27,6 +27,8 @@ export const DrawingService = {
       ctx.setTransform(_vp.scale, 0, 0, _vp.scale, _vp.tx, _vp.ty);
     }
 
+    R.drawReferenceImage(ctx, fp);
+
     // Grid drawn inside the transform so it zooms / pans with the plan.
     R.drawBackgroundGrid(ctx, fp, options.gridSettings, _vp);
 

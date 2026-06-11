@@ -79,6 +79,31 @@ export function drawBoundaryArea(ctx, fp) {
   ctx.restore();
 }
 
+export function drawReferenceImage(ctx, fp) {
+  const ref = fp?.referenceImage;
+  if (!ref || ref.visible === false) return;
+
+  const img = ref.image;
+  if (!img || !img.width || !img.height) return;
+
+  const pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const x = (Number.isFinite(ref.x) ? ref.x : 0) * pxPerUnit;
+  const y = (Number.isFinite(ref.y) ? ref.y : 0) * pxPerUnit;
+  const widthUnits = Number.isFinite(ref.width) && ref.width > 0
+    ? ref.width
+    : Math.max(1, (img.width / pxPerUnit) * 0.75);
+  const width = widthUnits * pxPerUnit;
+  const height = Number.isFinite(ref.height) && ref.height > 0
+    ? ref.height * pxPerUnit
+    : width * (img.height / img.width);
+
+  ctx.save();
+  ctx.globalAlpha = Number.isFinite(ref.opacity) ? Math.max(0, Math.min(1, ref.opacity)) : 0.35;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(img, x, y, width, height);
+  ctx.restore();
+}
+
 export function drawAreas(ctx, fp) {
   const unified = [];
 

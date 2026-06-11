@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveFloorplan: (args) => ipcRenderer.invoke('save-floorplan', args),
   saveFloorplanSilent: (args) => ipcRenderer.invoke('save-floorplan-silent', args),
   openFloorplan: () => ipcRenderer.invoke('open-floorplan'),
+  pickReferenceAsset: () => ipcRenderer.invoke('pick-reference-asset'),
 
   // // new validator API
   // validateFloorplan: (plan) => {

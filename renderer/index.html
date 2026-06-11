@@ -70,8 +70,17 @@
       </div>
 
       <div id="jsonPanel" class="panel">
-        <h3>Floorplan JSON</h3>
-        <pre id="jsonOutput"></pre>
+        <div class="panel-tabs">
+          <button type="button" class="panel-tab active" data-panel-tab="dashboard">Dashboard</button>
+          <button type="button" class="panel-tab" data-panel-tab="json">JSON</button>
+        </div>
+        <div id="dashboardPanelView" class="panel-view active">
+          <div id="dashboardOutput" class="dashboard-output"></div>
+        </div>
+        <div id="jsonPanelView" class="panel-view">
+          <h3>Floorplan JSON</h3>
+          <pre id="jsonOutput"></pre>
+        </div>
       </div>
     </div>
     <div id="ai-debug" style="display:none; padding:8px; border:1px solid #ccc; margin-top:8px;"></div>

@@ -354,6 +354,165 @@ function refreshInspector(fp, store) {
   });
 }
 
+export function ensureReferenceImageLoaded(fp, notify) {
+  const ref = fp?.referenceImage;
+  if (!ref || ref.image || ref._loading || !ref.src) return;
+
+  ref._loading = true;
+  const img = new Image();
+  img.onload = () => {
+    ref.image = img;
+    ref.naturalWidth = ref.naturalWidth || img.naturalWidth;
+    ref.naturalHeight = ref.naturalHeight || img.naturalHeight;
+    ref._loading = false;
+    if (typeof notify === 'function') notify();
+  };
+  img.onerror = () => {
+    ref._loading = false;
+    ref.error = 'Failed to load reference image.';
+    if (typeof notify === 'function') notify();
+  };
+  img.src = ref.src;
+}
+
+function setActivePanelTab(tabName) {
+  const tabs = document.querySelectorAll('[data-panel-tab]');
+  const dashboardView = document.getElementById('dashboardPanelView');
+  const jsonView = document.getElementById('jsonPanelView');
+  tabs.forEach(btn => btn.classList.toggle('active', btn.dataset.panelTab === tabName));
+  if (dashboardView) dashboardView.classList.toggle('active', tabName === 'dashboard');
+  if (jsonView) jsonView.classList.toggle('active', tabName === 'json');
+}
+
+function refreshDashboardPanel(fp, store) {
+  const panel = document.getElementById('dashboardOutput');
+  if (!panel) return;
+
+  if (!fp) {
+    panel.innerHTML = '<div class="metric-card"><div class="metric-label">Dashboard</div><div class="metric-value">No floorplan loaded</div></div>';
+    return;
+  }
+
+  const nodeCount = (fp.wall_graph?.nodes || []).length;
+  const edgeCount = (fp.wall_graph?.edges || []).length;
+  const areaCount = (fp.areas || []).length;
+  const pointCount = (fp.Points || []).length;
+  const thermalCount = (fp.Thermal_Zones || []).length;
+  const columnCount = (fp.Columns || []).length;
+  const beamCount = (fp.Beams || []).length;
+  const ductCount = (fp.Duct_Plan || []).length;
+  const ref = fp.referenceImage || {};
+  const statusText = document.getElementById('optimiseStatus')?.textContent || 'idle';
+  const liveNote = document.getElementById('ai-error')?.textContent || 'Ready';
+  const pxPerUnit = fp.units?.pxPerUnit || 1;
+  const unitLabel = fp.units?.length || 'mm';
+  const opacityPercent = Math.round((Number.isFinite(ref.opacity) ? ref.opacity : 0.35) * 100);
+
+  panel.innerHTML = [
+    `<div class="dashboard-grid">`,
+    `<div class="metric-card"><div class="metric-label">Plan</div><div class="metric-value">${fp.name || 'Untitled'}</div><div class="metric-note">${fp.schema_version || 'schema n/a'} · ${unitLabel} · ${pxPerUnit.toFixed ? pxPerUnit.toFixed(2) : pxPerUnit} px/unit</div></div>`,
+    `<div class="metric-card"><div class="metric-label">Optimisation</div><div class="metric-value">${statusText}</div><div class="metric-note">${liveNote}</div></div>`,
+    `<div class="metric-card"><div class="metric-label">Geometry</div><div class="metric-value">${nodeCount} nodes</div><div class="metric-note">${edgeCount} edges · ${areaCount} areas · ${pointCount} grid points</div></div>`,
+    `<div class="metric-card"><div class="metric-label">Solver Output</div><div class="metric-value">${thermalCount} zones</div><div class="metric-note">${columnCount} columns · ${beamCount} beams · ${ductCount} duct paths</div></div>`,
+    `</div>`,
+    `<div class="dashboard-section">`,
+    `<div class="dashboard-section-title">Reference Image</div>`,
+    `<div class="dashboard-controls">`,
+    `<div class="dashboard-actions">`,
+    `<button type="button" id="importReferenceBtn" class="gp-btn">Import Reference</button>`,
+    `<button type="button" id="fitReferenceBtn" class="gp-btn">Fit to View</button>`,
+    `<button type="button" id="clearReferenceBtn" class="gp-btn gp-btn-clear">Remove</button>`,
+    `</div>`,
+    `<div class="cg-row"><label class="cg-label" for="referenceVisibleChk">Visible</label><input id="referenceVisibleChk" type="checkbox" ${ref.visible === false ? '' : 'checked'}></div>`,
+    `<div class="cg-row"><label class="cg-label" for="referenceXInput">X</label><input id="referenceXInput" type="number" step="0.1" value="${Number.isFinite(ref.x) ? ref.x : 0}"></div>`,
+    `<div class="cg-row"><label class="cg-label" for="referenceYInput">Y</label><input id="referenceYInput" type="number" step="0.1" value="${Number.isFinite(ref.y) ? ref.y : 0}"></div>`,
+    `<div class="cg-row"><label class="cg-label" for="referenceWidthInput">Width</label><input id="referenceWidthInput" type="number" min="0.1" step="0.1" value="${Number.isFinite(ref.width) ? ref.width : 10}"><span class="cg-unit">${unitLabel}</span></div>`,
+    `<div class="cg-row"><label class="cg-label" for="referenceOpacityInput">Opacity</label><input id="referenceOpacityInput" type="range" min="0" max="100" value="${opacityPercent}"><span class="cg-pct" id="referenceOpacityPct">${opacityPercent}%</span></div>`,
+    `<div class="dashboard-note">Use the reference image as a tracing underlay. Set the width in plan units to scale it, then adjust X/Y to align it with the drawing.</div>`,
+    ref.fileName ? `<div class="dashboard-note">Loaded: ${ref.fileName}</div>` : '',
+    `</div>`,
+    `</div>`,
+  ].join('');
+
+  const bindNumber = (id, callback) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', () => callback(parseFloat(el.value)));
+  };
+
+  bindNumber('referenceXInput', (value) => {
+    if (!fp.referenceImage || !Number.isFinite(value)) return;
+    fp.referenceImage.x = value;
+    store.update(fp);
+  });
+  bindNumber('referenceYInput', (value) => {
+    if (!fp.referenceImage || !Number.isFinite(value)) return;
+    fp.referenceImage.y = value;
+    store.update(fp);
+  });
+  bindNumber('referenceWidthInput', (value) => {
+    if (!fp.referenceImage || !Number.isFinite(value) || value <= 0) return;
+    fp.referenceImage.width = value;
+    store.update(fp);
+  });
+
+  const visibleChk = document.getElementById('referenceVisibleChk');
+  if (visibleChk) {
+    visibleChk.addEventListener('change', () => {
+      if (!fp.referenceImage) return;
+      fp.referenceImage.visible = visibleChk.checked;
+      store.update(fp);
+    });
+  }
+
+  const opacityInput = document.getElementById('referenceOpacityInput');
+  const opacityPct = document.getElementById('referenceOpacityPct');
+  if (opacityInput && opacityPct) {
+    opacityInput.addEventListener('input', () => {
+      if (!fp.referenceImage) return;
+      const value = Math.max(0, Math.min(100, parseInt(opacityInput.value, 10) || 0));
+      opacityPct.textContent = `${value}%`;
+      fp.referenceImage.opacity = value / 100;
+      store.update(fp);
+    });
+  }
+
+  document.getElementById('clearReferenceBtn')?.addEventListener('click', () => {
+    if (!fp.referenceImage) return;
+    fp.referenceImage = null;
+    store.update(fp);
+  });
+
+  document.getElementById('fitReferenceBtn')?.addEventListener('click', () => {
+    if (!fp.referenceImage) return;
+    const pxPerUnit = fp.units?.pxPerUnit || 1;
+    fp.referenceImage.width = Math.max(1, Math.round(((window.innerWidth || 1024) / pxPerUnit) * 0.55 * 100) / 100);
+    store.update(fp);
+  });
+
+  document.getElementById('importReferenceBtn')?.addEventListener('click', async () => {
+    if (!window.electronAPI?.pickReferenceAsset || !store.active) return;
+    const result = await window.electronAPI.pickReferenceAsset();
+    if (!result?.success || !result.asset) return;
+    store.active.referenceImage = {
+      fileName: result.asset.fileName,
+      filePath: result.asset.filePath,
+      mime: result.asset.mime,
+      src: result.asset.dataUrl,
+      naturalWidth: result.asset.naturalWidth,
+      naturalHeight: result.asset.naturalHeight,
+      x: 0,
+      y: 0,
+      width: Math.max(1, Math.round(((store.active.units?.pxPerUnit || 1) > 0 ? (window.innerWidth || 1024) / (store.active.units?.pxPerUnit || 1) : 10) * 0.45 * 100) / 100),
+      opacity: 0.35,
+      visible: true,
+      image: null,
+    };
+    ensureReferenceImageLoaded(store.active, () => store.update(store.active));
+    store.update(store.active);
+  });
+}
+
 
 function setupCanvasGridPanel(onUpdate) {
   const snapCb    = document.getElementById('cgSnapEnabled');
@@ -523,6 +682,11 @@ export function bindUI(store, canvas, mouse) {
   // initialize Canvas Grid panel controls
   setupCanvasGridPanel(() => store.notify());
 
+  document.querySelectorAll('[data-panel-tab]').forEach(btn => {
+    btn.addEventListener('click', () => setActivePanelTab(btn.dataset.panelTab || 'dashboard'));
+  });
+  setActivePanelTab('dashboard');
+
   // Floating palette drag support
   const palette = document.getElementById('toolPalette');
   const paletteTitle = palette?.querySelector('.palette-title');
@@ -609,6 +773,9 @@ export function bindUI(store, canvas, mouse) {
 
     // Refresh thermal zones panel
     refreshThermalZonesList(store);
+
+    ensureReferenceImageLoaded(store.active, () => store.update(store.active));
+    refreshDashboardPanel(store.active, store);
   });
 
   // Mode controls (example buttons)
@@ -1765,7 +1932,7 @@ export function bindUI(store, canvas, mouse) {
         btnOptimise.textContent = `running… ${elapsed}s`;
       }, 1000);
 
-      const waitForContinue = (buttonLabel, message) => new Promise((resolve) => {
+      const waitForContinue = (_buttonLabel, message) => new Promise((resolve) => {
         if (!btnContinue) {
           resolve(window.confirm(message));
           return;
@@ -1779,7 +1946,7 @@ export function bindUI(store, canvas, mouse) {
           aiError.textContent = message;
         }
 
-        btnContinue.textContent = buttonLabel;
+        btnContinue.textContent = 'continue';
         btnContinue.style.display = '';
 
         const onAbort = () => {
@@ -2209,6 +2376,26 @@ function _subregionVertexCount(sub) {
   return sub.filter(v => v && typeof v.x === 'number' && typeof v.y === 'number').length;
 }
 
+function _polygonArea(points) {
+  if (!Array.isArray(points) || points.length < 3) return 0;
+  let twiceArea = 0;
+  for (let i = 0; i < points.length; i++) {
+    const p1 = points[i];
+    const p2 = points[(i + 1) % points.length];
+    if (!p1 || !p2) continue;
+    if (!Number.isFinite(p1.x) || !Number.isFinite(p1.y) || !Number.isFinite(p2.x) || !Number.isFinite(p2.y)) continue;
+    twiceArea += (p1.x * p2.y) - (p2.x * p1.y);
+  }
+  return Math.abs(twiceArea) * 0.5;
+}
+
+function _thermalAreaInPlanUnits(store, polygon) {
+  const mmArea = _polygonArea(polygon);
+  const unit = store?.active?.units?.length || 'mm';
+  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[unit] ?? 1;
+  return mmArea / (mmPerUnit * mmPerUnit);
+}
+
 function _subregionFormat(sub) {
   if (!Array.isArray(sub)) return 'invalid';
   return (sub.length && sub[0] && typeof sub[0].x === 'number') ? '{x,y}' : 'unknown';
@@ -2354,6 +2541,9 @@ export function refreshThermalZonesList(store) {
     const displayedRegions = _getDisplayedThermalRegions(region);
     const subZones = displayedRegions.items;
     const displayedSource = displayedRegions.source;
+    const unitLabel = store.active?.units?.length || 'mm';
+    const zoneArea = subZones.reduce((sum, sub) => sum + _thermalAreaInPlanUnits(store, sub), 0);
+    const zoneAreaText = Number.isFinite(zoneArea) ? `${zoneArea.toFixed(2)} ${unitLabel}²` : '—';
 
     const li = document.createElement('li');
     li.style.cssText = `display:flex; align-items:flex-start; gap:6px; padding:4px 0; border-bottom:1px solid #2a2a2a; cursor:pointer; ${selectedZone ? 'background:#182018;' : ''}`;
@@ -2394,7 +2584,8 @@ export function refreshThermalZonesList(store) {
     info.innerHTML =
       `<strong>Zone ${ri + 1}</strong> · ${type} · ${orient}<br>` +
       `vav zones: ${vavCount}<br>` +
-      `air req: ${air}` +
+      `air req: ${air}<br>` +
+      `surface: ${zoneAreaText}` +
       (zoneAirReq ? `<br>edited req: ${zoneAirReq}` : '');
 
     li.appendChild(info);
@@ -2408,11 +2599,13 @@ export function refreshThermalZonesList(store) {
           && store.active?.selectedThermalSubZoneIndex === si
           && (store.active?.selectedThermalSubZoneSource || 'sub') === displayedSource;
         const subAir = Array.isArray(region.subZoneAirRequirements) ? region.subZoneAirRequirements[si] : null;
+        const subArea = _thermalAreaInPlanUnits(store, sub);
+        const subAreaText = Number.isFinite(subArea) ? `${subArea.toFixed(2)} ${unitLabel}²` : '—';
         if (displayedSource === 'control') {
           const load = displayedRegions.loads[si];
-          subBtn.textContent = `region ${si + 1} (${_subregionVertexCount(sub)} pts${Number.isFinite(load) ? `, ${Math.round(load)} W` : ''}${Number.isFinite(subAir) ? `, ${subAir.toFixed(2)} L/s·m²` : ''})`;
+          subBtn.textContent = `region ${si + 1} (${_subregionVertexCount(sub)} pts, ${subAreaText}${Number.isFinite(load) ? `, ${Math.round(load)} W` : ''}${Number.isFinite(subAir) ? `, ${subAir.toFixed(2)} L/s·m²` : ''})`;
         } else {
-          subBtn.textContent = `region ${si + 1} (${_subregionVertexCount(sub)} pts${Number.isFinite(subAir) ? `, ${subAir.toFixed(2)} L/s·m²` : ''})`;
+          subBtn.textContent = `region ${si + 1} (${_subregionVertexCount(sub)} pts, ${subAreaText}${Number.isFinite(subAir) ? `, ${subAir.toFixed(2)} L/s·m²` : ''})`;
         }
         subBtn.style.cssText = `font-size:10px; padding:2px 4px; text-align:left; background:${isSelectedSub ? '#223822' : '#1a1a1a'}; color:#bbb; border:1px solid #333; cursor:pointer;`;
         subBtn.onclick = (ev) => {

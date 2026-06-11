@@ -13,6 +13,7 @@ export class FloorPlan {
     this.Edges = []; // Valid connections between points
     this.Ducts = []; // Available duct specifications
     this.Duct_Plan = []; // Final duct routing solution
+    this.referenceImage = null; // Imported drawing reference
     
     // Layer visibility controls
     this.layers = {
@@ -316,6 +317,9 @@ export class FloorPlan {
     fp.Edges = obj.Edges || [];
     fp.Ducts = obj.Ducts || [];
     fp.Duct_Plan = obj.Duct_Plan || [];
+    fp.referenceImage = (obj.reference_image || obj.referenceImage)
+      ? { ...(obj.reference_image || obj.referenceImage), image: null }
+      : null;
     fp.layers = obj.layers || {
       Plan_Boundary: true,
       Core_Boundary: true,
@@ -1291,6 +1295,7 @@ export class FloorPlan {
       end:      { ...w.end },
       openings: (w.openings || []).map(o => ({ ...o }))
     }));
+    fp.referenceImage = this.referenceImage ? { ...this.referenceImage } : null;
 
     // Copy new structured element collections
     fp.openings    = (this.openings    || []).map(o => ({ ...o, position: { ...o.position } }));
@@ -1482,6 +1487,8 @@ export class FloorPlan {
         duct_configs: this.Ducts || [],
         duct_plan: this.Duct_Plan || []
       },
+
+      reference_image: this.referenceImage ? (({ image, _loading, ...rest }) => ({ ...rest }))(this.referenceImage) : null,
 
       layers
     };
@@ -2051,6 +2058,9 @@ export class FloorPlan {
     // ── mechanical ────────────────────────────────────────────────────────
     fp.Ducts = obj.mechanical_components?.duct_configs || obj.mechanical_components?.ducts || [];
     fp.Duct_Plan = obj.mechanical_components?.duct_plan || [];
+    fp.referenceImage = (obj.reference_image || obj.referenceImage)
+      ? { ...(obj.reference_image || obj.referenceImage), image: null }
+      : null;
 
     // ── openings ──────────────────────────────────────────────────────────
     fp.openings = (obj.openings || []).map(o => ({
