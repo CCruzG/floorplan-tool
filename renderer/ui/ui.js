@@ -16,6 +16,21 @@ import { checkHealth, startOptimisation, pollOptimisation, cancelOptimisation } 
 export const SNAP_TO_NODE_DIST = 10;   // pixels
 export const SNAP_TO_EDGE_DIST = 8;    // pixels
 
+// Returns the _coreId of the Core_Boundary entry that contains both endpoints of edge, or null.
+function _findCoreIdForEdge(fp, edge) {
+  const EPS = 1;
+  const n1 = (fp.wall_graph.nodes || []).find(n => n.id === edge.v1);
+  const n2 = (fp.wall_graph.nodes || []).find(n => n.id === edge.v2);
+  if (!n1 || !n2) return null;
+  for (const coreBdry of (fp.Core_Boundary || [])) {
+    const coords = Object.keys(coreBdry).filter(k => /^Pt_\d+$/.test(k)).map(k => coreBdry[k]);
+    const n1m = coords.some(([cx, cy]) => Math.abs(n1.x - cx) < EPS && Math.abs(n1.y - cy) < EPS);
+    const n2m = coords.some(([cx, cy]) => Math.abs(n2.x - cx) < EPS && Math.abs(n2.y - cy) < EPS);
+    if (n1m && n2m) return coreBdry._coreId || null;
+  }
+  return null;
+}
+
 function snapTo45(lastX, lastY, x, y) {
   const dx = x - lastX;
   const dy = y - lastY;
@@ -34,6 +49,13 @@ const gridSettings = {
   snapEnabled: true,
   spacingOverride: 2, // plan units; null = auto-compute
   lineOpacity: 0.5,
+};
+
+// Criteria/design-standard settings shared between the panel and the renderer
+const criteriaSettings = {
+  defaultAirReq: 7.5,  // l/s·m²
+  pinchVelocity: 8.0,  // m/s – ducts above this velocity are highlighted
+  showPinch: true,
 };
 
 // Returns the canvas-pixel spacing of one grid cell. Respects a manual
@@ -86,7 +108,7 @@ function refreshInspector(fp, store) {
       `<div class="inspector-header"><span class="inspector-kind">VAV Terminal</span></div>`,
       `<div class="inspector-body">`,
       `<div class="inspector-row"><span class="inspector-label">Grid ID</span><span class="inspector-value">${vav.ptId}</span></div>`,
-      `<div class="inspector-row"><span class="inspector-label">Load</span><span class="inspector-value">${vav.load.toFixed(2)} W</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Load</span><span class="inspector-value">${vav.load.toFixed(2)} l/s</span></div>`,
       pt ? `<div class="inspector-row"><span class="inspector-label">Entry Point</span><span class="inspector-value">${pt.entryPoint ? 'Yes' : 'No'}</span></div>` : '',
       `</div>`
     ].join('');
@@ -175,7 +197,7 @@ function refreshInspector(fp, store) {
       `</div>`
     ].join('');
     panel.querySelector('#insp-core-delete').addEventListener('click', () => {
-      fp.deleteCore();
+      fp.deleteCore(fp.selectedCore);
       store.update(fp);
     });
     return;
@@ -223,6 +245,8 @@ function refreshInspector(fp, store) {
   const translucent = wall?.translucent ?? (wallType === 'boundary');
   const locked      = edge.locked || false;
   const openings    = wall?.openings    ?? [];
+
+  const isCoreWall = (wallType === 'core');
 
   const openingRows = openings.map((o, i) => {
     const isWin = o.openingKind === 'window';
@@ -274,7 +298,9 @@ function refreshInspector(fp, store) {
     `<label class="insp-op-field">@ <input id="insp-new-t" type="number" min="0" max="1" step="0.05" value="0.5"></label>`,
     `<label class="insp-op-field">w <input id="insp-new-w" type="number" min="0" step="10" value="1200"></label>`,
     `<button id="insp-add-op">+ Add</button>`,
-    `</div></div></div>`
+    `</div></div>`,
+    isCoreWall ? `<div class="inspector-row" style="margin-top:6px;"><button id="insp-core-delete-wall" class="insp-btn insp-btn-danger">Delete Core</button></div>` : '',
+    `</div>`
   ].join('');
 
   // ── Wire event handlers ──────────────────────────────────────────────────
@@ -352,6 +378,11 @@ function refreshInspector(fp, store) {
     fp.addOpeningToWall(w.id, t, { openingKind: kind, width });
     store.update(fp);
   });
+
+  panel.querySelector('#insp-core-delete-wall')?.addEventListener('click', () => {
+    fp.deleteCore(_findCoreIdForEdge(fp, edge));
+    store.update(fp);
+  });
 }
 
 export function ensureReferenceImageLoaded(fp, notify) {
@@ -384,7 +415,7 @@ function setActivePanelTab(tabName) {
   if (jsonView) jsonView.classList.toggle('active', tabName === 'json');
 }
 
-function refreshDashboardPanel(fp, store) {
+function refreshDashboardPanel(fp, store, callbacks = {}) {
   const panel = document.getElementById('dashboardOutput');
   if (!panel) return;
 
@@ -407,20 +438,88 @@ function refreshDashboardPanel(fp, store) {
   const pxPerUnit = fp.units?.pxPerUnit || 1;
   const unitLabel = fp.units?.length || 'mm';
   const opacityPercent = Math.round((Number.isFinite(ref.opacity) ? ref.opacity : 0.35) * 100);
+  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[unitLabel] ?? 1000;
+
+  // ── Structure: beam length groups ────────────────────────────────────────────
+  const beamLengthGroups = {};
+  (fp.Beams || []).forEach(beam => {
+    if (!beam.start || !beam.end) return;
+    const dx = beam.end.x - beam.start.x;
+    const dy = beam.end.y - beam.start.y;
+    const pixelLen = Math.sqrt(dx * dx + dy * dy);
+    const lengthMm = Math.round(pixelLen / pxPerUnit * mmPerUnit / 10) * 10;
+    beamLengthGroups[lengthMm] = (beamLengthGroups[lengthMm] || 0) + 1;
+  });
+  const beamRows = Object.entries(beamLengthGroups)
+    .sort(([a], [b]) => Number(b) - Number(a))
+    .map(([mm, count]) => `<div class="dash-row"><span class="dash-row-label">${count} ×</span><span>${mm} mm</span></div>`)
+    .join('');
+
+  // ── Mechanical: duct linear metres per section ───────────────────────────────
+  const metersPerPixel = mmPerUnit / (pxPerUnit * 1000);
+  const pointMap = new Map();
+  (fp.Points || []).forEach(p => { if (p.id) pointMap.set(p.id, p); });
+  let totalDuctBranches = 0;
+  const ductSectionLm = {};
+  (fp.Duct_Plan || []).forEach(riser => {
+    (riser.ducts || []).forEach(duct => {
+      if (duct.length !== 5) return;
+      const [ptA_id, ptB_id, w, h] = duct;
+      totalDuctBranches++;
+      const key = `${Math.round(w * 1000)}×${Math.round(h * 1000)} mm`;
+      const pA = pointMap.get(ptA_id);
+      const pB = pointMap.get(ptB_id);
+      const segLm = (pA && pB)
+        ? Math.sqrt((pB.x - pA.x) ** 2 + (pB.y - pA.y) ** 2) * metersPerPixel
+        : 0;
+      ductSectionLm[key] = (ductSectionLm[key] || 0) + segLm;
+    });
+  });
+  const ductRows = Object.entries(ductSectionLm)
+    .sort(([a], [b]) => {
+      const area = s => { const m = s.match(/\d+/g); return m ? Number(m[0]) * Number(m[1]) : 0; };
+      return area(b) - area(a);
+    })
+    .map(([section, lm]) => `<div class="dash-row"><span class="dash-row-label">${section}</span><span>${lm.toFixed(1)} lm</span></div>`)
+    .join('');
+
+  const hasStructure = columnCount > 0 || beamCount > 0;
+  const hasMechanical = totalDuctBranches > 0;
 
   panel.innerHTML = [
     `<div class="dashboard-grid">`,
     `<div class="metric-card"><div class="metric-label">Plan</div><div class="metric-value">${fp.name || 'Untitled'}</div><div class="metric-note">${fp.schema_version || 'schema n/a'} · ${unitLabel} · ${pxPerUnit.toFixed ? pxPerUnit.toFixed(2) : pxPerUnit} px/unit</div></div>`,
     `<div class="metric-card"><div class="metric-label">Optimisation</div><div class="metric-value">${statusText}</div><div class="metric-note">${liveNote}</div></div>`,
-    `<div class="metric-card"><div class="metric-label">Geometry</div><div class="metric-value">${nodeCount} nodes</div><div class="metric-note">${edgeCount} edges · ${areaCount} areas · ${pointCount} grid points</div></div>`,
-    `<div class="metric-card"><div class="metric-label">Solver Output</div><div class="metric-value">${thermalCount} zones</div><div class="metric-note">${columnCount} columns · ${beamCount} beams · ${ductCount} duct paths</div></div>`,
     `</div>`,
+    hasStructure ? [
+      `<div class="dash-section-grid">`,
+      `<div class="dashboard-section">`,
+      `<div class="dashboard-section-title">Structure</div>`,
+      `<div class="metric-note">${columnCount} column${columnCount !== 1 ? 's' : ''} · ${beamCount} beam${beamCount !== 1 ? 's' : ''}</div>`,
+      beamRows ? `<div class="dash-table">${beamRows}</div>` : '',
+      `</div>`,
+      hasMechanical ? [
+        `<div class="dashboard-section">`,
+        `<div class="dashboard-section-title">Mechanical</div>`,
+        `<div class="metric-note">${totalDuctBranches} duct branch${totalDuctBranches !== 1 ? 'es' : ''}</div>`,
+        ductRows ? `<div class="dash-table">${ductRows}</div>` : '',
+        `</div>`,
+      ].join('') : '',
+      `</div>`,
+    ].join('') : (hasMechanical ? [
+      `<div class="dashboard-section">`,
+      `<div class="dashboard-section-title">Mechanical</div>`,
+      `<div class="metric-note">${totalDuctBranches} duct branch${totalDuctBranches !== 1 ? 'es' : ''}</div>`,
+      ductRows ? `<div class="dash-table">${ductRows}</div>` : '',
+      `</div>`,
+    ].join('') : ''),
     `<div class="dashboard-section">`,
     `<div class="dashboard-section-title">Reference Image</div>`,
     `<div class="dashboard-controls">`,
     `<div class="dashboard-actions">`,
     `<button type="button" id="importReferenceBtn" class="gp-btn">Import Reference</button>`,
     `<button type="button" id="fitReferenceBtn" class="gp-btn">Fit to View</button>`,
+    `<button type="button" id="scaleReferenceBtn" class="gp-btn"${!ref.src ? ' disabled' : ''}>Scale Reference</button>`,
     `<button type="button" id="clearReferenceBtn" class="gp-btn gp-btn-clear">Remove</button>`,
     `</div>`,
     `<div class="cg-row"><label class="cg-label" for="referenceVisibleChk">Visible</label><input id="referenceVisibleChk" type="checkbox" ${ref.visible === false ? '' : 'checked'}></div>`,
@@ -476,6 +575,10 @@ function refreshDashboardPanel(fp, store) {
       store.update(fp);
     });
   }
+
+  document.getElementById('scaleReferenceBtn')?.addEventListener('click', () => {
+    if (typeof callbacks.onScaleReference === 'function') callbacks.onScaleReference();
+  });
 
   document.getElementById('clearReferenceBtn')?.addEventListener('click', () => {
     if (!fp.referenceImage) return;
@@ -547,11 +650,165 @@ function setupCanvasGridPanel(onUpdate) {
   });
 }
 
+// ── Criteria panel ─────────────────────────────────────────────────────────────
+
+function setupCriteriaPanel(store) {
+  const defaultAirInput = document.getElementById('defaultAirReqInput');
+  const applyDefaultBtn = document.getElementById('applyDefaultAirBtn');
+  const pinchInput      = document.getElementById('pinchVelocityInput');
+  const showPinchChk    = document.getElementById('showPinchChk');
+  const pinchSummary    = document.getElementById('pinchSummary');
+
+  if (defaultAirInput) {
+    defaultAirInput.addEventListener('input', () => {
+      const v = parseFloat(defaultAirInput.value);
+      if (isFinite(v) && v > 0) criteriaSettings.defaultAirReq = v;
+    });
+  }
+
+  if (applyDefaultBtn) {
+    applyDefaultBtn.addEventListener('click', () => {
+      if (!store.active) return;
+      const req = criteriaSettings.defaultAirReq;
+      (store.active.Thermal_Zones || []).forEach(zone => {
+        if (!Number.isFinite(zone.air_requirement)) {
+          zone.air_requirement = req;
+        }
+      });
+      store.update(store.active);
+      refreshThermalZonesList(store);
+    });
+  }
+
+  if (pinchInput) {
+    pinchInput.addEventListener('input', () => {
+      const v = parseFloat(pinchInput.value);
+      if (isFinite(v) && v > 0) criteriaSettings.pinchVelocity = v;
+      store.notify();
+    });
+  }
+
+  if (showPinchChk) {
+    showPinchChk.addEventListener('change', () => {
+      criteriaSettings.showPinch = showPinchChk.checked;
+      store.notify();
+    });
+  }
+
+  // Update pinch summary whenever the store changes
+  store.onChange(() => {
+    if (!pinchSummary) return;
+    const fp = store.active;
+    if (!fp?.Duct_Plan?.length) { pinchSummary.textContent = ''; return; }
+    let pinchCount = 0;
+    const thresh = criteriaSettings.pinchVelocity;
+    (fp.Duct_Plan || []).forEach(riser => {
+      (riser.ducts || []).forEach(duct => {
+        if (duct.length !== 5) return;
+        const [,, w, h, flow] = duct;
+        const cs = (w || 0.3) * (h || 0.3);
+        if (cs > 0 && (flow * 0.001) / cs > thresh) pinchCount++;
+      });
+    });
+    pinchSummary.textContent = pinchCount
+      ? `⚠ ${pinchCount} pinch segment${pinchCount > 1 ? 's' : ''} > ${thresh} m/s`
+      : `✓ No pinch points above ${thresh} m/s`;
+    pinchSummary.style.color = pinchCount ? 'var(--warn)' : 'var(--accent-dim)';
+  });
+}
+
+// ── Solutions / snapshots ─────────────────────────────────────────────────────
+
+function _solutionMetrics(fp) {
+  const thermalZones = (fp.Thermal_Zones || []).length;
+  const ductRisers   = (fp.Duct_Plan || []).length;
+  const columns      = (fp.Columns || []).length;
+  const totalAirLoad = (fp.Duct_Plan || []).reduce((sum, riser) =>
+    sum + (riser.vav || []).reduce((s, v) => s + (Number.isFinite(v[1]) ? v[1] : 0), 0), 0
+  );
+  return { thermalZones, ductRisers, columns, totalAirLoad };
+}
+
+function refreshSolutionsPanel(store) {
+  const listEl = document.getElementById('solutionsList');
+  if (!listEl) return;
+  listEl.innerHTML = '';
+
+  if (!store.solutions.length) {
+    listEl.innerHTML = '<div style="color:var(--text-muted);font-size:11px;">No snapshots yet</div>';
+    return;
+  }
+
+  store.solutions.forEach((sol, idx) => {
+    const div = document.createElement('div');
+    div.className = 'solution-item';
+
+    div.innerHTML = [
+      `<div class="solution-name">`,
+      `  <span>${sol.name}</span>`,
+      `  <span class="solution-time">${sol.timestamp}</span>`,
+      `</div>`,
+      `<div class="solution-metrics">`,
+      `  zones: ${sol.metrics.thermalZones} · risers: ${sol.metrics.ductRisers}<br>`,
+      `  air: ${sol.metrics.totalAirLoad.toFixed(0)} l/s · cols: ${sol.metrics.columns}`,
+      `</div>`,
+      `<div class="solution-actions">`,
+      `  <button class="sol-load-btn">Load</button>`,
+      `  <button class="sol-del-btn">Delete</button>`,
+      `</div>`,
+    ].join('');
+
+    div.querySelector('.sol-load-btn').addEventListener('click', () => {
+      const currentLayers = store.active?.layers ? { ...store.active.layers } : null;
+      const fp = FloorPlan.fromJSON(sol.json);
+      if (currentLayers) fp.layers = currentLayers;
+      store.add(fp);
+      store.setActive(fp);
+      store.notify();
+    });
+
+    div.querySelector('.sol-del-btn').addEventListener('click', () => {
+      store.solutions.splice(idx, 1);
+      refreshSolutionsPanel(store);
+    });
+
+    listEl.appendChild(div);
+  });
+
+  // Comparison table when ≥ 2 solutions exist
+  if (store.solutions.length >= 2) {
+    const table = document.createElement('div');
+    table.style.cssText = 'margin-top:8px; border-top:1px solid var(--border); padding-top:6px;';
+    const keys = [
+      ['thermalZones', 'Zones'],
+      ['ductRisers',   'Risers'],
+      ['totalAirLoad', 'Air (l/s)'],
+      ['columns',      'Cols'],
+    ];
+    const rows = keys.map(([key, label]) => {
+      const vals = store.solutions.map(s =>
+        key === 'totalAirLoad' ? s.metrics[key].toFixed(0) : String(s.metrics[key])
+      );
+      return `<tr><td style="color:var(--text-muted);padding-right:6px;font-size:10px;">${label}</td>${vals.map(v => `<td style="font-size:10px;padding:1px 5px;text-align:right;">${v}</td>`).join('')}</tr>`;
+    });
+    table.innerHTML = [
+      `<div style="font-size:10px;color:var(--text-section);text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px;">Compare</div>`,
+      `<table style="border-collapse:collapse;width:100%;">`,
+      `<tr><td></td>${store.solutions.map((s, i) => `<td style="font-size:10px;color:var(--text-dim);text-align:right;padding:1px 5px;">#${i+1}</td>`).join('')}</tr>`,
+      ...rows,
+      `</table>`,
+    ].join('');
+    listEl.appendChild(table);
+  }
+}
+
 export function bindUI(store, canvas, mouse) {
   const ctx = canvas.getContext('2d');
   let _currentFilePath = null;  // path of the currently open/saved file
   let _boxSelect = null; // active drag-box in content space
   let _suppressNextClick = false;
+  let _calibratePoints = []; // content-space [{x,y}] for two-click scale calibration
+  let _refScalePoints = []; // content-space [{x,y}] for two-click reference image scaling
 
   canvas.addEventListener('mousedown', (e) => {
     const rect = canvas.getBoundingClientRect();
@@ -721,6 +978,12 @@ export function bindUI(store, canvas, mouse) {
 
   // Redraw on store change
   store.onChange(() => {
+    // Push criteria settings onto fp so renderers can read them without extra plumbing
+    if (store.active) {
+      store.active._pinchVelocityThreshold = criteriaSettings.pinchVelocity;
+      store.active._showPinchPoints = criteriaSettings.showPinch;
+    }
+
     // console.log("store.mode: " + store.mode);
     DrawingService.render(ctx, store.active, {
       mode: store.mode,
@@ -736,9 +999,74 @@ export function bindUI(store, canvas, mouse) {
       gridSettings,
     });
 
+    // Draw calibrate line on top of everything
+    if (store.mode === 'calibrate' && _calibratePoints.length > 0) {
+      ctx.save();
+      ctx.setTransform(vp.scale, 0, 0, vp.scale, vp.tx, vp.ty);
+      ctx.strokeStyle = '#ff9800';
+      ctx.lineWidth = 2 / vp.scale;
+      ctx.setLineDash([6 / vp.scale, 4 / vp.scale]);
+      ctx.beginPath();
+      ctx.moveTo(_calibratePoints[0].x, _calibratePoints[0].y);
+      if (_calibratePoints.length >= 2) {
+        ctx.lineTo(_calibratePoints[1].x, _calibratePoints[1].y);
+      } else {
+        ctx.lineTo(mouse.x, mouse.y);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      _calibratePoints.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 5 / vp.scale, 0, Math.PI * 2);
+        ctx.fillStyle = '#ff9800';
+        ctx.fill();
+      });
+      ctx.restore();
+    }
+
+    // Draw ref-scale measurement line on top of everything
+    if (store.mode === 'ref-scale' && _refScalePoints.length > 0) {
+      ctx.save();
+      ctx.setTransform(vp.scale, 0, 0, vp.scale, vp.tx, vp.ty);
+      ctx.strokeStyle = '#4fc3f7';
+      ctx.lineWidth = 2 / vp.scale;
+      ctx.setLineDash([6 / vp.scale, 4 / vp.scale]);
+      ctx.beginPath();
+      ctx.moveTo(_refScalePoints[0].x, _refScalePoints[0].y);
+      if (_refScalePoints.length >= 2) {
+        ctx.lineTo(_refScalePoints[1].x, _refScalePoints[1].y);
+      } else {
+        ctx.lineTo(mouse.x, mouse.y);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      _refScalePoints.forEach((p, i) => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 5 / vp.scale, 0, Math.PI * 2);
+        ctx.fillStyle = '#4fc3f7';
+        ctx.fill();
+        // Label: P1 stays anchored after scaling
+        if (i === 0) {
+          ctx.save();
+          ctx.scale(1 / vp.scale, 1 / vp.scale);
+          ctx.font = `${11}px monospace`;
+          ctx.fillStyle = '#4fc3f7';
+          ctx.textAlign = 'left';
+          ctx.fillText('anchor', (p.x * vp.scale) + 7, (p.y * vp.scale) - 4);
+          ctx.restore();
+        }
+      });
+      ctx.restore();
+    }
+
     const indicator = document.getElementById('canvasModeIndicator');
     if (indicator) {
-      indicator.textContent = `Mode: ${store.mode}`;
+      const calMsg = store.mode === 'calibrate'
+        ? `Calibrate — click ${_calibratePoints.length === 0 ? 'first' : 'second'} point`
+        : store.mode === 'ref-scale'
+          ? `Scale Reference — click ${_refScalePoints.length === 0 ? 'first' : 'second'} point on the reference image`
+          : `Mode: ${store.mode}`;
+      indicator.textContent = calMsg;
     }
 
     // Show/hide finishCoreBtn depending on current mode
@@ -749,12 +1077,13 @@ export function bindUI(store, canvas, mouse) {
 
     // Highlight active mode button in tool palette
     const modeButtonMap = {
-      select:      'selectModeBtn',
-      draw:        'drawModeBtn',
-      area:        'areaModeBtn',
-      core:        'coreModeBtn',
+      select:       'selectModeBtn',
+      draw:         'drawModeBtn',
+      area:         'areaModeBtn',
+      core:         'coreModeBtn',
       'grid-origin': null,
-      door:        'entranceModeBtn',
+      door:         'entranceModeBtn',
+      calibrate:    'calibrateLineBtn',
     };
     Object.entries(modeButtonMap).forEach(([mode, id]) => {
       if (!id) return;
@@ -775,7 +1104,21 @@ export function bindUI(store, canvas, mouse) {
     refreshThermalZonesList(store);
 
     ensureReferenceImageLoaded(store.active, () => store.update(store.active));
-    refreshDashboardPanel(store.active, store);
+    refreshDashboardPanel(store.active, store, {
+      onScaleReference: () => {
+        if (!store.active?.referenceImage) return;
+        _refScalePoints = [];
+        document.getElementById('refScaleOverlay').style.display = 'none';
+        store.setMode('ref-scale');
+        const statusEl = document.getElementById('calibrateStatus');
+        if (statusEl) {
+          statusEl.style.color = '#4fc3f7';
+          statusEl.textContent = 'Scale Reference — click first point on the reference image';
+          statusEl.style.display = 'block';
+        }
+        store.notify();
+      }
+    });
   });
 
   // Mode controls (example buttons)
@@ -881,6 +1224,166 @@ export function bindUI(store, canvas, mouse) {
     });
   }
 
+  // Calibrate-by-line scale tool
+  const calibrateLineBtn = document.getElementById('calibrateLineBtn');
+  if (calibrateLineBtn) {
+    calibrateLineBtn.addEventListener('click', () => {
+      _calibratePoints = [];
+      const overlay = document.getElementById('calibrateOverlay');
+      if (overlay) overlay.style.display = 'none';
+      store.setMode('calibrate');
+      const statusEl = document.getElementById('calibrateStatus');
+      if (statusEl) {
+        statusEl.style.color = '#ff9800';
+        statusEl.textContent = 'Click two points on the canvas to define a known distance';
+        statusEl.style.display = 'block';
+      }
+      store.notify();
+    });
+  }
+
+  const calibrateConfirmBtn = document.getElementById('calibrateConfirmBtn');
+  if (calibrateConfirmBtn) {
+    calibrateConfirmBtn.addEventListener('click', () => {
+      if (_calibratePoints.length < 2) return;
+      const dist = parseFloat(document.getElementById('calibrateDistInput')?.value || '0');
+      const unit = document.getElementById('calibrateUnitSel')?.value || 'm';
+      if (!isFinite(dist) || dist <= 0) { alert('Enter a positive distance.'); return; }
+
+      const dx = _calibratePoints[1].x - _calibratePoints[0].x;
+      const dy = _calibratePoints[1].y - _calibratePoints[0].y;
+      const pixelDist = Math.hypot(dx, dy);
+      if (pixelDist < 1) { alert('Points are too close together.'); return; }
+
+      const pxPerUnit = pixelDist / dist;
+      setScalePixelsPerUnit(pxPerUnit, unit);
+      if (store.active) store.active.units = { length: unit, pxPerUnit };
+
+      // Sync the toolbar canvas-width inputs
+      const canvasWidthEl = document.getElementById('canvasWidthValue');
+      const canvasUnitEl  = document.getElementById('canvasUnitSelect');
+      if (canvasWidthEl && canvasUnitEl) {
+        canvasUnitEl.value   = unit;
+        canvasWidthEl.value  = (canvas.width / pxPerUnit).toFixed(3);
+      }
+
+      document.getElementById('calibrateOverlay').style.display = 'none';
+      const statusEl = document.getElementById('calibrateStatus');
+      if (statusEl) statusEl.style.display = 'none';
+      _calibratePoints = [];
+      store.setMode('select');
+      store.notify();
+    });
+  }
+
+  const calibrateCancelBtn = document.getElementById('calibrateCancelBtn');
+  if (calibrateCancelBtn) {
+    calibrateCancelBtn.addEventListener('click', () => {
+      document.getElementById('calibrateOverlay').style.display = 'none';
+      const statusEl = document.getElementById('calibrateStatus');
+      if (statusEl) statusEl.style.display = 'none';
+      _calibratePoints = [];
+      store.setMode('select');
+      store.notify();
+    });
+  }
+
+  function _exitRefScaleMode() {
+    document.getElementById('refScaleOverlay').style.display = 'none';
+    const statusEl = document.getElementById('calibrateStatus');
+    if (statusEl) statusEl.style.display = 'none';
+    _refScalePoints = [];
+    store.setMode('select');
+  }
+
+  const refScaleConfirmBtn = document.getElementById('refScaleConfirmBtn');
+  if (refScaleConfirmBtn) {
+    refScaleConfirmBtn.addEventListener('click', () => {
+      if (_refScalePoints.length < 2) return;
+      const fp = store.active;
+      if (!fp?.referenceImage) return;
+
+      const dist = parseFloat(document.getElementById('refScaleDistInput')?.value || '0');
+      const unit = document.getElementById('refScaleUnitSel')?.value || 'm';
+      if (!isFinite(dist) || dist <= 0) { alert('Enter a positive distance.'); return; }
+
+      const ref = fp.referenceImage;
+      const pxPerUnit = fp.units?.pxPerUnit || 1;
+
+      // Distance between the two clicked points in plan units
+      const dx = _refScalePoints[1].x - _refScalePoints[0].x;
+      const dy = _refScalePoints[1].y - _refScalePoints[0].y;
+      const d_plan_current = Math.hypot(dx, dy) / pxPerUnit;
+      if (d_plan_current < 0.0001) { alert('Points are too close together.'); return; }
+
+      // Convert user-input distance and current plan distance both to mm for ratio
+      const unitToMm = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 };
+      const planUnit = fp.units?.length || 'mm';
+      const d_real_mm = dist * (unitToMm[unit] || 1);
+      const d_current_mm = d_plan_current * (unitToMm[planUnit] || 1);
+      const scaleFactor = d_real_mm / d_current_mm;
+
+      const naturalAspect = (ref.naturalHeight || 1) / (ref.naturalWidth || 1);
+      const old_width = Number.isFinite(ref.width) && ref.width > 0 ? ref.width : 10;
+      const old_height = Number.isFinite(ref.height) && ref.height > 0 ? ref.height : old_width * naturalAspect;
+
+      // Fractional position of P1 within the image — keep it anchored after scaling
+      const p1_plan = { x: _refScalePoints[0].x / pxPerUnit, y: _refScalePoints[0].y / pxPerUnit };
+      const f1_x = (p1_plan.x - (ref.x || 0)) / old_width;
+      const f1_y = (p1_plan.y - (ref.y || 0)) / old_height;
+
+      const new_width = old_width * scaleFactor;
+      const new_height = new_width * naturalAspect;
+
+      ref.width = new_width;
+      ref.x = p1_plan.x - f1_x * new_width;
+      ref.y = p1_plan.y - f1_y * new_height;
+
+      _exitRefScaleMode();
+      store.update(fp);
+    });
+  }
+
+  const refScaleCancelBtn = document.getElementById('refScaleCancelBtn');
+  if (refScaleCancelBtn) {
+    refScaleCancelBtn.addEventListener('click', () => {
+      _exitRefScaleMode();
+      store.notify();
+    });
+  }
+
+  // Snapshot button (tool palette)
+  const snapshotSolutionBtn = document.getElementById('snapshotSolutionBtn');
+  if (snapshotSolutionBtn) {
+    snapshotSolutionBtn.addEventListener('click', () => {
+      if (!store.active) return;
+      const nameInput = document.getElementById('snapshotNameInput');
+      const baseName  = nameInput?.value?.trim() || `Solution ${store.solutions.length + 1}`;
+      store.solutions.push({
+        id:        Date.now(),
+        name:      baseName,
+        timestamp: new Date().toLocaleTimeString(),
+        json:      store.active.toJSON(),
+        metrics:   _solutionMetrics(store.active),
+      });
+      if (nameInput) nameInput.value = '';
+      refreshSolutionsPanel(store);
+    });
+  }
+
+  // Snapshot button (solutions panel)
+  const snapshotBtn = document.getElementById('snapshotBtn');
+  if (snapshotBtn) {
+    snapshotBtn.addEventListener('click', () => {
+      snapshotSolutionBtn?.click(); // reuse the same handler
+    });
+  }
+
+  // Setup criteria panel
+  setupCriteriaPanel(store);
+  // Initial solutions panel render
+  refreshSolutionsPanel(store);
+
   // Track mouse movement and constraint flag (Shift key)
   canvas.addEventListener('mousemove', (e) => {
     const rect = canvas.getBoundingClientRect();
@@ -960,6 +1463,9 @@ export function bindUI(store, canvas, mouse) {
     }
 
     if (store.mode === 'select' && e.button === 0 && store.active) {
+      // When a core interior is selected (selectedCore is set), skip box-select
+      // so the click event fires freely and can deselect or pick a wall/segment.
+      if (store.active.selectedCore) return;
       const rect = canvas.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
@@ -1052,6 +1558,56 @@ export function bindUI(store, canvas, mouse) {
         alert('No grid points generated. Check that the origin is near validly-closed boundary.');
       }
       store.setMode('select');
+      return;
+    }
+
+    // CALIBRATE MODE — collect two content-space points
+    if (store.mode === 'calibrate') {
+      _calibratePoints.push({ x, y });
+      if (_calibratePoints.length === 2) {
+        // Position the overlay near the midpoint in screen space
+        const midContent = {
+          x: (_calibratePoints[0].x + _calibratePoints[1].x) / 2,
+          y: (_calibratePoints[0].y + _calibratePoints[1].y) / 2,
+        };
+        const screenX = midContent.x * vp.scale + vp.tx;
+        const screenY = midContent.y * vp.scale + vp.ty;
+        const overlay = document.getElementById('calibrateOverlay');
+        if (overlay) {
+          overlay.style.display = 'flex';
+          overlay.style.left = `${Math.max(0, screenX + 14)}px`;
+          overlay.style.top  = `${Math.max(0, screenY - 40)}px`;
+          document.getElementById('calibrateDistInput')?.focus();
+        }
+      }
+      store.notify();
+      return;
+    }
+
+    // REF-SCALE MODE — collect two content-space points for reference image scaling
+    if (store.mode === 'ref-scale') {
+      _refScalePoints.push({ x, y });
+      const statusEl = document.getElementById('calibrateStatus');
+      if (_refScalePoints.length === 1 && statusEl) {
+        statusEl.textContent = 'Scale Reference — click second point on the reference image';
+      }
+      if (_refScalePoints.length === 2) {
+        const midContent = {
+          x: (_refScalePoints[0].x + _refScalePoints[1].x) / 2,
+          y: (_refScalePoints[0].y + _refScalePoints[1].y) / 2,
+        };
+        const screenX = midContent.x * vp.scale + vp.tx;
+        const screenY = midContent.y * vp.scale + vp.ty;
+        const overlay = document.getElementById('refScaleOverlay');
+        if (overlay) {
+          overlay.style.display = 'flex';
+          overlay.style.left = `${Math.max(0, screenX + 14)}px`;
+          overlay.style.top = `${Math.max(0, screenY - 40)}px`;
+          document.getElementById('refScaleDistInput')?.focus();
+        }
+        if (statusEl) statusEl.style.display = 'none';
+      }
+      store.notify();
       return;
     }
 
@@ -1230,7 +1786,8 @@ export function bindUI(store, canvas, mouse) {
         const fx = first[0], fy = first[1];
         const dx = Math.hypot(x - fx, y - fy);
         if (dx < SNAP_TO_NODE_DIST) {
-          // Close and commit the core boundary
+          // Remove the duplicate closing vertex that was just pushed, then commit
+          store.tempCore.pop();
           commitCore(store);
           store.setMode('select');
           store.update(store.active);
@@ -1302,17 +1859,24 @@ export function bindUI(store, canvas, mouse) {
         }
         store.update(store.active);
       } else {
-        // Check if the click lands inside the core polygon → select the whole core
-        const coreBdry = (store.active.Core_Boundary || [])[0];
-        const corePoly = coreBdry
-          ? Object.keys(coreBdry)
+        // Check if the click lands inside any core polygon → select that core
+        let hitCoreId = null;
+        if (store.active.layers?.Core_Boundary !== false) {
+          for (const coreBdry of (store.active.Core_Boundary || [])) {
+            if (!coreBdry) continue;
+            const corePoly = Object.keys(coreBdry)
               .filter(k => /^Pt_\d+$/.test(k))
               .sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3)))
-              .map(k => coreBdry[k])
-          : [];
-        if (corePoly.length >= 3 && store.active.layers?.Core_Boundary !== false && store.active._isPointInPolygon(x, y, corePoly)) {
+              .map(k => coreBdry[k]);
+            if (corePoly.length >= 3 && store.active._isPointInPolygon(x, y, corePoly)) {
+              hitCoreId = coreBdry._coreId || null;
+              break;
+            }
+          }
+        }
+        if (hitCoreId) {
           _setThermalSelection(store, null, null);
-          store.active.selectedCore = true;
+          store.active.selectedCore = hitCoreId;
           store.active.selectedSegment = null;
           store.active.selectedPoints = new Set();
           store.active.selectedPoint = null;
@@ -1456,9 +2020,17 @@ export function bindUI(store, canvas, mouse) {
   // Delete core: Delete or Backspace key
   window.addEventListener('keydown', (e) => {
     if (store.mode === 'select' && (e.key === 'Delete' || e.key === 'Backspace')) {
-      if (store.active.selectedCore) {
-        store.active.deleteCore();
-        store.update(store.active);
+      const fp = store.active;
+      if (!fp) return;
+      if (fp.selectedCore) {
+        fp.deleteCore(fp.selectedCore);
+        store.update(fp);
+      } else if (fp.selectedSegment != null) {
+        const edge = fp.wall_graph.edges[fp.selectedSegment];
+        if (edge?.wallType === 'core') {
+          fp.deleteCore(_findCoreIdForEdge(fp, edge));
+          store.update(fp);
+        }
       }
     }
   });
@@ -1496,6 +2068,10 @@ export function bindUI(store, canvas, mouse) {
       store.setMode("select");
       const originDisplay = document.getElementById('gridOriginDisplay');
       if (originDisplay) originDisplay.textContent = '';
+    }
+    if (store.mode === 'ref-scale' && e.key === 'Escape') {
+      _exitRefScaleMode();
+      store.notify();
     }
   });
 
@@ -1880,385 +2456,333 @@ export function bindUI(store, canvas, mouse) {
     });
   }
 
-  const btnOptimise = document.getElementById('optimiseBtn');
+  const btnOptimise        = document.getElementById('optimiseBtn');
+  const btnOptimiseStructure = document.getElementById('optimiseStructureBtn');
+  const btnOptimiseThermal   = document.getElementById('optimiseThermalBtn');
+  const btnOptimiseDuct      = document.getElementById('optimiseDuctBtn');
   const btnStop     = document.getElementById('stopOptBtn');
   const btnContinue = document.getElementById('continueOptBtn');
   const aiError = document.getElementById('ai-error');
 
-  if (btnOptimise) {
-    btnOptimise.addEventListener('click', async () => {
-      const fp = store.active;
-      if (!fp) return;
+  // All trigger buttons — disabled together while any run is active
+  const _allOptBtns = [btnOptimise, btnOptimiseStructure, btnOptimiseThermal, btnOptimiseDuct].filter(Boolean);
 
-      // Abort controller — used to stop polling and signal the stop button
-      const abortCtrl = new AbortController();
+  // Shared run-time state (only one run at a time)
+  let _abortCtrl   = null;
+  let _activeJobId = null;
 
-      // Disable optimise button, show stop button
-      btnOptimise.disabled = true;
-      btnOptimise.textContent = 'running… 0s';
-      if (btnStop) btnStop.style.display = '';
-      if (btnContinue) btnContinue.style.display = 'none';
-      if (aiError) aiError.style.display = 'none';
+  // ── Core runner ─────────────────────────────────────────────────────────────
+  // stageLogic: async (fp, runStage, waitForContinue, aiError) => void
+  const runFlow = async (triggerBtn, stageLogic) => {
+    if (_abortCtrl) return; // already running
+    const fp = store.active;
+    if (!fp) return;
 
-      let _activeJobId = null;
+    _abortCtrl = new AbortController();
 
-      if (btnStop) {
-        btnStop.onclick = async () => {
-          abortCtrl.abort();
-          if (_activeJobId) await cancelOptimisation(_activeJobId);
-          if (aiError) { aiError.style.display = 'block'; aiError.textContent = 'Optimisation stopped.'; }
-        };
-      }
+    _allOptBtns.forEach(b => { b.disabled = true; });
+    triggerBtn.textContent = 'running… 0s';
+    if (btnStop) btnStop.style.display = '';
+    if (btnContinue) btnContinue.style.display = 'none';
+    if (aiError) aiError.style.display = 'none';
 
-      const statusEl = document.getElementById('optimiseStatus');
-      const _optStart = Date.now();
-      const _phaseLabels = {
-        segmentation: 'regions',
-        structural: 'structural',
-        zones: 'thermal zones',
-        duct: 'duct routing',
+    _activeJobId = null;
+    if (btnStop) {
+      btnStop.onclick = async () => {
+        _abortCtrl.abort();
+        if (_activeJobId) await cancelOptimisation(_activeJobId);
+        if (aiError) { aiError.style.display = 'block'; aiError.textContent = 'Optimisation stopped.'; }
       };
-      const _phaseOrder  = ['segmentation', 'structural', 'zones', 'duct'];
-      let _currentPhase = 'structural';
-      if (statusEl) {
-        statusEl.style.display = 'block';
-        statusEl.textContent = 'phase: structural  0s';
+    }
+
+    const statusEl = document.getElementById('optimiseStatus');
+    const _optStart = Date.now();
+    const _phaseLabels = { segmentation: 'regions', structural: 'structural', zones: 'thermal zones', duct: 'duct routing' };
+    const _phaseOrder  = ['structural', 'segmentation', 'zones', 'duct'];
+    let _currentPhase = 'structural';
+    let _isPaused = false;
+    if (statusEl) { statusEl.style.display = 'block'; statusEl.textContent = 'starting…'; }
+    const _timerInterval = setInterval(() => {
+      if (_isPaused) return;
+      const elapsed = Math.round((Date.now() - _optStart) / 1000);
+      if (statusEl) statusEl.textContent = `phase: ${_phaseLabels[_currentPhase] || _currentPhase}  ${elapsed}s`;
+      triggerBtn.textContent = `running… ${elapsed}s`;
+    }, 1000);
+
+    const waitForContinue = (_label, message) => new Promise((resolve) => {
+      if (!btnContinue) { resolve(window.confirm(message)); return; }
+      _isPaused = true;
+      if (statusEl) statusEl.textContent = `paused: ${message}`;
+      if (aiError) { aiError.style.display = 'block'; aiError.style.color = '#e6a817'; aiError.textContent = message; }
+      btnContinue.textContent = 'continue';
+      btnContinue.style.display = '';
+      const onAbort = () => { _isPaused = false; btnContinue.style.display = 'none'; btnContinue.onclick = null; resolve(false); };
+      btnContinue.onclick = () => {
+        _isPaused = false;
+        _abortCtrl.signal.removeEventListener('abort', onAbort);
+        btnContinue.style.display = 'none';
+        btnContinue.onclick = null;
+        resolve(true);
+      };
+      _abortCtrl.signal.addEventListener('abort', onAbort, { once: true });
+    });
+
+    // Apply a partial or final data payload to the active floorplan
+    const applyData = (d) => {
+      if (!d) return;
+      if (Array.isArray(d.thermal_zones) && d.thermal_zones.length) {
+        const prevMeta = (fp.Thermal_Zones || []).map(z => ({
+          color: z.color ?? null,
+          alpha: z.alpha ?? null,
+          air_requirement: Number.isFinite(z.air_requirement) ? z.air_requirement : null,
+          subZoneAirRequirements: Array.isArray(z.subZoneAirRequirements) ? [...z.subZoneAirRequirements] : [],
+        }));
+        fp.Thermal_Zones = d.thermal_zones.map(({ thermal_region_geometry, vav_control_zones, ...tz }, i) => ({
+          ...tz,
+          subZones: thermal_region_geometry || [],
+          thermalControlZones: vav_control_zones || [],
+          color: tz.color ?? prevMeta[i]?.color ?? null,
+          alpha: tz.alpha ?? prevMeta[i]?.alpha ?? null,
+          air_requirement: Number.isFinite(tz.air_requirement) ? tz.air_requirement : prevMeta[i]?.air_requirement,
+          subZoneAirRequirements: Array.isArray(tz.subZoneAirRequirements)
+            ? tz.subZoneAirRequirements
+            : (prevMeta[i]?.subZoneAirRequirements || []),
+        }));
       }
-      let _isPaused = false;
-      const _timerInterval = setInterval(() => {
-        if (_isPaused) return;
-        const elapsed = Math.round((Date.now() - _optStart) / 1000);
-        if (statusEl) statusEl.textContent = `phase: ${_phaseLabels[_currentPhase] || _currentPhase}  ${elapsed}s`;
-        btnOptimise.textContent = `running… ${elapsed}s`;
-      }, 1000);
+      if (d.thermal_zones) refreshThermalZonesList(store);
 
-      const waitForContinue = (_buttonLabel, message) => new Promise((resolve) => {
-        if (!btnContinue) {
-          resolve(window.confirm(message));
-          return;
+      if (d.structural_components) {
+        const sc = d.structural_components;
+        const mmMap = { mm: 1, cm: 10, m: 1000, 'in': 25.4, ft: 304.8 };
+        const srcUnit = sc?.units?.length || d?.units?.length || fp.units?.length || 'm';
+        const mmPerSrc = mmMap[srcUnit] ?? 1000;
+        const mmPerCanvas = mmMap[fp.units?.length ?? 'm'] ?? 1000;
+        const lenToPx = v => v * (fp.units?.pxPerUnit ?? 1) * mmPerSrc / mmPerCanvas;
+        if (Array.isArray(sc.columns) && sc.columns.length) {
+          fp.Columns = sc.columns
+            .map((c, i) => {
+              if (Array.isArray(c)) {
+                const pts = c.filter(p => p && typeof p.x === 'number' && typeof p.y === 'number');
+                if (!pts.length) return null;
+                const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+                const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+                return { id: `Column_${i}`, x: lenToPx(cx), y: lenToPx(cy) };
+              }
+              return { ...c, x: lenToPx(c.x), y: lenToPx(c.y) };
+            })
+            .filter(Boolean);
+          const EPS = 2;
+          (fp.Points || []).forEach(pt => {
+            if (fp.Columns.some(col => Math.abs(col.x - pt.x) < EPS && Math.abs(col.y - pt.y) < EPS)) {
+              pt.mechanical = false;
+            }
+          });
         }
+        if (Array.isArray(sc.beams) && sc.beams.length) {
+          fp.Beams = sc.beams
+            .map(b => {
+              if (!b?.start || !b?.end) return null;
+              return { ...b, start: { x: lenToPx(b.start.x), y: lenToPx(b.start.y) }, end: { x: lenToPx(b.end.x), y: lenToPx(b.end.y) } };
+            })
+            .filter(Boolean);
+        }
+        fp.layers.Beams   = true;
+        fp.layers.Columns = true;
+      }
 
-        _isPaused = true;
-        if (statusEl) statusEl.textContent = `paused: ${message}`;
+      const rawDuctPlan = d?.mechanical_components?.duct_plan || d?.mechanical_components?.ductPlan || d?.ductPlan || d?.Duct_Plan;
+      if (Array.isArray(rawDuctPlan)) {
+        fp.Duct_Plan = rawDuctPlan;
+        if (Array.isArray(fp.Edges) && fp.Edges.length && Array.isArray(fp.Points) && fp.Points.length) {
+          const pointIndexById = new Map(fp.Points.map((p, i) => [p.id, i]));
+          const idxOf = v => typeof v === 'number' ? v : pointIndexById.get(v);
+          fp._ductEdges = fp.Edges.map(e => {
+            const a = idxOf(e?.v1), b = idxOf(e?.v2);
+            if (!Number.isInteger(a) || !Number.isInteger(b)) return null;
+            return [a, b, e?.length ?? e?.step ?? 1];
+          }).filter(Boolean);
+        }
+        fp.layers.Duct_Plan = true;
+      }
+    };
+
+    const runStage = async (phases, pollIntervalMs = 2000) => {
+      const planJson = fp.toJSON();
+      const units = fp.units || { length: getUnitLabel() || 'm', pxPerUnit: getPixelsPerUnit() || 1 };
+      if (phases.length > 0) _currentPhase = phases[0];
+      const started = await startOptimisation(planJson, units, { phases });
+      if (!started.ok) {
+        if (aiError) { aiError.style.display = 'block'; aiError.textContent = `Optimisation failed: ${started.error}`; }
+        return { ok: false, error: started.error };
+      }
+      _activeJobId = started.job_id;
+      const result = await pollOptimisation(started.job_id, (phase, data) => {
+        const inStageIdx = phases.indexOf(phase);
+        if (inStageIdx >= 0 && inStageIdx < phases.length - 1) {
+          _currentPhase = phases[inStageIdx + 1];
+        } else {
+          const globalIdx = _phaseOrder.indexOf(phase);
+          _currentPhase = _phaseOrder[Math.min(globalIdx + 1, _phaseOrder.length - 1)] || phase;
+        }
+        applyData(data);
+        store.notify();
+      }, pollIntervalMs, _abortCtrl.signal);
+      _activeJobId = null;
+      if (!result.ok) {
+        if (!result.cancelled && !_abortCtrl.signal.aborted && aiError) {
+          aiError.style.display = 'block';
+          aiError.textContent = `Optimisation failed: ${result.error}`;
+        }
+        return result;
+      }
+      applyData(result.data);
+      store.notify();
+      return result;
+    };
+
+    try {
+      // Pre-flight validation
+      const _issues = [];
+      if (!fp.boundaryClosed || (fp.wall_graph?.nodes?.length ?? 0) < 3)
+        _issues.push('No closed boundary — draw a wall outline first.');
+      if (!fp.Points || fp.Points.length === 0)
+        _issues.push('No routing grid — generate a grid (Grid → Generate) first.');
+      if (_issues.length) {
+        if (aiError) { aiError.style.display = 'block'; aiError.style.color = ''; aiError.textContent = _issues.join(' '); }
+        return;
+      }
+      if (!fp.Points.some(p => p.entryPoint)) {
         if (aiError) {
           aiError.style.display = 'block';
           aiError.style.color = '#e6a817';
-          aiError.textContent = message;
+          aiError.textContent = 'No entry point selected — the server will auto-pick one. Select a grid point and tick Entry Point in the inspector to set it manually.';
         }
-
-        btnContinue.textContent = 'continue';
-        btnContinue.style.display = '';
-
-        const onAbort = () => {
-          _isPaused = false;
-          btnContinue.style.display = 'none';
-          btnContinue.onclick = null;
-          resolve(false);
-        };
-
-        btnContinue.onclick = () => {
-          _isPaused = false;
-          abortCtrl.signal.removeEventListener('abort', onAbort);
-          btnContinue.style.display = 'none';
-          btnContinue.onclick = null;
-          resolve(true);
-        };
-
-        abortCtrl.signal.addEventListener('abort', onAbort, { once: true });
-      });
-
-      // Helper: apply a partial or full data dict to the active floorplan
-      const applyData = (d) => {
-        if (!d) return;
-        if (Array.isArray(d.thermal_zones) && d.thermal_zones.length) {
-          const prevMeta = (fp.Thermal_Zones || []).map(z => ({
-            color: z.color ?? null,
-            alpha: z.alpha ?? null,
-            air_requirement: Number.isFinite(z.air_requirement) ? z.air_requirement : null,
-            subZoneAirRequirements: Array.isArray(z.subZoneAirRequirements) ? [...z.subZoneAirRequirements] : [],
-          }));
-          fp.Thermal_Zones = d.thermal_zones.map(({ thermal_region_geometry, vav_control_zones, ...tz }, i) => ({
-            ...tz,
-            subZones: thermal_region_geometry || [],
-            thermalControlZones: vav_control_zones || [],
-            color: tz.color ?? prevMeta[i]?.color ?? null,
-            alpha: tz.alpha ?? prevMeta[i]?.alpha ?? null,
-            air_requirement: Number.isFinite(tz.air_requirement) ? tz.air_requirement : prevMeta[i]?.air_requirement,
-            subZoneAirRequirements: Array.isArray(tz.subZoneAirRequirements)
-              ? tz.subZoneAirRequirements
-              : (prevMeta[i]?.subZoneAirRequirements || []),
-          }));
-        }
-        // Refresh the thermal zones panel whenever zone data changes
-        if (d.thermal_zones) refreshThermalZonesList(store);
-
-        // Apply structural solver results using declared structural units.
-        if (d.structural_components) {
-          const sc = d.structural_components;
-          const mmMap = { mm: 1, cm: 10, m: 1000, 'in': 25.4, ft: 304.8 };
-          const srcUnit = sc?.units?.length || d?.units?.length || fp.units?.length || 'm';
-          const mmPerSrc = mmMap[srcUnit] ?? 1000;
-          const mmPerCanvas = mmMap[fp.units?.length ?? 'm'] ?? 1000;
-          const lenToPx = v => v * (fp.units?.pxPerUnit ?? 1) * mmPerSrc / mmPerCanvas;
-          if (Array.isArray(sc.columns) && sc.columns.length) {
-            fp.Columns = sc.columns
-              .map((c, i) => {
-                if (Array.isArray(c)) {
-                  const pts = c.filter(p => p && typeof p.x === 'number' && typeof p.y === 'number');
-                  if (!pts.length) return null;
-                  const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
-                  const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
-                  return { id: `Column_${i}`, x: lenToPx(cx), y: lenToPx(cy) };
-                }
-                return { ...c, x: lenToPx(c.x), y: lenToPx(c.y) };
-              })
-              .filter(Boolean);
-          }
-          if (Array.isArray(sc.beams) && sc.beams.length) {
-            fp.Beams = sc.beams
-              .map(b => {
-                if (!b?.start || !b?.end) return null;
-                return {
-                  ...b,
-                  start: { x: lenToPx(b.start.x), y: lenToPx(b.start.y) },
-                  end:   { x: lenToPx(b.end.x),   y: lenToPx(b.end.y) },
-                };
-              })
-              .filter(Boolean);
-          }
-          // Auto-enable Beams and Columns layers so results are immediately visible
-          fp.layers.Beams   = true;
-          fp.layers.Columns = true;
-        }
-
-        // Apply duct-planning results.
-        const rawDuctPlan = d?.mechanical_components?.duct_plan
-          || d?.mechanical_components?.ductPlan
-          || d?.ductPlan
-          || d?.Duct_Plan;
-        if (Array.isArray(rawDuctPlan)) {
-          fp.Duct_Plan = rawDuctPlan;
-
-          if (Array.isArray(fp.Edges) && fp.Edges.length && Array.isArray(fp.Points) && fp.Points.length) {
-            const pointIndexById = new Map(fp.Points.map((p, i) => [p.id, i]));
-            const idxOf = (v) => {
-              if (typeof v === 'number') return v;
-              return pointIndexById.get(v);
-            };
-            fp._ductEdges = fp.Edges
-              .map(e => {
-                const a = idxOf(e?.v1);
-                const b = idxOf(e?.v2);
-                if (!Number.isInteger(a) || !Number.isInteger(b)) return null;
-                return [a, b, e?.length ?? e?.step ?? 1];
-              })
-              .filter(Boolean);
-          }
-
-          fp.layers.Duct_Plan = true;
-        }
-      };
-
-      try {
-        // ── Pre-flight validation ────────────────────────────────────────────
-        const _issues = [];
-        if (!fp.boundaryClosed || (fp.wall_graph?.nodes?.length ?? 0) < 3) {
-          _issues.push('No closed boundary — draw a wall outline first.');
-        }
-        if (!fp.Points || fp.Points.length === 0) {
-          _issues.push('No routing grid — generate a grid (Grid → Generate) first.');
-        }
-        if (_issues.length) {
-          if (aiError) { aiError.style.display = 'block'; aiError.style.color = ''; aiError.textContent = _issues.join(' '); }
-          return;
-        }
-        // Soft warning: no entry point — server will fall back but user should know
-        if (!fp.Points.some(p => p.entryPoint)) {
-          if (aiError) {
-            aiError.style.display = 'block';
-            aiError.style.color   = '#e6a817';
-            aiError.textContent   = 'No entry point selected — the server will auto-pick one. ' +
-              'Select a grid point and tick Entry Point in the inspector to set it manually.';
-          }
-        } else if (aiError) {
-          aiError.style.color = ''; // reset warning colour for subsequent runs
-        }
-
-        // Check server is reachable first
-        const alive = await checkHealth();
-        if (!alive) {
-          if (aiError) {
-            aiError.style.display = 'block';
-            aiError.style.color   = '';
-            aiError.textContent = 'Optimisation server not reachable. Start it with: python server.py (in Project-71/)';
-          }
-          return;
-        }
-
-        const runStage = async (phases, pollIntervalMs = 2000) => {
-          const planJson = fp.toJSON();
-          const units = fp.units || { length: getUnitLabel() || 'm', pxPerUnit: getPixelsPerUnit() || 1 };
-
-          if (phases.length > 0) _currentPhase = phases[0];
-
-          const started = await startOptimisation(planJson, units, { phases });
-          if (!started.ok) {
-            if (aiError) {
-              aiError.style.display = 'block';
-              aiError.textContent = `Optimisation failed: ${started.error}`;
-            }
-            return { ok: false, error: started.error };
-          }
-          _activeJobId = started.job_id;
-
-          const result = await pollOptimisation(started.job_id, (phase, data) => {
-            // Apply each phase result as it arrives.
-            const inStageIdx = phases.indexOf(phase);
-            if (inStageIdx >= 0 && inStageIdx < phases.length - 1) {
-              _currentPhase = phases[inStageIdx + 1];
-            } else {
-              const globalIdx = _phaseOrder.indexOf(phase);
-              _currentPhase = _phaseOrder[Math.min(globalIdx + 1, _phaseOrder.length - 1)] || phase;
-            }
-            applyData(data);
-            store.notify();
-          }, pollIntervalMs, abortCtrl.signal);
-
-          _activeJobId = null;
-
-          if (!result.ok) {
-            if (!result.cancelled && !abortCtrl.signal.aborted && aiError) {
-              aiError.style.display = 'block';
-              aiError.textContent = `Optimisation failed: ${result.error}`;
-            }
-            return result;
-          }
-
-          applyData(result.data);
-          store.notify();
-          return result;
-        };
-
-        const hasExistingStructural =
-          (Array.isArray(fp.Columns) && fp.Columns.length > 0) ||
-          (Array.isArray(fp.Beams) && fp.Beams.length > 0);
-
-        const thermalZoneCount = () => (Array.isArray(fp.Thermal_Zones) ? fp.Thermal_Zones.length : 0);
-        const hasThermalGeometry = () => (fp.Thermal_Zones || []).some(_hasThermalGeometry);
-
-        let shouldRunStructural = true;
-        if (hasExistingStructural) {
-          shouldRunStructural = window.confirm(
-            'Existing structural elements were found. Click OK to re-run structural optimisation, or Cancel to keep them and continue to the next step.'
-          );
-        }
-
-        if (shouldRunStructural) {
-          const structuralResult = await runStage(['structural']);
-          if (!structuralResult.ok) return;
-
-          const continueAfterStructural = await waitForContinue(
-            'continue to thermal decision',
-            'Structural optimisation complete. Review columns/beams, then click Continue.'
-          );
-          if (!continueAfterStructural) {
-            if (aiError) {
-              aiError.style.display = 'block';
-              aiError.style.color = '#e6a817';
-              aiError.textContent = 'Optimisation paused after structural stage.';
-            }
-            return;
-          }
-        }
-
-        let hasThermalZones = thermalZoneCount() > 0;
-        let shouldRunThermal = !hasThermalZones;
-        if (hasThermalZones) {
-          shouldRunThermal = window.confirm(
-            'Existing thermal zones/regions were found. Click OK to re-generate thermal regions + zones, or Cancel to keep existing data and continue to duct routing.'
-          );
-        }
-
-        if (shouldRunThermal) {
-          // Stage 2a: region segmentation only.
-          const segResult = await runStage(['segmentation']);
-          if (!segResult.ok) return;
-
-          const continueToZones = await waitForContinue(
-            'continue to zone partitioning',
-            'Thermal regions are segmented. Review/edit the regions, then click Continue to partition them into thermal zones.'
-          );
-          if (!continueToZones) {
-            if (aiError) {
-              aiError.style.display = 'block';
-              aiError.style.color = '#e6a817';
-              aiError.textContent = 'Optimisation paused after region segmentation for manual region edits.';
-            }
-            return;
-          }
-
-          // Stage 2b: zone partitioning of the segmented regions.
-          const zoneResult = await runStage(['zones']);
-          if (!zoneResult.ok) return;
-
-          const continueToDuct = await waitForContinue(
-            'continue to duct routing',
-            'Thermal zones and regions are ready. Select thermal zones/regions and edit air requirements, then click Continue to run duct routing.'
-          );
-          if (!continueToDuct) {
-            if (aiError) {
-              aiError.style.display = 'block';
-              aiError.style.color = '#e6a817';
-              aiError.textContent = 'Optimisation paused after thermal stage for manual air-flow edits.';
-            }
-            return;
-          }
-        }
-
-        hasThermalZones = thermalZoneCount() > 0;
-        if (hasThermalZones && !hasThermalGeometry()) {
-          if (aiError) {
-            aiError.style.display = 'block';
-            aiError.textContent = 'Thermal zones exist but have no region geometry. Please regenerate thermal zones before duct routing.';
-          }
-          return;
-        }
-
-        // Stage 3: Duct routing when thermal zones are present.
-        if (hasThermalZones) {
-          const ductResult = await runStage(['duct'], 700);
-          if (!ductResult.ok) return;
-        } else {
-          if (aiError) {
-            aiError.style.display = 'block';
-            aiError.textContent = 'Duct routing skipped: thermal zones are still missing.';
-          }
-          return;
-        }
-
-        if (aiError) {
-          aiError.style.display = 'none';
-          aiError.style.color = '';
-        }
-
-      } catch (err) {
-        if (aiError && !abortCtrl.signal.aborted) {
-          aiError.style.display = 'block';
-          aiError.textContent = `Optimisation error: ${err.message}`;
-        }
-      } finally {
-        clearInterval(_timerInterval);
-        btnOptimise.disabled = false;
-        btnOptimise.textContent = 'optimise';
-        if (btnStop) btnStop.style.display = 'none';
-        if (btnContinue) {
-          btnContinue.style.display = 'none';
-          btnContinue.onclick = null;
-        }
-        if (statusEl) statusEl.style.display = 'none';
+      } else if (aiError) {
+        aiError.style.color = '';
       }
-    });
-  }
+
+      const alive = await checkHealth();
+      if (!alive) {
+        if (aiError) { aiError.style.display = 'block'; aiError.style.color = ''; aiError.textContent = 'Optimisation server not reachable. Start it with: python server.py (in Project-71/)'; }
+        return;
+      }
+
+      await stageLogic(fp, runStage, waitForContinue, aiError);
+
+    } catch (err) {
+      if (aiError && !_abortCtrl.signal.aborted) {
+        aiError.style.display = 'block';
+        aiError.textContent = `Optimisation error: ${err.message}`;
+      }
+    } finally {
+      clearInterval(_timerInterval);
+      _abortCtrl = null;
+      _allOptBtns.forEach(b => { b.disabled = false; });
+      triggerBtn.textContent = triggerBtn.dataset.defaultLabel;
+      if (btnStop) btnStop.style.display = 'none';
+      if (btnContinue) { btnContinue.style.display = 'none'; btnContinue.onclick = null; }
+      if (statusEl) statusEl.style.display = 'none';
+    }
+  };
+
+  // ── Stage logic functions ────────────────────────────────────────────────────
+
+  const _stageStructural = async (fp, runStage, waitForContinue, aiError) => {
+    const hasExisting = (Array.isArray(fp.Columns) && fp.Columns.length > 0) ||
+                        (Array.isArray(fp.Beams)   && fp.Beams.length   > 0);
+    if (hasExisting && !window.confirm('Existing structural elements were found. Re-run structural optimisation?')) return;
+    const result = await runStage(['structural']);
+    if (!result.ok) return;
+    if (aiError) { aiError.style.display = 'block'; aiError.style.color = '#e6a817'; aiError.textContent = 'Structural complete. Review columns/beams, then run Thermal Zones or Full Optimise.'; }
+  };
+
+  const _stageThermal = async (fp, runStage, waitForContinue, aiError) => {
+    const hasExisting = Array.isArray(fp.Thermal_Zones) && fp.Thermal_Zones.length > 0;
+    if (hasExisting && !window.confirm('Existing thermal zones found. Re-generate thermal regions + zones?')) return;
+    const segResult = await runStage(['segmentation']);
+    if (!segResult.ok) return;
+    const zoneResult = await runStage(['zones']);
+    if (!zoneResult.ok) return;
+    if (aiError) { aiError.style.display = 'block'; aiError.style.color = '#e6a817'; aiError.textContent = 'Thermal zones ready. Edit air requirements in the Thermal Zones panel, then run Duct Routing.'; }
+  };
+
+  const _stageDuct = async (fp, runStage, waitForContinue, aiError) => {
+    const zoneCount = Array.isArray(fp.Thermal_Zones) ? fp.Thermal_Zones.length : 0;
+    const hasGeometry = (fp.Thermal_Zones || []).some(_hasThermalGeometry);
+    if (!zoneCount || !hasGeometry) {
+      if (aiError) { aiError.style.display = 'block'; aiError.style.color = ''; aiError.textContent = 'Duct routing requires thermal zones with region geometry. Run Thermal Zones first.'; }
+      return;
+    }
+    const result = await runStage(['duct'], 700);
+    if (!result.ok) return;
+    if (aiError) { aiError.style.display = 'none'; aiError.style.color = ''; }
+  };
+
+  const _stageFull = async (fp, runStage, waitForContinue, aiError) => {
+    const thermalZoneCount = () => (Array.isArray(fp.Thermal_Zones) ? fp.Thermal_Zones.length : 0);
+    const hasThermalGeometry = () => (fp.Thermal_Zones || []).some(_hasThermalGeometry);
+
+    const hasExistingStructural = (Array.isArray(fp.Columns) && fp.Columns.length > 0) ||
+                                  (Array.isArray(fp.Beams)   && fp.Beams.length   > 0);
+    let shouldRunStructural = true;
+    if (hasExistingStructural) {
+      shouldRunStructural = window.confirm('Existing structural elements were found. Click OK to re-run structural optimisation, or Cancel to keep them and continue to the next step.');
+    }
+    if (shouldRunStructural) {
+      const r = await runStage(['structural']);
+      if (!r.ok) return;
+      if (!await waitForContinue('continue', 'Structural optimisation complete. Review columns/beams, then click Continue.')) {
+        if (aiError) { aiError.style.display = 'block'; aiError.style.color = '#e6a817'; aiError.textContent = 'Optimisation paused after structural stage.'; }
+        return;
+      }
+    }
+
+    let hasThermalZones = thermalZoneCount() > 0;
+    let shouldRunThermal = !hasThermalZones;
+    if (hasThermalZones) {
+      shouldRunThermal = window.confirm('Existing thermal zones/regions were found. Click OK to re-generate, or Cancel to keep existing data and continue to duct routing.');
+    }
+    if (shouldRunThermal) {
+      const segResult = await runStage(['segmentation']);
+      if (!segResult.ok) return;
+      if (!await waitForContinue('continue', 'Thermal regions segmented. Review/edit, then click Continue to partition into thermal zones.')) {
+        if (aiError) { aiError.style.display = 'block'; aiError.style.color = '#e6a817'; aiError.textContent = 'Optimisation paused after region segmentation.'; }
+        return;
+      }
+      const zoneResult = await runStage(['zones']);
+      if (!zoneResult.ok) return;
+      if (!await waitForContinue('continue', 'Thermal zones ready. Edit air requirements, then click Continue to run duct routing.')) {
+        if (aiError) { aiError.style.display = 'block'; aiError.style.color = '#e6a817'; aiError.textContent = 'Optimisation paused after thermal stage.'; }
+        return;
+      }
+    }
+
+    hasThermalZones = thermalZoneCount() > 0;
+    if (hasThermalZones && !hasThermalGeometry()) {
+      if (aiError) { aiError.style.display = 'block'; aiError.textContent = 'Thermal zones exist but have no region geometry. Please regenerate thermal zones before duct routing.'; }
+      return;
+    }
+    if (!hasThermalZones) {
+      if (aiError) { aiError.style.display = 'block'; aiError.textContent = 'Duct routing skipped: thermal zones are still missing.'; }
+      return;
+    }
+    const ductResult = await runStage(['duct'], 700);
+    if (!ductResult.ok) return;
+    if (aiError) { aiError.style.display = 'none'; aiError.style.color = ''; }
+  };
+
+  // ── Wire buttons ─────────────────────────────────────────────────────────────
+  [
+    [btnOptimise,          'Full Optimise', _stageFull],
+    [btnOptimiseStructure, 'Structure',     _stageStructural],
+    [btnOptimiseThermal,   'Thermal Zones', _stageThermal],
+    [btnOptimiseDuct,      'Duct Routing',  _stageDuct],
+  ].forEach(([btn, label, logic]) => {
+    if (!btn) return;
+    btn.dataset.defaultLabel = label;
+    btn.textContent = label;
+    btn.addEventListener('click', () => runFlow(btn, logic));
+  });
 
   // Wire color picker apply button (inside bindUI so `store` is available)
   const applyBtn = document.getElementById('applyAreaColorBtn');
@@ -2575,11 +3099,11 @@ export function refreshThermalZonesList(store) {
       ? region.total_load
       : (vavCount > 0 ? summedVavLoad : null);
     const zoneAirReq = Number.isFinite(region.air_requirement)
-      ? `${region.air_requirement.toFixed(2)} L/s·m²`
+      ? `${Math.round(region.air_requirement)} L/s·m²`
       : null;
     const air = totalLoad !== null
-      ? `${totalLoad.toFixed(0)} L/s`
-      : (airReqPerArea !== null ? `${airReqPerArea.toFixed(2)} L/s·m²` : '—');
+      ? `${Math.round(totalLoad)} L/s`
+      : (airReqPerArea !== null ? `${Math.round(airReqPerArea)} L/s·m²` : '—');
 
     info.innerHTML =
       `<strong>Zone ${ri + 1}</strong> · ${type} · ${orient}<br>` +
@@ -2603,9 +3127,9 @@ export function refreshThermalZonesList(store) {
         const subAreaText = Number.isFinite(subArea) ? `${subArea.toFixed(2)} ${unitLabel}²` : '—';
         if (displayedSource === 'control') {
           const load = displayedRegions.loads[si];
-          subBtn.textContent = `region ${si + 1} (${_subregionVertexCount(sub)} pts, ${subAreaText}${Number.isFinite(load) ? `, ${Math.round(load)} W` : ''}${Number.isFinite(subAir) ? `, ${subAir.toFixed(2)} L/s·m²` : ''})`;
+          subBtn.textContent = `region ${si + 1} (${_subregionVertexCount(sub)} pts, ${subAreaText}${Number.isFinite(load) ? `, ${Math.round(load)} l/s` : ''}${Number.isFinite(subAir) ? `, ${Math.round(subAir)} L/s·m²` : ''})`;
         } else {
-          subBtn.textContent = `region ${si + 1} (${_subregionVertexCount(sub)} pts, ${subAreaText}${Number.isFinite(subAir) ? `, ${subAir.toFixed(2)} L/s·m²` : ''})`;
+          subBtn.textContent = `region ${si + 1} (${_subregionVertexCount(sub)} pts, ${subAreaText}${Number.isFinite(subAir) ? `, ${Math.round(subAir)} L/s·m²` : ''})`;
         }
         subBtn.style.cssText = `font-size:10px; padding:2px 4px; text-align:left; background:${isSelectedSub ? '#223822' : '#1a1a1a'}; color:#bbb; border:1px solid #333; cursor:pointer;`;
         subBtn.onclick = (ev) => {

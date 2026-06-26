@@ -1972,7 +1972,7 @@ export function drawThermalControlZones(ctx, fp) {
 
           const cx = coords.reduce((s, p) => s + p[0], 0) / coords.length;
           const cy = coords.reduce((s, p) => s + p[1], 0) / coords.length;
-          const loadStr = cz.load != null ? `${Math.round(cz.load)} W` : `cz${ci}`;
+          const loadStr = cz.load != null ? `${Math.round(cz.load)} l/s` : `cz${ci}`;
           ctx.font = '10px monospace';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
@@ -1984,7 +1984,7 @@ export function drawThermalControlZones(ctx, fp) {
           ctx.fillText(loadStr, cx, cy + 7);
           if (Number.isFinite(subAir)) {
             ctx.font = '8px monospace';
-            ctx.fillText(`${subAir.toFixed(2)} L/s·m²`, cx, cy + 18);
+            ctx.fillText(`${Math.round(subAir)} L/s·m²`, cx, cy + 18);
           }
           return;
         }
@@ -2063,7 +2063,7 @@ export function drawThermalControlZones(ctx, fp) {
       // ── Load label at centroid ────────────────────────────────────────────
       const cx = gridCoords.reduce((s, p) => s + p.x, 0) / gridCoords.length;
       const cy = gridCoords.reduce((s, p) => s + p.y, 0) / gridCoords.length;
-      const loadStr = cz.load != null ? `${Math.round(cz.load)} W` : `cz${ci}`;
+      const loadStr = cz.load != null ? `${Math.round(cz.load)} L/s·m²` : `cz${ci}`;
       ctx.font = '10px monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -2075,7 +2075,7 @@ export function drawThermalControlZones(ctx, fp) {
       ctx.fillText(loadStr, cx, cy + 7);
       if (Number.isFinite(subAir)) {
         ctx.font = '8px monospace';
-        ctx.fillText(`${subAir.toFixed(2)} L/s·m²`, cx, cy + 18);
+        ctx.fillText(`${Math.round(subAir)} L/s·m²`, cx, cy + 18);
       }
     });
   });
@@ -2173,17 +2173,47 @@ export function drawDuctPlan(ctx, fp) {
 
       if (!pA || !pB) return;
 
-      const isSelected = fp.selectedDuct && 
-                         fp.selectedDuct.pA === duct[0] && 
+      const isSelected = fp.selectedDuct &&
+                         fp.selectedDuct.pA === duct[0] &&
                          fp.selectedDuct.pB === duct[1] &&
                          fp.selectedDuct.flow === duct[4];
 
-      ctx.strokeStyle = isSelected ? '#00e676' : colour;
+      // Pinch-point detection: velocity = flow (l/s → m³/s) / cross-section (m²)
+      const pinchThreshold = fp._pinchVelocityThreshold ?? 8; // m/s
+      const showPinch = fp._showPinchPoints !== false;
+      const crossSection = (width || 0.3) * (height || 0.3); // m²
+      const velocity = crossSection > 0 ? (flow * 0.001) / crossSection : 0; // m/s
+      const isPinch = showPinch && velocity > pinchThreshold;
+
+      let drawColour;
+      if (isSelected) {
+        drawColour = '#00e676';
+      } else if (isPinch) {
+        const severity = Math.min(1, (velocity - pinchThreshold) / pinchThreshold);
+        drawColour = severity > 0.5 ? '#f44336' : '#ff9800';
+      } else {
+        drawColour = colour;
+      }
+
+      ctx.strokeStyle = drawColour;
       ctx.lineWidth = Math.min(4, Math.max(0.5, Math.log2(flow + 1) * 0.5 + 0.5));
+      if (isPinch && !isSelected) ctx.lineWidth = Math.max(ctx.lineWidth, 1.5);
       ctx.beginPath();
       ctx.moveTo(pA.x, pA.y);
       ctx.lineTo(pB.x, pB.y);
       ctx.stroke();
+
+      // Draw pinch indicator at duct midpoint
+      if (isPinch && !isSelected) {
+        const mx = (pA.x + pB.x) / 2;
+        const my = (pA.y + pB.y) / 2;
+        ctx.save();
+        ctx.fillStyle = drawColour;
+        ctx.beginPath();
+        ctx.arc(mx, my, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
     });
 
     // Draw VAV terminal boxes (smaller markers)

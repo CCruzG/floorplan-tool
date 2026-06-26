@@ -20,6 +20,9 @@ export class FloorPlanStore {
     this.tempCoreActive = false;
     this.tempColumn = [];
     this.tempColumnActive = false;
+
+    // Saved solution snapshots [{ id, name, timestamp, json, metrics }]
+    this.solutions = [];
   }
 
   add(fp) {

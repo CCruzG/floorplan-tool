@@ -23,6 +23,7 @@
       </select>
     </label>
     <div id="ai-error" style="display:none; color:#b00020; margin-top:8px;"></div>
+    <div id="calibrateStatus" style="display:none; color:#ff9800; font-family:monospace; font-size:10px; margin-left:12px;"></div>
     <!-- <div id="modeIndicator">Edit Mode</div> -->
   </div>
 
@@ -44,9 +45,15 @@
         <button id="lockBtn">Lock</button>
         <button id="view3dBtn">3D View</button>
         <!-- <button id="saveReqBtn">Save Requirements</button> -->
+        <button id="calibrateLineBtn">Calibrate Scale</button>
         <button id="openFloorplanBtn">Open Floorplan</button>
         <button id="saveFloorplanBtn">Save Floorplan</button>
-        <button id="optimiseBtn">optimise</button>
+        <button id="snapshotSolutionBtn">Snapshot</button>
+        <div style="border-top:1px solid #333; margin:4px 0;"></div>
+        <button id="optimiseStructureBtn">Structure</button>
+        <button id="optimiseThermalBtn">Thermal Zones</button>
+        <button id="optimiseDuctBtn">Duct Routing</button>
+        <button id="optimiseBtn">Full Optimise</button>
         <button id="stopOptBtn" style="display:none; background:#c0392b; color:#fff; border:none; border-radius:4px; padding:4px 10px; cursor:pointer;">stop</button>
         <button id="continueOptBtn" style="display:none; background:#0f5f2e; color:#fff; border:none; border-radius:4px; padding:4px 10px; cursor:pointer;">continue</button>
         <div id="optimiseStatus" style="display:none; font-family:'Courier New',monospace; font-size:10px; color:#aaa; margin-top:6px; line-height:1.5;"></div>
@@ -58,6 +65,40 @@
       <div id="canvasPanel">
         <div id="canvasBg" style="position:relative;">
           <canvas id="canvas" width="512" height="512"></canvas>
+          <div id="calibrateOverlay">
+            <div class="cal-title">Set real-world distance</div>
+            <div class="cal-row">
+              <input id="calibrateDistInput" type="number" min="0.001" step="0.001" placeholder="length">
+              <select id="calibrateUnitSel">
+                <option value="mm">mm</option>
+                <option value="cm">cm</option>
+                <option value="m" selected>m</option>
+                <option value="in">in</option>
+                <option value="ft">ft</option>
+              </select>
+            </div>
+            <div class="cal-row">
+              <button id="calibrateConfirmBtn" class="gp-btn">Set Scale</button>
+              <button id="calibrateCancelBtn" class="gp-btn gp-btn-clear">Cancel</button>
+            </div>
+          </div>
+          <div id="refScaleOverlay">
+            <div class="cal-title ref-scale-title">Scale reference image</div>
+            <div class="cal-row">
+              <input id="refScaleDistInput" type="number" min="0.001" step="0.001" placeholder="distance">
+              <select id="refScaleUnitSel">
+                <option value="mm">mm</option>
+                <option value="cm">cm</option>
+                <option value="m" selected>m</option>
+                <option value="in">in</option>
+                <option value="ft">ft</option>
+              </select>
+            </div>
+            <div class="cal-row">
+              <button id="refScaleConfirmBtn" class="gp-btn">Apply Scale</button>
+              <button id="refScaleCancelBtn" class="gp-btn gp-btn-clear">Cancel</button>
+            </div>
+          </div>
           <div id="view3dControls" style="display:none; position:absolute; bottom:10px; left:50%; transform:translateX(-50%); z-index:10;
                background:rgba(8,8,8,0.85); border:1px solid #282828;
                padding:6px 14px; align-items:center; gap:10px; font-family:'Courier New',monospace; font-size:10px; color:#c8c8c8; white-space:nowrap;">
@@ -158,6 +199,47 @@
         </div>
       </div>
       
+      <div id="criteriaPanel" class="panel">
+        <div class="cg-header">Criteria</div>
+        <div class="cg-body">
+          <div class="cg-row">
+            <label class="cg-label" for="defaultAirReqInput">Default air req</label>
+            <div class="cg-input-group">
+              <input type="number" id="defaultAirReqInput" min="0" step="0.5" value="7.5" style="width:52px;">
+              <span class="cg-unit">l/s·m²</span>
+            </div>
+          </div>
+          <div class="cg-row">
+            <button id="applyDefaultAirBtn" class="gp-btn">Apply to all zones</button>
+          </div>
+          <div class="cg-row" style="margin-top:4px;">
+            <label class="cg-label" for="pinchVelocityInput">Pinch threshold</label>
+            <div class="cg-input-group">
+              <input type="number" id="pinchVelocityInput" min="0.1" step="0.5" value="8" style="width:52px;">
+              <span class="cg-unit">m/s</span>
+            </div>
+          </div>
+          <div class="cg-row">
+            <label class="cg-label" for="showPinchChk">Show pinch pts</label>
+            <input type="checkbox" id="showPinchChk" checked>
+          </div>
+          <div id="pinchSummary" class="criteria-note"></div>
+        </div>
+      </div>
+
+      <div id="solutionsPanel" class="panel">
+        <div class="cg-header">Solutions</div>
+        <div class="cg-body">
+          <div class="cg-row">
+            <input type="text" id="snapshotNameInput" placeholder="Name…" class="solutions-name-input">
+          </div>
+          <div class="cg-row">
+            <button id="snapshotBtn" class="gp-btn">Save snapshot</button>
+          </div>
+          <div id="solutionsList" class="solutions-list"></div>
+        </div>
+      </div>
+
       <div id="layersPanel" class="panel">
         <div class="cg-header">Layers</div>
         <div class="cg-body">

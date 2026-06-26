@@ -741,12 +741,12 @@ export class FloorPlan {
       Array.isArray(v) ? { x: v[0], y: v[1] } : { x: v.x, y: v.y }
     );
     const core = makeCore(id, { vertices: pts });
-    // Also keep the legacy Pt_* keyed format in Core_Boundary for the renderer
-    const boundaryPoints = {};
+    // Keep Pt_* keyed format in Core_Boundary for the renderer; tag with _coreId for selective delete
+    const boundaryPoints = { _coreId: id };
     pts.forEach((p, i) => { boundaryPoints[`Pt_${i}`] = [p.x, p.y]; });
     if (pts.length > 0) boundaryPoints[`Pt_${pts.length}`] = [pts[0].x, pts[0].y]; // close
     this.Core_Boundary.push(boundaryPoints);
-    return this.Core_Boundary.length - 1;
+    return id;
   }
 
   /** Add a column with a polygon footprint. vertices: [[x,y], …] or [{x,y}, …] */
@@ -1208,25 +1208,54 @@ export class FloorPlan {
     return cId;
   }
 
-  deleteCore() {
-    // Remove all core-type edges from the wall graph
-    const coreEdgeIds = new Set(
-      (this.wall_graph.edges || [])
-        .filter(e => e.wallType === 'core')
-        .map(e => e.id)
+  deleteCore(coreId) {
+    if (!coreId) {
+      // No specific core targeted — delete all cores
+      const coreEdgeIds = new Set(
+        (this.wall_graph.edges || []).filter(e => e.wallType === 'core').map(e => e.id)
+      );
+      this.wall_graph.edges = (this.wall_graph.edges || []).filter(e => !coreEdgeIds.has(e.id));
+      const usedNodeIds = new Set((this.wall_graph.edges || []).flatMap(e => [e.v1, e.v2]));
+      this.wall_graph.nodes = (this.wall_graph.nodes || []).filter(n => usedNodeIds.has(n.id));
+      this.Walls = (this.Walls || []).filter(w => w.wallType !== 'core');
+      this.Core_Boundary = [];
+      this.coreArea = null;
+      this.clearSelection();
+      return;
+    }
+
+    const bdryIdx = (this.Core_Boundary || []).findIndex(b => b._coreId === coreId);
+    if (bdryIdx === -1) { this.deleteCore(null); return; }
+
+    const coreBdry = this.Core_Boundary[bdryIdx];
+    // Collect this core's vertex coordinates for matching
+    const coreCoords = Object.keys(coreBdry)
+      .filter(k => /^Pt_\d+$/.test(k))
+      .sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3)))
+      .map(k => coreBdry[k]);
+
+    const EPS = 1;
+    const isThisCoord = (x, y) =>
+      coreCoords.some(([cx, cy]) => Math.abs(x - cx) < EPS && Math.abs(y - cy) < EPS);
+    const isThisNode = (nodeId) => {
+      const node = this.wall_graph.nodes.find(n => n.id === nodeId);
+      return node ? isThisCoord(node.x, node.y) : false;
+    };
+
+    this.wall_graph.edges = this.wall_graph.edges.filter(e =>
+      e.wallType !== 'core' || !(isThisNode(e.v1) && isThisNode(e.v2))
     );
-    this.wall_graph.edges = (this.wall_graph.edges || []).filter(e => !coreEdgeIds.has(e.id));
-
-    // Remove nodes no longer referenced by any remaining edge
-    const usedNodeIds = new Set(
-      (this.wall_graph.edges || []).flatMap(e => [e.v1, e.v2])
+    const usedNodeIds = new Set(this.wall_graph.edges.flatMap(e => [e.v1, e.v2]));
+    this.wall_graph.nodes = this.wall_graph.nodes.filter(n =>
+      !isThisCoord(n.x, n.y) || usedNodeIds.has(n.id)
     );
-    this.wall_graph.nodes = (this.wall_graph.nodes || []).filter(n => usedNodeIds.has(n.id));
+    this.Walls = (this.Walls || []).filter(w =>
+      w.wallType !== 'core' ||
+      !(isThisCoord(w.start.x, w.start.y) && isThisCoord(w.end.x, w.end.y))
+    );
 
-    // Remove core Wall objects and clear legacy Core_Boundary
-    this.Walls = (this.Walls || []).filter(w => w.wallType !== 'core');
-    this.Core_Boundary = [];
-
+    this.Core_Boundary.splice(bdryIdx, 1);
+    if (this.Core_Boundary.length === 0) this.coreArea = null;
     this.clearSelection();
   }
 
@@ -1482,6 +1511,8 @@ export class FloorPlan {
           end:   b.end   ? { x: u(b.end.x),   y: u(b.end.y)   } : { x: 0, y: 0 },
         })),
       },
+
+      grid_edges: (this.Edges || []).map(e => ({ v1: e.v1, v2: e.v2, length: e.length ?? e.step ?? 1 })),
 
       mechanical_components: {
         duct_configs: this.Ducts || [],
@@ -1965,7 +1996,7 @@ export class FloorPlan {
       const cEdgesIn = coreIn?.edges || [];
       if (!cEdgesIn.length) return;
 
-      const corePtObj = {};
+      const corePtObj = { _coreId: fp._genId('core') };
       for (let i = 0; i < cEdgesIn.length; i++) {
         const e = cEdgesIn[i];
         const sx = px(e.start.x), sy = px(e.start.y);
@@ -2058,6 +2089,15 @@ export class FloorPlan {
     // ── mechanical ────────────────────────────────────────────────────────
     fp.Ducts = obj.mechanical_components?.duct_configs || obj.mechanical_components?.ducts || [];
     fp.Duct_Plan = obj.mechanical_components?.duct_plan || [];
+    fp.Edges = (obj.grid_edges || []);
+    if (fp.Edges.length && fp.Points.length) {
+      const pointIndexById = new Map(fp.Points.map((p, i) => [p.id, i]));
+      fp._ductEdges = fp.Edges.map(e => {
+        const a = typeof e.v1 === 'number' ? e.v1 : pointIndexById.get(e.v1);
+        const b = typeof e.v2 === 'number' ? e.v2 : pointIndexById.get(e.v2);
+        return Number.isInteger(a) && Number.isInteger(b) ? [a, b, e.length ?? 1] : null;
+      }).filter(Boolean);
+    }
     fp.referenceImage = (obj.reference_image || obj.referenceImage)
       ? { ...(obj.reference_image || obj.referenceImage), image: null }
       : null;
