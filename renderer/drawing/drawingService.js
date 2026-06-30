@@ -84,6 +84,10 @@ export const DrawingService = {
     if (fp.layers?.Points !== false) {
       R.drawGridPoints(ctx, fp);
     }
+    // Draw entry point markers (independent of Points layer)
+    if (fp.layers?.Entry_Points !== false) {
+      R.drawEntryPoints(ctx, fp);
+    }
     // Draw grid edges if layer is enabled
     if (fp.layers?.Edges !== false) {
       R.drawGridEdges(ctx, fp);

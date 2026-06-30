@@ -1658,16 +1658,92 @@ export function drawGridPoints(ctx, fp) {
       ctx.stroke();
     }
 
-    // Green outer ring for entry points
-    if (isEntry) {
+  });
+
+  ctx.restore();
+}
+
+// Draw entry point markers — rings colored per assigned zone, dashed lines to zone centroids.
+// Rendered as a separate layer so it's visible even when the Grid Points layer is hidden.
+export function drawEntryPoints(ctx, fp) {
+  if (!fp.Points || fp.Points.length === 0) return;
+  const zones = fp.Thermal_Zones || [];
+
+  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
+  const pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const toCanvas = mm => mm * pxPerUnit / mmPerUnit;
+
+  // Pre-compute each zone's stroke color and centroid (in canvas px) from subZones geometry.
+  const zoneMeta = zones.map((zone, zi) => {
+    const isInternal = zone.type === 'internal' || zone.orientation === null || zone.orientation === undefined;
+    const palette = _zoneColour(zi, isInternal);
+    let sumX = 0, sumY = 0, count = 0;
+    (zone.subZones || []).forEach(sub => {
+      (sub || []).forEach(pt => {
+        if (pt && typeof pt.x === 'number' && typeof pt.y === 'number') {
+          sumX += toCanvas(pt.x); sumY += toCanvas(pt.y); count++;
+        }
+      });
+    });
+    return { color: palette.stroke, cx: count > 0 ? sumX / count : null, cy: count > 0 ? sumY / count : null };
+  });
+
+  ctx.save();
+
+  fp.Points.forEach(point => {
+    if (point.entryPoint !== true) return;
+    const isSelected = fp.selectedPoints?.has(point.id) ?? fp.selectedPoint === point.id;
+    const assigned = (Array.isArray(point.thermalZoneIndices) ? point.thermalZoneIndices : [])
+      .filter(i => i >= 0 && i < zones.length);
+
+    // ── Dashed lines to zone centroids (drawn first, behind rings) ──────────
+    assigned.forEach(zi => {
+      const { color, cx, cy } = zoneMeta[zi];
+      if (cx === null) return;
+      ctx.save();
       ctx.beginPath();
-      ctx.arc(point.x, point.y, 7, 0, Math.PI * 2);
-      ctx.strokeStyle = '#4caf50';
-      ctx.lineWidth = 1.5;
+      ctx.moveTo(point.x, point.y);
+      ctx.lineTo(cx, cy);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 5]);
+      ctx.globalAlpha = 0.6;
       ctx.stroke();
+      ctx.restore();
+    });
+
+    // ── Concentric rings — one per assigned zone (innermost first) ──────────
+    if (assigned.length === 0) {
+      // Unassigned: neutral green ring
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, isSelected ? 9 : 7, 0, Math.PI * 2);
+      ctx.strokeStyle = isSelected ? '#a5d6a7' : '#4caf50';
+      ctx.lineWidth = isSelected ? 2 : 1.5;
+      ctx.stroke();
+    } else {
+      assigned.forEach((zi, idx) => {
+        const r = (isSelected ? 9 : 7) + idx * 4;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, r, 0, Math.PI * 2);
+        ctx.strokeStyle = zoneMeta[zi].color;
+        ctx.lineWidth = isSelected ? 2 : 1.5;
+        ctx.stroke();
+      });
+    }
+
+    // ── Zone labels beside the outermost ring ───────────────────────────────
+    if (assigned.length > 0) {
+      const outerR = (isSelected ? 9 : 7) + (assigned.length - 1) * 4 + 3;
+      ctx.font = 'bold 9px monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      assigned.forEach((zi, idx) => {
+        ctx.fillStyle = zoneMeta[zi].color;
+        ctx.fillText(`Z${zi + 1}`, point.x + outerR, point.y + idx * 10 - (assigned.length - 1) * 5);
+      });
     }
   });
-  
+
   ctx.restore();
 }
 
@@ -2321,6 +2397,7 @@ export default {
   drawCoreGhost,
   drawColumns,
   drawGridPoints,
+  drawEntryPoints,
   drawGridEdges,
   drawDoorGhost,
   drawBackgroundGrid,

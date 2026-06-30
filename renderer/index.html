@@ -195,6 +195,9 @@
             <label class="cg-label" for="thermalAirReqInput">Air req (L/s·m²)</label>
             <input id="thermalAirReqInput" type="number" min="0" step="0.1" placeholder="e.g. 7.5">
             <button id="applyThermalAirBtn" class="gp-btn" disabled>Apply Air Requirement</button>
+            <label class="cg-label" style="margin-top:8px;">Entry Points</label>
+            <div id="thermalEntryList"></div>
+            <button id="assignEntryPointBtn" class="gp-btn" disabled style="margin-top:4px;">Assign Entry Point</button>
           </div>
         </div>
       </div>
@@ -257,6 +260,7 @@
           <label><input type="checkbox" id="thermalZonesLayer" checked> Thermal Zones</label>
           <label><input type="checkbox" id="beamsLayer"> Beams</label>
           <label><input type="checkbox" id="pointsLayer"> Grid Points</label>
+          <label><input type="checkbox" id="entryPointsLayer" checked> Entry Points</label>
           <label><input type="checkbox" id="edgesLayer"> Grid Edges</label>
           <label><input type="checkbox" id="ductPlanLayer"> Ducts</label>
           </div>

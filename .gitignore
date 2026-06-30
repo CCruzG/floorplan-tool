@@ -17,6 +17,7 @@ package-lock.json
 
 # Misc
 .env
+thread.md
 
 # OS
 .DS_Store

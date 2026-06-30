@@ -145,7 +145,18 @@ export function floorplanToInstance(planJson, units) {
   // ── thermal zones (for reuse when skipping segmentation/zones stage) ──────
   const rawThermalZones = Array.isArray(planJson.thermal_zones) ? planJson.thermal_zones : [];
   if (rawThermalZones.length) {
-    instance.thermal_zones = rawThermalZones.map(zone => ({
+    // Build entry_candidates per zone from grid points the user has assigned.
+    // Uses zone index (position in array) — backend zones may lack stable ids.
+    // A point may serve multiple zones (thermalZoneIndices is an array).
+    const entriesByZoneIdx = {};
+    (instance.grid_points || []).forEach(p => {
+      if (!p.entryPoint) return;
+      (Array.isArray(p.thermalZoneIndices) ? p.thermalZoneIndices : []).forEach(zi => {
+        (entriesByZoneIdx[zi] = entriesByZoneIdx[zi] || []).push(p.id);
+      });
+    });
+
+    instance.thermal_zones = rawThermalZones.map((zone, i) => ({
       ...zone,
       // Accept both backend keys and frontend aliases.
       thermal_region_geometry: ((zone.thermal_region_geometry || zone.subZones) || []).map(sub =>
@@ -163,6 +174,8 @@ export function floorplanToInstance(planJson, units) {
           .filter(Boolean)
       ),
       vav_control_zones: zone.vav_control_zones || zone.thermalControlZones || [],
+      // User-assigned entry points override whatever the backend last returned.
+      entry_candidates: entriesByZoneIdx[i] || zone.entry_candidates || [],
     }));
   }
 

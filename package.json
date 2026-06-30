@@ -15,7 +15,8 @@
   },
   "devDependencies": {
     "electron": "^41.2.1",
-    "electron-builder": "^26.8.1"
+    "electron-builder": "^26.8.1",
+    "playwright-core": "^1.61.0"
   },
   "build": {
     "appId": "com.fbi.floorplan-tool",
@@ -34,16 +35,36 @@
     "mac": {
       "category": "public.app-category.productivity",
       "target": [
-        { "target": "dmg", "arch": ["arm64", "x64"] },
-        { "target": "zip", "arch": ["arm64", "x64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ],
       "identity": "-"
     },
     "dmg": {
       "title": "Floorplan Tool ${version}",
       "contents": [
-        { "x": 130, "y": 220 },
-        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     }
   }

@@ -126,6 +126,15 @@ function refreshInspector(fp, store) {
 
     if (selected.length === 1) {
       const pt = selected[0];
+      const zones = fp.Thermal_Zones || [];
+      const ptZoneIndices = Array.isArray(pt.thermalZoneIndices) ? pt.thermalZoneIndices : [];
+      const zoneChecks = zones.length > 0 && pt.entryPoint === true
+        ? zones.map((z, i) =>
+            `<label style="display:flex; align-items:center; gap:5px; font-size:var(--fs-xs); color:var(--text); cursor:pointer;">` +
+            `<input class="insp-pt-zone-cb" type="checkbox" value="${i}"${ptZoneIndices.includes(i) ? ' checked' : ''}> Zone ${i + 1}${z.name ? ' — ' + z.name : ''}` +
+            `</label>`
+          ).join('')
+        : '';
       panel.innerHTML = [
         `<div class="inspector-header"><span class="inspector-kind">Grid Point</span></div>`,
         `<div class="inspector-body">`,
@@ -134,6 +143,14 @@ function refreshInspector(fp, store) {
         `<div class="inspector-row"><span class="inspector-label">Column</span><input id="insp-pt-column" type="checkbox"${pt.column !== false ? ' checked' : ''}></div>`,
         `<div class="inspector-row"><span class="inspector-label">Mechanical</span><input id="insp-pt-mechanical" type="checkbox"${pt.mechanical !== false ? ' checked' : ''}></div>`,
         `<div class="inspector-row"><span class="inspector-label">Entry Point</span><input id="insp-pt-entrypoint" type="checkbox"${pt.entryPoint === true ? ' checked' : ''}></div>`,
+        pt.entryPoint === true && zones.length > 0 ? [
+          `<div class="inspector-row" style="flex-direction:column; align-items:flex-start; gap:3px;">`,
+          `<span class="inspector-label">Thermal Zones</span>`,
+          `<div id="insp-pt-zone-list" style="display:flex; flex-direction:column; gap:2px; padding-left:2px;">`,
+          zoneChecks,
+          `</div>`,
+          `</div>`,
+        ].join('') : '',
         `</div>`
       ].join('');
       panel.querySelector('#insp-pt-column').addEventListener('change', e => {
@@ -143,7 +160,16 @@ function refreshInspector(fp, store) {
         pt.mechanical = e.target.checked; store.update(fp);
       });
       panel.querySelector('#insp-pt-entrypoint').addEventListener('change', e => {
-        pt.entryPoint = e.target.checked; store.update(fp);
+        pt.entryPoint = e.target.checked;
+        if (!e.target.checked) { pt.thermalZoneIndices = []; pt.thermalSubZoneMap = {}; }
+        store.update(fp);
+      });
+      panel.querySelectorAll('.insp-pt-zone-cb').forEach(cb => {
+        cb.addEventListener('change', () => {
+          const checked = [...panel.querySelectorAll('.insp-pt-zone-cb:checked')].map(el => parseInt(el.value, 10));
+          pt.thermalZoneIndices = checked;
+          store.update(fp);
+        });
       });
     } else {
       // Mixed-value helpers: true if all match, null if mixed
@@ -1799,6 +1825,27 @@ export function bindUI(store, canvas, mouse) {
       return;
     }
 
+    // ENTRY POINT PICK MODE: intercept canvas click to assign a grid point to thermal zones
+    if (store._entryPickTarget) {
+      const allPts = store.active.Points || [];
+      let nearPt = null, nearDist = 12;
+      allPts.forEach(p => { const d = Math.hypot(x - p.x, y - p.y); if (d < nearDist) { nearDist = d; nearPt = p; } });
+      if (nearPt) {
+        nearPt.entryPoint = true;
+        const existing = Array.isArray(nearPt.thermalZoneIndices) ? nearPt.thermalZoneIndices : [];
+        const incoming = store._entryPickTarget.zoneIndices || [];
+        nearPt.thermalZoneIndices = [...new Set([...existing, ...incoming])];
+        if (!nearPt.thermalSubZoneMap) nearPt.thermalSubZoneMap = {};
+        incoming.forEach(zi => {
+          nearPt.thermalSubZoneMap[zi] = store._entryPickTarget.subZoneIndex ?? null;
+        });
+      }
+      store._entryPickTarget = null;
+      document.getElementById('canvas').style.cursor = '';
+      store.update(store.active);
+      return;
+    }
+
     // SELECT MODE: select segment and return
     if (store.mode === "select") {
       // Check for nearby grid point first (within 8px) — only when layer is visible
@@ -2045,6 +2092,12 @@ export function bindUI(store, canvas, mouse) {
     if (store.mode === "core" && e.key === "Enter") {
       commitCore(store);
     }
+    // Escape cancels entry point pick mode
+    if (e.key === "Escape" && store._entryPickTarget) {
+      store._entryPickTarget = null;
+      document.getElementById('canvas').style.cursor = '';
+      refreshThermalEditor(store);
+    }
     // Escape in select mode deselects everything
     if (store.mode === "select" && e.key === "Escape") {
       store.active.clearSelection();
@@ -2179,6 +2232,7 @@ export function bindUI(store, canvas, mouse) {
     thermalZonesLayer: 'Thermal_Zones',
     beamsLayer: 'Beams',
     pointsLayer: 'Points',
+    entryPointsLayer: 'Entry_Points',
     edgesLayer: 'Edges',
     ductPlanLayer: 'Duct_Plan'
   };
@@ -2187,7 +2241,7 @@ export function bindUI(store, canvas, mouse) {
     const checkbox = document.getElementById(checkboxId);
     if (checkbox) {
       // Set initial state - use default if store.active is null
-      checkbox.checked = store.active?.layers?.[layerName] ?? (layerName === 'Plan_Boundary' || layerName === 'Boundary_Area' || layerName === 'Core_Boundary' || layerName === 'Core_Area' || layerName === 'Columns' || layerName === 'Exclusion_Areas' || layerName === 'Thermal_Zones');
+      checkbox.checked = store.active?.layers?.[layerName] ?? (layerName === 'Plan_Boundary' || layerName === 'Boundary_Area' || layerName === 'Core_Boundary' || layerName === 'Core_Area' || layerName === 'Columns' || layerName === 'Exclusion_Areas' || layerName === 'Thermal_Zones' || layerName === 'Entry_Points');
       
       // Add event listener
       checkbox.addEventListener('change', () => {
@@ -2998,6 +3052,14 @@ function refreshThermalEditor(store) {
     inputEl.value = '';
     inputEl.disabled = true;
     applyBtn.disabled = true;
+    const entryListEl = document.getElementById('thermalEntryList');
+    if (entryListEl) entryListEl.innerHTML = '';
+    const assignEntryBtn = document.getElementById('assignEntryPointBtn');
+    if (assignEntryBtn) { assignEntryBtn.textContent = 'Assign Entry Point'; assignEntryBtn.disabled = true; }
+    if (store._entryPickTarget) {
+      store._entryPickTarget = null;
+      document.getElementById('canvas').style.cursor = '';
+    }
     return;
   }
 
@@ -3045,6 +3107,71 @@ function refreshThermalEditor(store) {
     }
     store.update(store.active);
   };
+
+  // ── Entry points section ──────────────────────────────────────────────────
+  const entryListEl = document.getElementById('thermalEntryList');
+  const assignEntryBtn = document.getElementById('assignEntryPointBtn');
+  // Determine the set of zone indices currently targeted for assignment.
+  // Use the assignment set if populated, otherwise just the editor-selected zone.
+  const assignZoneIndices = store._assignmentZoneIndices?.size
+    ? [...store._assignmentZoneIndices]
+    : [zoneIdx];
+
+  if (entryListEl) {
+    const fp = store.active;
+    // Show entry points assigned to the currently-edited zone (zoneIdx).
+    // When a sub-zone is selected, show only those explicitly assigned to that sub-zone
+    // OR those assigned at zone level (thermalSubZoneMap[zoneIdx] === null / undefined).
+    const assigned = (fp?.Points || []).filter(p => {
+      if (!p.entryPoint || !Array.isArray(p.thermalZoneIndices)) return false;
+      if (!p.thermalZoneIndices.includes(zoneIdx)) return false;
+      if (!Number.isInteger(subIdx)) return true; // zone-level view: show all
+      const storedSub = p.thermalSubZoneMap?.[zoneIdx] ?? null;
+      return storedSub === null || storedSub === subIdx;
+    });
+    if (store._entryPickTarget) {
+      const targetLabel = assignZoneIndices.map(i => `Zone ${i + 1}`).join(', ');
+      const subLabel = Number.isInteger(subIdx) ? ` / Region ${subIdx + 1}` : '';
+      entryListEl.innerHTML = `<div style="color:#f9a825; font-size:var(--fs-xs);">Click a grid point to assign to ${targetLabel}${subLabel}…</div>`;
+    } else if (assigned.length === 0) {
+      entryListEl.innerHTML = '<div style="color:var(--text-muted); font-size:var(--fs-xs);">None assigned</div>';
+    } else {
+      entryListEl.innerHTML = assigned.map(p => {
+        const ptSub = p.thermalSubZoneMap?.[zoneIdx] ?? null;
+        const subTag = Number.isInteger(ptSub) ? `<span style="color:var(--text-muted); margin-left:4px;">reg ${ptSub + 1}</span>` : '';
+        return `<div style="display:flex; justify-content:space-between; align-items:center; font-size:var(--fs-xs); padding:2px 0; border-bottom:1px solid var(--border);">` +
+          `<span style="color:var(--text); font-family:var(--font);">${p.id}${subTag}</span>` +
+          `<button class="ep-remove-btn" data-pt-id="${p.id}" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:13px; line-height:1; padding:0 2px;">×</button>` +
+          `</div>`;
+      }).join('');
+      entryListEl.querySelectorAll('.ep-remove-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const pt = (fp?.Points || []).find(p => p.id === btn.dataset.ptId);
+          if (pt) {
+            pt.thermalZoneIndices = (pt.thermalZoneIndices || []).filter(i => i !== zoneIdx);
+            if (pt.thermalSubZoneMap) delete pt.thermalSubZoneMap[zoneIdx];
+            store.update(fp);
+          }
+        });
+      });
+    }
+  }
+  if (assignEntryBtn) {
+    assignEntryBtn.disabled = false;
+    const targetLabel = assignZoneIndices.map(i => `Zone ${i + 1}`).join(', ');
+    const subLabel = Number.isInteger(subIdx) ? ` / Region ${subIdx + 1}` : '';
+    assignEntryBtn.textContent = store._entryPickTarget ? 'Cancel' : `Assign to ${targetLabel}${subLabel}`;
+    assignEntryBtn.onclick = () => {
+      if (store._entryPickTarget) {
+        store._entryPickTarget = null;
+        document.getElementById('canvas').style.cursor = '';
+      } else {
+        store._entryPickTarget = { zoneIndices: assignZoneIndices, subZoneIndex: Number.isInteger(subIdx) ? subIdx : null };
+        document.getElementById('canvas').style.cursor = 'crosshair';
+      }
+      refreshThermalEditor(store);
+    };
+  }
 }
 
 export function refreshThermalZonesList(store) {
@@ -3069,9 +3196,23 @@ export function refreshThermalZonesList(store) {
     const zoneArea = subZones.reduce((sum, sub) => sum + _thermalAreaInPlanUnits(store, sub), 0);
     const zoneAreaText = Number.isFinite(zoneArea) ? `${zoneArea.toFixed(2)} ${unitLabel}²` : '—';
 
+    const inAssignSet = store._assignmentZoneIndices?.has(ri);
     const li = document.createElement('li');
-    li.style.cssText = `display:flex; align-items:flex-start; gap:6px; padding:4px 0; border-bottom:1px solid #2a2a2a; cursor:pointer; ${selectedZone ? 'background:#182018;' : ''}`;
-    li.onclick = () => {
+    li.style.cssText = `display:flex; align-items:flex-start; gap:6px; padding:4px 0; border-bottom:1px solid #2a2a2a; cursor:pointer; ${selectedZone ? 'background:#182018;' : inAssignSet ? 'background:#1a1a2e;' : ''}`;
+    li.onclick = (ev) => {
+      if (ev.shiftKey) {
+        // Toggle in assignment set without changing the editing selection
+        if (!store._assignmentZoneIndices) store._assignmentZoneIndices = new Set();
+        if (store._assignmentZoneIndices.has(ri)) {
+          store._assignmentZoneIndices.delete(ri);
+        } else {
+          store._assignmentZoneIndices.add(ri);
+        }
+        refreshThermalZonesList(store);
+        return;
+      }
+      // Plain click: reset assignment set to just this zone, update editing selection
+      store._assignmentZoneIndices = new Set([ri]);
       _setThermalSelection(store, ri, null);
       store.update(store.active);
     };
@@ -3080,6 +3221,14 @@ export function refreshThermalZonesList(store) {
     const swatch = document.createElement('span');
     swatch.style.cssText = `display:inline-block; width:12px; height:12px; border-radius:2px; background:${colour}; flex-shrink:0; margin-top:2px;`;
     li.appendChild(swatch);
+    // Assignment-set indicator
+    if (inAssignSet) {
+      const badge = document.createElement('span');
+      badge.textContent = '⊕';
+      badge.title = 'Shift-selected for entry point assignment';
+      badge.style.cssText = 'font-size:10px; color:#7cb8ff; flex-shrink:0; margin-top:1px; line-height:1;';
+      li.appendChild(badge);
+    }
 
     // Info block
     const info = document.createElement('span');

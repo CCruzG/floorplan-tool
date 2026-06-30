@@ -1446,7 +1446,7 @@ export class FloorPlan {
 
     // ── grid points ───────────────────────────────────────────────────────
     const gridPoints = (this.Points || []).map(p => ({
-      id: p.id, x: u(p.x), y: u(p.y), column: p.column ?? true, mechanical: p.mechanical ?? true, entryPoint: p.entryPoint ?? false
+      id: p.id, x: u(p.x), y: u(p.y), column: p.column ?? true, mechanical: p.mechanical ?? true, entryPoint: p.entryPoint ?? false, thermalZoneIndices: Array.isArray(p.thermalZoneIndices) ? p.thermalZoneIndices.slice() : [], thermalSubZoneMap: p.thermalSubZoneMap ? { ...p.thermalSubZoneMap } : {}
     }));
 
     // ── exclusion areas ───────────────────────────────────────────────────
@@ -2029,7 +2029,12 @@ export class FloorPlan {
 
     // ── grid points ───────────────────────────────────────────────────────
     fp.Points = (obj.grid_points || []).map(p => ({
-      id: p.id, x: px(p.x), y: px(p.y), column: p.column ?? true, mechanical: p.mechanical ?? true, entryPoint: p.entryPoint ?? false
+      id: p.id, x: px(p.x), y: px(p.y), column: p.column ?? true, mechanical: p.mechanical ?? true, entryPoint: p.entryPoint ?? false,
+      // Migrate old single-index format to array; preserve existing arrays.
+      thermalZoneIndices: Array.isArray(p.thermalZoneIndices) ? p.thermalZoneIndices : (p.thermalZoneIndex != null ? [p.thermalZoneIndex] : []),
+      // Migrate old scalar thermalSubZoneIndex (applied to first zone) into the per-zone map.
+      thermalSubZoneMap: p.thermalSubZoneMap ? { ...p.thermalSubZoneMap }
+        : (p.thermalSubZoneIndex != null && p.thermalZoneIndex != null ? { [p.thermalZoneIndex]: p.thermalSubZoneIndex } : {})
     }));
 
     // ── exclusion areas ───────────────────────────────────────────────────
