@@ -268,6 +268,8 @@
       </div>
 
     </div>
+  <!-- Browser-native electronAPI shim (no-op when running inside Electron) -->
+  <script src="api/electronCompat.js"></script>
   <!-- Your JS entry point -->
   <script type="module" src="index.js"></script>
   <script>
