@@ -88,6 +88,10 @@ export const DrawingService = {
     if (fp.layers?.Entry_Points !== false) {
       R.drawEntryPoints(ctx, fp);
     }
+    // Draw entry-to-region connection lines (separate layer)
+    if (fp.layers?.Entry_Connections !== false) {
+      R.drawEntryConnections(ctx, fp);
+    }
     // Draw grid edges if layer is enabled
     if (fp.layers?.Edges !== false) {
       R.drawGridEdges(ctx, fp);

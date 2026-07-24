@@ -52,6 +52,7 @@
         <div style="border-top:1px solid #333; margin:4px 0;"></div>
         <div class="palette-title">Optimisation</div>
         <button id="openGridModalBtn">Place Grid…</button>
+        <button id="openStructuralModalBtn">Structural Settings…</button>
         <button id="optimiseStructureBtn">Structure</button>
         <button id="optimiseThermalBtn">Thermal Zones</button>
         <button id="optimiseDuctBtn">Duct Routing</button>
@@ -79,6 +80,48 @@
       <div class="cg-row gp-btn-row">
         <button id="generateGridBtn" class="gp-btn">Place Grid</button>
         <button id="clearGridBtn" class="gp-btn gp-btn-clear">Clear Grid</button>
+      </div>
+    </div>
+
+    <!-- Structural settings modal -->
+    <div id="structuralSettingsModal" class="floating-modal" style="display:none;">
+      <div class="modal-header">
+        <span class="modal-title">Structural Settings</span>
+        <button id="closeStructuralModalBtn" class="modal-close">×</button>
+      </div>
+      <div class="cg-row">
+        <label class="cg-label" for="structMethodSelect">Method</label>
+        <select id="structMethodSelect">
+          <option value="heuristic">Heuristic (fast)</option>
+          <option value="optimisation">Optimisation</option>
+        </select>
+      </div>
+      <div class="cg-row">
+        <label class="cg-label" for="structMaterialSelect">System</label>
+        <select id="structMaterialSelect">
+          <option value="steel+concrete">Steel + Concrete slab</option>
+          <option value="timber+timber">Timber + Timber slab</option>
+          <option value="concrete+concrete">Concrete + Concrete slab</option>
+        </select>
+      </div>
+      <div class="cg-row">
+        <label class="cg-label">Beam direction</label>
+        <div class="struct-options">
+          <label><input type="radio" name="structBeamDir" value="horizontal" checked> Horiz.</label>
+          <label><input type="radio" name="structBeamDir" value="vertical"> Vert.</label>
+        </div>
+      </div>
+      <div class="cg-row">
+        <label class="cg-label">Grid size</label>
+        <div class="struct-options">
+          <label><input type="radio" name="structGridSize" value="3"> 3 m</label>
+          <label><input type="radio" name="structGridSize" value="6"> 6 m</label>
+          <label><input type="radio" name="structGridSize" value="9" checked> 9 m</label>
+        </div>
+      </div>
+      <div class="cg-row gp-btn-row" style="margin-top:8px;">
+        <button id="structSettingsOkBtn" class="gp-btn">OK</button>
+        <button id="structSettingsCancelBtn" class="gp-btn gp-btn-clear">Cancel</button>
       </div>
     </div>
 
@@ -132,6 +175,7 @@
         <div class="mode-indicator" id="canvasModeIndicator">Edit Mode</div>
       </div>
 
+      <div id="panelResizeHandle"></div>
       <div id="jsonPanel" class="panel">
         <div class="panel-tabs">
           <button type="button" class="panel-tab active" data-panel-tab="dashboard">Dashboard</button>
@@ -167,44 +211,53 @@
       </div>
 
       <div id="thermalZonesPanel" class="panel">
-        <div class="cg-header">Thermal Zones</div>
-        <div class="cg-body">
-          <ul id="thermalZonesList" class="ea-list"></ul>
-          <div id="thermalEditor" class="thermal-editor">
-            <div id="thermalSelectionLabel" class="thermal-selection-label">Select a zone to edit</div>
-            <label class="cg-label" for="thermalAirReqInput">Airflow rate (L/s·m²)</label>
-            <input id="thermalAirReqInput" type="number" min="0" step="0.1" placeholder="e.g. 7.5">
-            <button id="applyThermalAirBtn" class="gp-btn" disabled>Set Airflow Rate</button>
-            <label class="cg-label" style="margin-top:8px;">Entry Points</label>
-            <div id="thermalEntryList"></div>
-            <button id="assignEntryPointBtn" class="gp-btn" disabled style="margin-top:4px;">Assign Entry Point</button>
+        <div class="thermal-panel-columns">
+
+          <!-- Left column: zone list -->
+          <div class="thermal-col-left">
+            <div class="cg-header">Thermal Zones</div>
+            <ul id="thermalZonesList" class="ea-list"></ul>
           </div>
-          <!-- Airflow criteria, embedded below zone editor -->
-          <div class="thermal-criteria">
-            <div class="cg-header" style="margin-top:8px;">Airflow Criteria</div>
-            <div class="cg-row">
-              <label class="cg-label" for="defaultAirReqInput">Default rate</label>
-              <div class="cg-input-group">
-                <input type="number" id="defaultAirReqInput" min="0" step="0.5" value="7.5" style="width:52px;">
-                <span class="cg-unit">L/s·m²</span>
+
+          <!-- Right column: editor + airflow criteria -->
+          <div class="thermal-col-right">
+            <div id="thermalEditor" class="thermal-editor">
+              <div id="thermalSelectionLabel" class="thermal-selection-label">Select a zone to edit</div>
+              <label class="cg-label" for="thermalAirReqInput">Airflow rate (L/s·m²)</label>
+              <input id="thermalAirReqInput" type="number" min="0" step="0.1" placeholder="e.g. 7.5">
+              <button id="applyThermalAirBtn" class="gp-btn" disabled>Set Airflow Rate</button>
+              <label class="cg-label" style="margin-top:8px;">Entry Points</label>
+              <div id="thermalEntryList"></div>
+              <button id="assignEntryPointBtn" class="gp-btn" disabled style="margin-top:4px;">Assign Entry Point</button>
+            </div>
+            <!-- Airflow criteria -->
+            <div class="thermal-criteria">
+              <div class="cg-header" style="margin-top:8px;">Airflow Criteria</div>
+              <div class="cg-row">
+                <label class="cg-label" for="defaultAirReqInput">Default rate</label>
+                <div class="cg-input-group">
+                  <input type="number" id="defaultAirReqInput" min="0" step="0.5" value="7.5" style="width:52px;">
+                  <span class="cg-unit">L/s·m²</span>
+                </div>
               </div>
-            </div>
-            <div class="cg-row">
-              <button id="applyDefaultAirBtn" class="gp-btn">Apply to unset zones</button>
-            </div>
-            <div class="cg-row" style="margin-top:8px; border-top:1px solid var(--border-mid); padding-top:8px;">
-              <label class="cg-label" for="pinchVelocityInput">Max duct velocity</label>
-              <div class="cg-input-group">
-                <input type="number" id="pinchVelocityInput" min="0.1" step="0.5" value="8" style="width:52px;">
-                <span class="cg-unit">m/s</span>
+              <div class="cg-row">
+                <button id="applyDefaultAirBtn" class="gp-btn">Apply to unset zones</button>
               </div>
+              <div class="cg-row" style="margin-top:8px; border-top:1px solid var(--border-mid); padding-top:8px;">
+                <label class="cg-label" for="pinchVelocityInput">Max duct velocity</label>
+                <div class="cg-input-group">
+                  <input type="number" id="pinchVelocityInput" min="0.1" step="0.5" value="8" style="width:52px;">
+                  <span class="cg-unit">m/s</span>
+                </div>
+              </div>
+              <div class="cg-row">
+                <label class="cg-label" for="showPinchChk">Highlight overloaded</label>
+                <input type="checkbox" id="showPinchChk" checked>
+              </div>
+              <div id="pinchSummary" class="criteria-note"></div>
             </div>
-            <div class="cg-row">
-              <label class="cg-label" for="showPinchChk">Highlight overloaded</label>
-              <input type="checkbox" id="showPinchChk" checked>
-            </div>
-            <div id="pinchSummary" class="criteria-note"></div>
           </div>
+
         </div>
       </div>
 
@@ -255,6 +308,7 @@
               <label><input type="checkbox" id="beamsLayer"> Beams</label>
               <label><input type="checkbox" id="pointsLayer"> Grid Points</label>
               <label><input type="checkbox" id="entryPointsLayer" checked> Entry Points</label>
+              <label><input type="checkbox" id="entryConnectionsLayer" checked> Entry Connections</label>
               <label><input type="checkbox" id="edgesLayer"> Grid Edges</label>
               <label><input type="checkbox" id="ductPlanLayer"> Ducts</label>
             </div>
@@ -274,6 +328,7 @@
   <script type="module" src="index.js"></script>
   <script>
     (function () {
+      // ── Vertical resize: bottom panels ───────────────────────────────────────
       const handle = document.getElementById('resizeHandle');
       const panels = document.getElementById('bottomPanels');
       const app    = document.getElementById('app');
@@ -293,6 +348,36 @@
         const delta  = startY - e.clientY;
         const newH   = Math.max(60, Math.min(startH + delta, app.getBoundingClientRect().height - 80));
         panels.style.flex = `0 0 ${newH}px`;
+      });
+
+      document.addEventListener('mouseup', () => {
+        if (!dragging) return;
+        dragging = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      });
+    })();
+
+    (function () {
+      // ── Horizontal resize: right JSON panel ──────────────────────────────────
+      const handle    = document.getElementById('panelResizeHandle');
+      const jsonPanel = document.getElementById('jsonPanel');
+      let dragging = false, startX = 0, startW = 0;
+
+      handle.addEventListener('mousedown', e => {
+        dragging = true;
+        startX = e.clientX;
+        startW = jsonPanel.getBoundingClientRect().width;
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        e.preventDefault();
+      });
+
+      document.addEventListener('mousemove', e => {
+        if (!dragging) return;
+        const delta = startX - e.clientX;
+        const newW  = Math.max(200, Math.min(startW + delta, window.innerWidth * 0.6));
+        jsonPanel.style.flex = `0 0 ${newW}px`;
       });
 
       document.addEventListener('mouseup', () => {

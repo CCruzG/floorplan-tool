@@ -1663,29 +1663,111 @@ export function drawGridPoints(ctx, fp) {
   ctx.restore();
 }
 
-// Draw entry point markers — rings colored per assigned zone, dashed lines to zone centroids.
+// Helper: compute centroid (in canvas px) of a single subZone polygon.
+function _subZoneCentroid(subZone, toCanvas) {
+  let sumX = 0, sumY = 0, count = 0;
+  (subZone || []).forEach(pt => {
+    if (pt && typeof pt.x === 'number' && typeof pt.y === 'number') {
+      sumX += toCanvas(pt.x); sumY += toCanvas(pt.y); count++;
+    }
+  });
+  return count > 0 ? { cx: sumX / count, cy: sumY / count } : { cx: null, cy: null };
+}
+
+// Draw dashed lines from each entry point to the centroid of its assigned sub-region.
+// Separate layer so it can be toggled independently of entry point markers.
+export function drawEntryConnections(ctx, fp) {
+  if (!fp.Points || fp.Points.length === 0) return;
+  const zones = fp.Thermal_Zones || [];
+  if (zones.length === 0) return;
+
+  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
+  const pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const toCanvas  = mm => mm * pxPerUnit / mmPerUnit;
+
+  const zoneColors = zones.map((zone, zi) => {
+    const isInternal = zone.type === 'internal' || zone.orientation === null || zone.orientation === undefined;
+    return _zoneColour(zi, isInternal).stroke;
+  });
+
+  ctx.save();
+  fp.Points.forEach(point => {
+    if (point.entryPoint !== true) return;
+
+    // Build the list of {zoneIndex, subZoneIndex} pairs to draw lines to.
+    // Use thermalRegions (new format) when present; fall back to legacy fields.
+    let regionList = [];
+    if (Array.isArray(point.thermalRegions) && point.thermalRegions.length > 0) {
+      regionList = point.thermalRegions;
+    } else {
+      regionList = (point.thermalZoneIndices || [])
+        .filter(zi => zi >= 0 && zi < zones.length)
+        .map(zi => ({ zoneIndex: zi, subZoneIndex: point.thermalSubZoneMap?.[zi] ?? null }));
+    }
+
+    regionList.forEach(({ zoneIndex: zi, subZoneIndex: szi }) => {
+      const zone = zones[zi];
+      if (!zone) return;
+      const controlZones = Array.isArray(zone.thermalControlZones) ? zone.thermalControlZones : [];
+      const useControl   = controlZones.some(cz => Array.isArray(cz?.polygon) && cz.polygon.length >= 3);
+      const subZones     = zone.subZones || [];
+
+      let targetPoly = null;
+      if (typeof szi === 'number' && szi >= 0) {
+        if (useControl) {
+          const cz = controlZones[szi];
+          if (Array.isArray(cz?.polygon) && cz.polygon.length >= 3) targetPoly = cz.polygon;
+        } else if (szi < subZones.length) {
+          targetPoly = subZones[szi];
+        }
+      }
+
+      let cx, cy;
+      if (targetPoly) {
+        ({ cx, cy } = _subZoneCentroid(targetPoly, toCanvas));
+      } else {
+        // Fallback: centroid of all geometry in the zone.
+        const allPolygons = useControl
+          ? controlZones.map(cz => cz?.polygon).filter(p => Array.isArray(p))
+          : subZones;
+        let sumX = 0, sumY = 0, count = 0;
+        allPolygons.forEach(sub => {
+          (sub || []).forEach(pt => {
+            if (pt && typeof pt.x === 'number' && typeof pt.y === 'number') {
+              sumX += toCanvas(pt.x); sumY += toCanvas(pt.y); count++;
+            }
+          });
+        });
+        cx = count > 0 ? sumX / count : null;
+        cy = count > 0 ? sumY / count : null;
+      }
+      if (cx == null) return;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(point.x, point.y);
+      ctx.lineTo(cx, cy);
+      ctx.strokeStyle = zoneColors[zi];
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 5]);
+      ctx.globalAlpha = 0.6;
+      ctx.stroke();
+      ctx.restore();
+    });
+  });
+  ctx.restore();
+}
+
+// Draw entry point markers — rings colored per assigned zone.
 // Rendered as a separate layer so it's visible even when the Grid Points layer is hidden.
 export function drawEntryPoints(ctx, fp) {
   if (!fp.Points || fp.Points.length === 0) return;
   const zones = fp.Thermal_Zones || [];
 
-  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
-  const pxPerUnit = fp.units?.pxPerUnit ?? 1;
-  const toCanvas = mm => mm * pxPerUnit / mmPerUnit;
-
-  // Pre-compute each zone's stroke color and centroid (in canvas px) from subZones geometry.
-  const zoneMeta = zones.map((zone, zi) => {
+  // Pre-compute each zone's stroke color.
+  const zoneColors = zones.map((zone, zi) => {
     const isInternal = zone.type === 'internal' || zone.orientation === null || zone.orientation === undefined;
-    const palette = _zoneColour(zi, isInternal);
-    let sumX = 0, sumY = 0, count = 0;
-    (zone.subZones || []).forEach(sub => {
-      (sub || []).forEach(pt => {
-        if (pt && typeof pt.x === 'number' && typeof pt.y === 'number') {
-          sumX += toCanvas(pt.x); sumY += toCanvas(pt.y); count++;
-        }
-      });
-    });
-    return { color: palette.stroke, cx: count > 0 ? sumX / count : null, cy: count > 0 ? sumY / count : null };
+    return _zoneColour(zi, isInternal).stroke;
   });
 
   ctx.save();
@@ -1695,22 +1777,6 @@ export function drawEntryPoints(ctx, fp) {
     const isSelected = fp.selectedPoints?.has(point.id) ?? fp.selectedPoint === point.id;
     const assigned = (Array.isArray(point.thermalZoneIndices) ? point.thermalZoneIndices : [])
       .filter(i => i >= 0 && i < zones.length);
-
-    // ── Dashed lines to zone centroids (drawn first, behind rings) ──────────
-    assigned.forEach(zi => {
-      const { color, cx, cy } = zoneMeta[zi];
-      if (cx === null) return;
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(point.x, point.y);
-      ctx.lineTo(cx, cy);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.setLineDash([5, 5]);
-      ctx.globalAlpha = 0.6;
-      ctx.stroke();
-      ctx.restore();
-    });
 
     // ── Concentric rings — one per assigned zone (innermost first) ──────────
     if (assigned.length === 0) {
@@ -1725,7 +1791,7 @@ export function drawEntryPoints(ctx, fp) {
         const r = (isSelected ? 9 : 7) + idx * 4;
         ctx.beginPath();
         ctx.arc(point.x, point.y, r, 0, Math.PI * 2);
-        ctx.strokeStyle = zoneMeta[zi].color;
+        ctx.strokeStyle = zoneColors[zi];
         ctx.lineWidth = isSelected ? 2 : 1.5;
         ctx.stroke();
       });
@@ -1738,7 +1804,7 @@ export function drawEntryPoints(ctx, fp) {
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       assigned.forEach((zi, idx) => {
-        ctx.fillStyle = zoneMeta[zi].color;
+        ctx.fillStyle = zoneColors[zi];
         ctx.fillText(`Z${zi + 1}`, point.x + outerR, point.y + idx * 10 - (assigned.length - 1) * 5);
       });
     }
@@ -1876,6 +1942,7 @@ export function drawThermalZones(ctx, fp) {
     const isSelectedZone = fp.selectedThermalZoneIndex === ri;
     const selectedSubZone = fp.selectedThermalSubZoneIndex;
     const selectedSubSource = fp.selectedThermalSubZoneSource || 'sub';
+    const selRegions = fp._thermalSelectionRegions || [];
     const hasControlZones = Array.isArray(region.thermalControlZones) && region.thermalControlZones.length > 0;
     const validRings = [];
 
@@ -1918,14 +1985,11 @@ export function drawThermalZones(ctx, fp) {
       });
       ctx.closePath();
 
-      const isSelectedSub = isSelectedZone
-        && selectedSubSource === 'sub'
-        && Number.isInteger(selectedSubZone)
-        && selectedSubZone === subIdx;
-      ctx.strokeStyle = isSelectedSub
-        ? '#ffe082'
-        : palette.stroke;
-      ctx.lineWidth = isSelectedSub ? 2.6 : 1.2;
+      const isSelectedSub = isSelectedZone && selectedSubSource === 'sub'
+        && Number.isInteger(selectedSubZone) && selectedSubZone === subIdx;
+      const isRegionSelected = selRegions.some(r => r.zoneIndex === ri && r.subZoneIndex === subIdx);
+      ctx.strokeStyle = isSelectedSub ? '#ffe082' : isRegionSelected ? '#7cb8ff' : palette.stroke;
+      ctx.lineWidth = isSelectedSub ? 2.6 : isRegionSelected ? 2.0 : 1.2;
       ctx.stroke();
 
       // If control zones are not available, label each sub-region directly.
@@ -2005,6 +2069,7 @@ export function drawThermalControlZones(ctx, fp) {
     const isSelectedZone = fp.selectedThermalZoneIndex === ri;
     const selectedSubZone = fp.selectedThermalSubZoneIndex;
     const selectedSubSource = fp.selectedThermalSubZoneSource || 'sub';
+    const selRegions = fp._thermalSelectionRegions || [];
 
     controlZones.forEach((cz, ci) => {
       const subAir = Array.isArray(region.subZoneAirRequirements)
@@ -2032,16 +2097,17 @@ export function drawThermalControlZones(ctx, fp) {
             ? `rgba(140,140,140,${fillAlpha})`
             : `hsla(${hue},${sat},${lightness}%,${fillAlpha})`;
           ctx.fill();
-          const isSelectedControl = isSelectedZone
-            && selectedSubSource === 'control'
-            && Number.isInteger(selectedSubZone)
-            && selectedSubZone === ci;
+          const isSelectedControl = isSelectedZone && selectedSubSource === 'control'
+            && Number.isInteger(selectedSubZone) && selectedSubZone === ci;
+          const isRegionSelected = selRegions.some(r => r.zoneIndex === ri && r.subZoneIndex === ci);
           ctx.strokeStyle = isSelectedControl
             ? '#ffe082'
-            : (isInternal
-              ? `rgba(90,90,90,${strokeAlpha})`
-              : `hsla(${hue},${sat},${Math.max(30, lightness - 20)}%,${strokeAlpha})`);
-          ctx.lineWidth = isSelectedControl ? 2.4 : 1.2;
+            : isRegionSelected
+              ? '#7cb8ff'
+              : (isInternal
+                ? `rgba(90,90,90,${strokeAlpha})`
+                : `hsla(${hue},${sat},${Math.max(30, lightness - 20)}%,${strokeAlpha})`);
+          ctx.lineWidth = isSelectedControl ? 2.4 : isRegionSelected ? 2.0 : 1.2;
           ctx.setLineDash([4, 2]);
           ctx.stroke();
           ctx.setLineDash([]);

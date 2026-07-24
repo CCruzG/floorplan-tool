@@ -1,5 +1,6 @@
 // renderer/models/promptRenderer.js
 import { floorplanPromptTemplate } from './promptTemplate.js';
+import * as _evaluator from './requirementsEvaluator.js';
 
 export function renderPrompt(fp) {
   const requirements = JSON.stringify(fp.requirements, null, 2);
@@ -19,10 +20,7 @@ export function renderPrompt(fp) {
   let feasibilitySummary = 'No feasibility data available.';
   let feasibilityReport = {};
   try {
-    // try commonjs require (Node/Electron environment)
-    // eslint-disable-next-line global-require
-    const evaluator = require('./requirementsEvaluator.js');
-    const report = evaluator.evaluateRequirements(fp);
+    const report = _evaluator.evaluateRequirements(fp);
     feasibilityReport = report || {};
     feasibilitySummary = report.summary + ' Suggestions: ' + (report.suggestions || []).slice(0,3).join('; ');
   } catch (err) {
