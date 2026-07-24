@@ -1851,13 +1851,16 @@ export function bindUI(store, canvas, mouse) {
       allPts.forEach(p => { const d = Math.hypot(x - p.x, y - p.y); if (d < nearDist) { nearDist = d; nearPt = p; } });
       if (nearPt) {
         nearPt.entryPoint = true;
-        const existing = Array.isArray(nearPt.thermalZoneIndices) ? nearPt.thermalZoneIndices : [];
-        const incoming = store._entryPickTarget.zoneIndices || [];
-        nearPt.thermalZoneIndices = [...new Set([...existing, ...incoming])];
-        if (!nearPt.thermalSubZoneMap) nearPt.thermalSubZoneMap = {};
-        incoming.forEach(zi => {
-          nearPt.thermalSubZoneMap[zi] = store._entryPickTarget.subZoneIndex ?? null;
+        if (!nearPt.thermalRegions) nearPt.thermalRegions = [];
+        const incoming = store._entryPickTarget.regions || [];
+        incoming.forEach(r => {
+          const exists = nearPt.thermalRegions.some(er => er.zoneIndex === r.zoneIndex && er.subZoneIndex === r.subZoneIndex);
+          if (!exists) nearPt.thermalRegions.push({ zoneIndex: r.zoneIndex, subZoneIndex: r.subZoneIndex });
         });
+        // Derive legacy fields so the backend still works.
+        nearPt.thermalZoneIndices = [...new Set(nearPt.thermalRegions.map(r => r.zoneIndex))];
+        nearPt.thermalSubZoneMap = {};
+        nearPt.thermalRegions.forEach(r => { nearPt.thermalSubZoneMap[r.zoneIndex] = r.subZoneIndex; });
       }
       store._entryPickTarget = null;
       document.getElementById('canvas').style.cursor = '';
@@ -1899,8 +1902,28 @@ export function bindUI(store, canvas, mouse) {
         store.active.selectedCore = false;
         store.active.selectedPoints = new Set();
         store.active.selectedPoint = null;
-        _setThermalSelection(store, thermalHit.zoneIndex, thermalHit.subZoneIndex, thermalHit.subZoneSource);
-        store.update(store.active);
+        const hit = thermalHit;
+        if (e.shiftKey) {
+          // Shift-click: toggle this specific region (zone+subzone pair) in the selection list.
+          if (!store._selectedRegions) store._selectedRegions = [];
+          const idx = store._selectedRegions.findIndex(r => r.zoneIndex === hit.zoneIndex && r.subZoneIndex === hit.subZoneIndex);
+          if (idx >= 0) {
+            store._selectedRegions = store._selectedRegions.filter((_, i) => i !== idx);
+          } else {
+            store._selectedRegions = [...store._selectedRegions, { zoneIndex: hit.zoneIndex, subZoneIndex: hit.subZoneIndex, subZoneSource: hit.subZoneSource }];
+          }
+          if (!Number.isInteger(store.active.selectedThermalZoneIndex)) {
+            _setThermalSelection(store, hit.zoneIndex, hit.subZoneIndex, hit.subZoneSource);
+          }
+        } else {
+          // Plain click: single region selected.
+          store._selectedRegions = [{ zoneIndex: hit.zoneIndex, subZoneIndex: hit.subZoneIndex, subZoneSource: hit.subZoneSource }];
+          _setThermalSelection(store, hit.zoneIndex, hit.subZoneIndex, hit.subZoneSource);
+        }
+        store.active._thermalSelectionRegions = store._selectedRegions;
+        refreshThermalZonesList(store);
+        refreshThermalEditor(store);
+        store.notify();
         return;
       }
 
@@ -2217,6 +2240,86 @@ export function bindUI(store, canvas, mouse) {
   document.getElementById('openGridModalBtn')?.addEventListener('click', _openGridModal);
   document.getElementById('closeGridModalBtn')?.addEventListener('click', _closeGridModal);
 
+  // STRUCTURAL SETTINGS MODAL
+  // ═══════════════════════════════════════════════════════════
+
+  const _structModal = document.getElementById('structuralSettingsModal');
+  let _structSavedState = null;
+
+  function _structModalSnapshot() {
+    return {
+      method:    document.getElementById('structMethodSelect')?.value ?? 'heuristic',
+      material:  document.getElementById('structMaterialSelect')?.value ?? 'steel+concrete',
+      direction: document.querySelector('input[name="structBeamDir"]:checked')?.value ?? 'horizontal',
+      gridSize:  document.querySelector('input[name="structGridSize"]:checked')?.value ?? '9',
+    };
+  }
+
+  function _structModalRestore(state) {
+    if (!state) return;
+    const m = document.getElementById('structMethodSelect');
+    if (m) m.value = state.method;
+    const mat = document.getElementById('structMaterialSelect');
+    if (mat) mat.value = state.material;
+    const dir = document.querySelector(`input[name="structBeamDir"][value="${state.direction}"]`);
+    if (dir) dir.checked = true;
+    const sz = document.querySelector(`input[name="structGridSize"][value="${state.gridSize}"]`);
+    if (sz) sz.checked = true;
+  }
+
+  function _openStructModal() {
+    _structSavedState = _structModalSnapshot();
+    if (_structModal) _structModal.style.display = 'block';
+  }
+  function _closeStructModal() { if (_structModal) _structModal.style.display = 'none'; }
+  function _cancelStructModal() { _structModalRestore(_structSavedState); _closeStructModal(); }
+
+  document.getElementById('openStructuralModalBtn')?.addEventListener('click', _openStructModal);
+  document.getElementById('closeStructuralModalBtn')?.addEventListener('click', _cancelStructModal);
+  document.getElementById('structSettingsOkBtn')?.addEventListener('click', _closeStructModal);
+  document.getElementById('structSettingsCancelBtn')?.addEventListener('click', _cancelStructModal);
+
+  function _getStructuralConfig() {
+    const method   = document.getElementById('structMethodSelect')?.value ?? 'heuristic';
+    const material = document.getElementById('structMaterialSelect')?.value ?? 'steel+concrete';
+    const [beamMat, slabMat] = material.split('+');
+    const beamDir  = document.querySelector('input[name="structBeamDir"]:checked')?.value ?? 'horizontal';
+    const gridSize = parseInt(document.querySelector('input[name="structGridSize"]:checked')?.value ?? '9', 10);
+    return {
+      structural_planning: {
+        method,
+        beam_material: beamMat,
+        slab_material: slabMat,
+        beam_direction: beamDir,
+        beamSpan:    gridSize,
+        beamSpacing: gridSize,
+      },
+    };
+  }
+
+  function _showStructuralFailureHint(errorMsg, structCfg, aiError) {
+    if (!aiError) return;
+    const err = errorMsg ?? '';
+    const sp  = structCfg?.structural_planning ?? {};
+    const isNoPoints  = err.includes('no allowed column grid points');
+    const isInfeasible = err.includes('feasible column layout');
+    if (!isNoPoints && !isInfeasible) return; // generic handler already set the message
+    const gridLabel   = `${sp.beamSpan ?? 9}×${sp.beamSpacing ?? 9} m`;
+    const methodLabel = sp.method === 'optimisation' ? 'Optimisation' : 'Heuristic';
+    const dirLabel    = sp.beam_direction === 'vertical' ? 'vertical' : 'horizontal';
+    let msg;
+    if (isNoPoints) {
+      msg = `Structural: no valid column positions for a ${gridLabel} grid — the floorplan may be too small for this grid size. ` +
+            `Try a smaller grid size (6 m or 3 m) in Structural Settings.`;
+    } else {
+      msg = `Structural: solver could not place columns with ${methodLabel} method, ${gridLabel} grid, ${dirLabel} beams. ` +
+            `Try: switch to Heuristic method, use a smaller grid size (6 m or 3 m), or change beam direction.`;
+    }
+    aiError.style.display = 'block';
+    aiError.style.color = '';
+    aiError.textContent = msg;
+  }
+
   const generateGridBtn   = document.getElementById('generateGridBtn');
   const clearGridBtn      = document.getElementById('clearGridBtn');
   const gridSpacingInput  = document.getElementById('gridSpacingInput');
@@ -2262,15 +2365,21 @@ export function bindUI(store, canvas, mouse) {
     beamsLayer: 'Beams',
     pointsLayer: 'Points',
     entryPointsLayer: 'Entry_Points',
+    entryConnectionsLayer: 'Entry_Connections',
     edgesLayer: 'Edges',
     ductPlanLayer: 'Duct_Plan'
   };
+
+  const _defaultOnLayers = new Set([
+    'Plan_Boundary', 'Boundary_Area', 'Core_Boundary', 'Core_Area',
+    'Columns', 'Exclusion_Areas', 'Thermal_Zones', 'Entry_Points', 'Entry_Connections',
+  ]);
 
   Object.entries(layerCheckboxes).forEach(([checkboxId, layerName]) => {
     const checkbox = document.getElementById(checkboxId);
     if (checkbox) {
       // Set initial state - use default if store.active is null
-      checkbox.checked = store.active?.layers?.[layerName] ?? (layerName === 'Plan_Boundary' || layerName === 'Boundary_Area' || layerName === 'Core_Boundary' || layerName === 'Core_Area' || layerName === 'Columns' || layerName === 'Exclusion_Areas' || layerName === 'Thermal_Zones' || layerName === 'Entry_Points');
+      checkbox.checked = store.active?.layers?.[layerName] ?? _defaultOnLayers.has(layerName);
       
       // Add event listener
       checkbox.addEventListener('change', () => {
@@ -2689,11 +2798,11 @@ export function bindUI(store, canvas, mouse) {
       }
     };
 
-    const runStage = async (phases, pollIntervalMs = 2000) => {
+    const runStage = async (phases, pollIntervalMs = 2000, config = null) => {
       const planJson = fp.toJSON();
       const units = fp.units || { length: getUnitLabel() || 'm', pxPerUnit: getPixelsPerUnit() || 1 };
       if (phases.length > 0) _currentPhase = phases[0];
-      const started = await startOptimisation(planJson, units, { phases });
+      const started = await startOptimisation(planJson, units, { phases, ...(config ? { config } : {}) });
       if (!started.ok) {
         if (aiError) { aiError.style.display = 'block'; aiError.textContent = `Optimisation failed: ${started.error}`; }
         return { ok: false, error: started.error };
@@ -2774,8 +2883,12 @@ export function bindUI(store, canvas, mouse) {
     const hasExisting = (Array.isArray(fp.Columns) && fp.Columns.length > 0) ||
                         (Array.isArray(fp.Beams)   && fp.Beams.length   > 0);
     if (hasExisting && !window.confirm('Existing structural elements were found. Re-run structural optimisation?')) return;
-    const result = await runStage(['structural']);
-    if (!result.ok) return;
+    const structCfg = _getStructuralConfig();
+    const result = await runStage(['structural'], 2000, structCfg);
+    if (!result.ok) {
+      _showStructuralFailureHint(result.error, structCfg, aiError);
+      return;
+    }
     if (aiError) { aiError.style.display = 'block'; aiError.style.color = '#e6a817'; aiError.textContent = 'Structural complete. Review columns/beams, then run Thermal Zones or Full Optimise.'; }
   };
 
@@ -2812,8 +2925,9 @@ export function bindUI(store, canvas, mouse) {
       shouldRunStructural = window.confirm('Existing structural elements were found. Click OK to re-run structural optimisation, or Cancel to keep them and continue to the next step.');
     }
     if (shouldRunStructural) {
-      const r = await runStage(['structural']);
-      if (!r.ok) return;
+      const structCfg = _getStructuralConfig();
+      const r = await runStage(['structural'], 2000, structCfg);
+      if (!r.ok) { _showStructuralFailureHint(r.error, structCfg, aiError); return; }
       if (!await waitForContinue('continue', 'Structural optimisation complete. Review columns/beams, then click Continue.')) {
         if (aiError) { aiError.style.display = 'block'; aiError.style.color = '#e6a817'; aiError.textContent = 'Optimisation paused after structural stage.'; }
         return;
@@ -3094,11 +3208,13 @@ function refreshThermalEditor(store) {
 
   const zoneIdx = store.active.selectedThermalZoneIndex;
   const zoneLabel = `Zone ${zoneIdx + 1}`;
+  const nSel = (store._selectedRegions || []).length;
+  const multiTag = nSel > 1 ? ` (+${nSel - 1} more region${nSel - 1 !== 1 ? 's' : ''} selected)` : '';
   if (Number.isInteger(subIdx)) {
     const regionLabel = subSource === 'control' ? 'Control Region' : 'Region';
-    labelEl.textContent = `Selected: ${zoneLabel} / ${regionLabel} ${subIdx + 1}`;
+    labelEl.textContent = `${zoneLabel} / ${regionLabel} ${subIdx + 1}${multiTag}`;
   } else {
-    labelEl.textContent = `Selected: ${zoneLabel}`;
+    labelEl.textContent = `${zoneLabel}${multiTag}`;
   }
 
   if (!Array.isArray(region.subZoneAirRequirements)) {
@@ -3140,36 +3256,32 @@ function refreshThermalEditor(store) {
   // ── Entry points section ──────────────────────────────────────────────────
   const entryListEl = document.getElementById('thermalEntryList');
   const assignEntryBtn = document.getElementById('assignEntryPointBtn');
-  // Determine the set of zone indices currently targeted for assignment.
-  // Use the assignment set if populated, otherwise just the editor-selected zone.
-  const assignZoneIndices = store._assignmentZoneIndices?.size
-    ? [...store._assignmentZoneIndices]
-    : [zoneIdx];
+  const selectedRegions = store._selectedRegions || [];
 
   if (entryListEl) {
     const fp = store.active;
-    // Show entry points assigned to the currently-edited zone (zoneIdx).
-    // When a sub-zone is selected, show only those explicitly assigned to that sub-zone
-    // OR those assigned at zone level (thermalSubZoneMap[zoneIdx] === null / undefined).
+    // Show entry points that have any thermalRegion belonging to the currently-edited zone.
     const assigned = (fp?.Points || []).filter(p => {
-      if (!p.entryPoint || !Array.isArray(p.thermalZoneIndices)) return false;
-      if (!p.thermalZoneIndices.includes(zoneIdx)) return false;
-      if (!Number.isInteger(subIdx)) return true; // zone-level view: show all
-      const storedSub = p.thermalSubZoneMap?.[zoneIdx] ?? null;
-      return storedSub === null || storedSub === subIdx;
+      if (!p.entryPoint) return false;
+      if (Array.isArray(p.thermalRegions) && p.thermalRegions.length > 0) {
+        return p.thermalRegions.some(r => r.zoneIndex === zoneIdx);
+      }
+      return Array.isArray(p.thermalZoneIndices) && p.thermalZoneIndices.includes(zoneIdx);
     });
     if (store._entryPickTarget) {
-      const targetLabel = assignZoneIndices.map(i => `Zone ${i + 1}`).join(', ');
-      const subLabel = Number.isInteger(subIdx) ? ` / Region ${subIdx + 1}` : '';
-      entryListEl.innerHTML = `<div style="color:#f9a825; font-size:var(--fs-xs);">Click a grid point to assign to ${targetLabel}${subLabel}…</div>`;
+      const n = store._entryPickTarget.regions?.length ?? 0;
+      entryListEl.innerHTML = `<div style="color:#f9a825; font-size:var(--fs-xs);">Click a grid point to assign ${n} region${n !== 1 ? 's' : ''}…</div>`;
     } else if (assigned.length === 0) {
       entryListEl.innerHTML = '<div style="color:var(--text-muted); font-size:var(--fs-xs);">None assigned</div>';
     } else {
       entryListEl.innerHTML = assigned.map(p => {
-        const ptSub = p.thermalSubZoneMap?.[zoneIdx] ?? null;
-        const subTag = Number.isInteger(ptSub) ? `<span style="color:var(--text-muted); margin-left:4px;">reg ${ptSub + 1}</span>` : '';
+        // List which regions of this zone are assigned to this entry point.
+        const regs = (p.thermalRegions || []).filter(r => r.zoneIndex === zoneIdx);
+        const regTag = regs.length > 0
+          ? `<span style="color:var(--text-muted); margin-left:4px;">${regs.map(r => `r${r.subZoneIndex + 1}`).join(', ')}</span>`
+          : '';
         return `<div style="display:flex; justify-content:space-between; align-items:center; font-size:var(--fs-xs); padding:2px 0; border-bottom:1px solid var(--border);">` +
-          `<span style="color:var(--text); font-family:var(--font);">${p.id}${subTag}</span>` +
+          `<span style="color:var(--text); font-family:var(--font);">${p.id}${regTag}</span>` +
           `<button class="ep-remove-btn" data-pt-id="${p.id}" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:13px; line-height:1; padding:0 2px;">×</button>` +
           `</div>`;
       }).join('');
@@ -3177,8 +3289,10 @@ function refreshThermalEditor(store) {
         btn.addEventListener('click', () => {
           const pt = (fp?.Points || []).find(p => p.id === btn.dataset.ptId);
           if (pt) {
-            pt.thermalZoneIndices = (pt.thermalZoneIndices || []).filter(i => i !== zoneIdx);
-            if (pt.thermalSubZoneMap) delete pt.thermalSubZoneMap[zoneIdx];
+            pt.thermalRegions = (pt.thermalRegions || []).filter(r => r.zoneIndex !== zoneIdx);
+            pt.thermalZoneIndices = [...new Set((pt.thermalRegions || []).map(r => r.zoneIndex))];
+            pt.thermalSubZoneMap = {};
+            (pt.thermalRegions || []).forEach(r => { pt.thermalSubZoneMap[r.zoneIndex] = r.subZoneIndex; });
             store.update(fp);
           }
         });
@@ -3186,16 +3300,22 @@ function refreshThermalEditor(store) {
     }
   }
   if (assignEntryBtn) {
-    assignEntryBtn.disabled = false;
-    const targetLabel = assignZoneIndices.map(i => `Zone ${i + 1}`).join(', ');
-    const subLabel = Number.isInteger(subIdx) ? ` / Region ${subIdx + 1}` : '';
-    assignEntryBtn.textContent = store._entryPickTarget ? 'Cancel' : `Assign to ${targetLabel}${subLabel}`;
+    const nSel = selectedRegions.length;
+    if (nSel === 0) {
+      assignEntryBtn.textContent = 'Select regions on canvas first';
+      assignEntryBtn.disabled = !store._entryPickTarget;
+    } else {
+      assignEntryBtn.disabled = false;
+      assignEntryBtn.textContent = store._entryPickTarget
+        ? 'Cancel'
+        : `Assign ${nSel} region${nSel !== 1 ? 's' : ''} to entry point`;
+    }
     assignEntryBtn.onclick = () => {
       if (store._entryPickTarget) {
         store._entryPickTarget = null;
         document.getElementById('canvas').style.cursor = '';
-      } else {
-        store._entryPickTarget = { zoneIndices: assignZoneIndices, subZoneIndex: Number.isInteger(subIdx) ? subIdx : null };
+      } else if (selectedRegions.length > 0) {
+        store._entryPickTarget = { regions: [...selectedRegions] };
         document.getElementById('canvas').style.cursor = 'crosshair';
       }
       refreshThermalEditor(store);
@@ -3206,6 +3326,8 @@ function refreshThermalEditor(store) {
 export function refreshThermalZonesList(store) {
   const listEl = document.getElementById('thermalZonesList');
   if (!listEl) return;
+  // Keep fp._thermalSelectionRegions in sync so renderers always see the current selection.
+  if (store.active) store.active._thermalSelectionRegions = store._selectedRegions ?? null;
   listEl.innerHTML = '';
 
   const regions = store.active?.Thermal_Zones || [];
@@ -3225,23 +3347,12 @@ export function refreshThermalZonesList(store) {
     const zoneArea = subZones.reduce((sum, sub) => sum + _thermalAreaInPlanUnits(store, sub), 0);
     const zoneAreaText = Number.isFinite(zoneArea) ? `${zoneArea.toFixed(2)} ${unitLabel}²` : '—';
 
-    const inAssignSet = store._assignmentZoneIndices?.has(ri);
+    // Badge: true if any currently-selected region belongs to this zone.
+    const inAssignSet = (store._selectedRegions || []).some(r => r.zoneIndex === ri);
     const li = document.createElement('li');
-    li.style.cssText = `display:flex; align-items:flex-start; gap:6px; padding:4px 0; border-bottom:1px solid #2a2a2a; cursor:pointer; ${selectedZone ? 'background:#182018;' : inAssignSet ? 'background:#1a1a2e;' : ''}`;
+    li.style.cssText = `display:flex; align-items:flex-start; gap:6px; padding:4px 0; border-bottom:1px solid #2a2a2a; cursor:pointer; user-select:none; ${selectedZone ? 'background:#182018;' : inAssignSet ? 'background:#1a1a2e;' : ''}`;
+    // Zone list click: select zone for editing only. Region selection is via canvas.
     li.onclick = (ev) => {
-      if (ev.shiftKey) {
-        // Toggle in assignment set without changing the editing selection
-        if (!store._assignmentZoneIndices) store._assignmentZoneIndices = new Set();
-        if (store._assignmentZoneIndices.has(ri)) {
-          store._assignmentZoneIndices.delete(ri);
-        } else {
-          store._assignmentZoneIndices.add(ri);
-        }
-        refreshThermalZonesList(store);
-        return;
-      }
-      // Plain click: reset assignment set to just this zone, update editing selection
-      store._assignmentZoneIndices = new Set([ri]);
       _setThermalSelection(store, ri, null);
       store.update(store.active);
     };

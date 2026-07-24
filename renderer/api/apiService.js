@@ -145,38 +145,83 @@ export function floorplanToInstance(planJson, units) {
   // ── thermal zones (for reuse when skipping segmentation/zones stage) ──────
   const rawThermalZones = Array.isArray(planJson.thermal_zones) ? planJson.thermal_zones : [];
   if (rawThermalZones.length) {
-    // Build entry_candidates per zone from grid points the user has assigned.
-    // Uses zone index (position in array) — backend zones may lack stable ids.
-    // A point may serve multiple zones (thermalZoneIndices is an array).
-    const entriesByZoneIdx = {};
-    (instance.grid_points || []).forEach(p => {
+    // Build per-zone region→entry-point assignments from planJson.grid_points.
+    // Uses thermalRegions (new format) with fallback to thermalZoneIndices (legacy).
+    // entriesByZone[zi] = Map<subZoneIndex|null, ptId> (last writer wins per sub-zone).
+    const entriesByZone = {};  // zi -> { subZoneAssignments: [{subZoneIndex, ptId}], ptIds: Set }
+    (planJson.grid_points || []).forEach(p => {
       if (!p.entryPoint) return;
-      (Array.isArray(p.thermalZoneIndices) ? p.thermalZoneIndices : []).forEach(zi => {
-        (entriesByZoneIdx[zi] = entriesByZoneIdx[zi] || []).push(p.id);
-      });
+      if (Array.isArray(p.thermalRegions) && p.thermalRegions.length > 0) {
+        p.thermalRegions.forEach(r => {
+          const e = entriesByZone[r.zoneIndex] || (entriesByZone[r.zoneIndex] = { regions: [], ptIds: new Set() });
+          e.regions.push({ subZoneIndex: r.subZoneIndex, ptId: p.id });
+          e.ptIds.add(p.id);
+        });
+      } else {
+        (Array.isArray(p.thermalZoneIndices) ? p.thermalZoneIndices : []).forEach(zi => {
+          const e = entriesByZone[zi] || (entriesByZone[zi] = { regions: [], ptIds: new Set() });
+          e.regions.push({ subZoneIndex: null, ptId: p.id });
+          e.ptIds.add(p.id);
+        });
+      }
     });
 
-    instance.thermal_zones = rawThermalZones.map((zone, i) => ({
-      ...zone,
-      // Accept both backend keys and frontend aliases.
-      thermal_region_geometry: ((zone.thermal_region_geometry || zone.subZones) || []).map(sub =>
-        (sub || [])
-          .map(pt => {
-            if (!pt) return null;
-            if (Number.isFinite(pt.x) && Number.isFinite(pt.y)) {
-              return { x: pt.x, y: pt.y };
-            }
-            if (Array.isArray(pt) && Number.isFinite(pt[0]) && Number.isFinite(pt[1])) {
-              return { x: pt[0], y: pt[1] };
-            }
-            return null;
-          })
-          .filter(Boolean)
-      ),
-      vav_control_zones: zone.vav_control_zones || zone.thermalControlZones || [],
-      // User-assigned entry points override whatever the backend last returned.
-      entry_candidates: entriesByZoneIdx[i] || zone.entry_candidates || [],
-    }));
+    const normalizeSubGeom = zone => ((zone.thermal_region_geometry || zone.subZones) || []).map(sub =>
+      (sub || [])
+        .map(pt => {
+          if (!pt) return null;
+          if (Number.isFinite(pt.x) && Number.isFinite(pt.y)) return { x: pt.x, y: pt.y };
+          if (Array.isArray(pt) && Number.isFinite(pt[0]) && Number.isFinite(pt[1])) return { x: pt[0], y: pt[1] };
+          return null;
+        })
+        .filter(Boolean)
+    );
+
+    instance.thermal_zones = rawThermalZones.map((zone, i) => {
+      const assigned = entriesByZone[i];
+      const baseVavZones = zone.vav_control_zones || zone.thermalControlZones || [];
+
+      if (!assigned || assigned.regions.length === 0) {
+        // No user assignments — preserve backend-provided entry candidates as-is.
+        return {
+          ...zone,
+          thermal_region_geometry: normalizeSubGeom(zone),
+          vav_control_zones: baseVavZones,
+          entry_candidates: zone.entry_candidates || [],
+        };
+      }
+
+      // Build one entry group per unique user-assigned entry point (ordered by first appearance).
+      const ptIdToGroupIdx = {};
+      const entry_groups = [];
+      assigned.regions.forEach(({ ptId }) => {
+        if (!(ptId in ptIdToGroupIdx)) {
+          ptIdToGroupIdx[ptId] = entry_groups.length;
+          entry_groups.push({ candidates: [ptId] });
+        }
+      });
+
+      // Map sub-zone index → entry group index based on user's region assignments.
+      const subZoneToGroup = {};
+      assigned.regions.forEach(({ subZoneIndex, ptId }) => {
+        if (subZoneIndex != null) subZoneToGroup[subZoneIndex] = ptIdToGroupIdx[ptId];
+      });
+
+      // Patch vav_control_zones entry_point to match user's sub-zone→entry-group mapping.
+      const updatedVavZones = baseVavZones.map((vz, sv) =>
+        sv in subZoneToGroup ? { ...vz, entry_point: subZoneToGroup[sv] } : vz
+      );
+
+      return {
+        ...zone,
+        thermal_region_geometry: normalizeSubGeom(zone),
+        vav_control_zones: updatedVavZones,
+        // entry_groups: per-group single-candidate sets — forces solver to use user's assignment.
+        entry_groups,
+        entry_number: entry_groups.length,
+        entry_candidates: [...assigned.ptIds],
+      };
+    });
   }
 
   // ── exclusion areas ───────────────────────────────────────────────────────
