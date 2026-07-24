@@ -441,29 +441,30 @@ function setActivePanelTab(tabName) {
   if (jsonView) jsonView.classList.toggle('active', tabName === 'json');
 }
 
-function refreshDashboardPanel(fp, store, callbacks = {}) {
+function setActiveDisplayTab(tabName) {
+  document.querySelectorAll('[data-display-tab]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.displayTab === tabName);
+  });
+  const views = { grid: 'displayGridView', layers: 'displayLayersView', reference: 'displayReferenceView' };
+  Object.entries(views).forEach(([tab, id]) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('active', tab === tabName);
+  });
+}
+
+function refreshDashboardPanel(fp, store) {
   const panel = document.getElementById('dashboardOutput');
   if (!panel) return;
 
   if (!fp) {
-    panel.innerHTML = '<div class="metric-card"><div class="metric-label">Dashboard</div><div class="metric-value">No floorplan loaded</div></div>';
+    panel.innerHTML = '';
     return;
   }
 
-  const nodeCount = (fp.wall_graph?.nodes || []).length;
-  const edgeCount = (fp.wall_graph?.edges || []).length;
-  const areaCount = (fp.areas || []).length;
-  const pointCount = (fp.Points || []).length;
-  const thermalCount = (fp.Thermal_Zones || []).length;
   const columnCount = (fp.Columns || []).length;
   const beamCount = (fp.Beams || []).length;
-  const ductCount = (fp.Duct_Plan || []).length;
-  const ref = fp.referenceImage || {};
-  const statusText = document.getElementById('optimiseStatus')?.textContent || 'idle';
-  const liveNote = document.getElementById('ai-error')?.textContent || 'Ready';
   const pxPerUnit = fp.units?.pxPerUnit || 1;
   const unitLabel = fp.units?.length || 'mm';
-  const opacityPercent = Math.round((Number.isFinite(ref.opacity) ? ref.opacity : 0.35) * 100);
   const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[unitLabel] ?? 1000;
 
   // ── Structure: beam length groups ────────────────────────────────────────────
@@ -513,10 +514,6 @@ function refreshDashboardPanel(fp, store, callbacks = {}) {
   const hasMechanical = totalDuctBranches > 0;
 
   panel.innerHTML = [
-    `<div class="dashboard-grid">`,
-    `<div class="metric-card"><div class="metric-label">Plan</div><div class="metric-value">${fp.name || 'Untitled'}</div><div class="metric-note">${fp.schema_version || 'schema n/a'} · ${unitLabel} · ${pxPerUnit.toFixed ? pxPerUnit.toFixed(2) : pxPerUnit} px/unit</div></div>`,
-    `<div class="metric-card"><div class="metric-label">Optimisation</div><div class="metric-value">${statusText}</div><div class="metric-note">${liveNote}</div></div>`,
-    `</div>`,
     hasStructure ? [
       `<div class="dash-section-grid">`,
       `<div class="dashboard-section">`,
@@ -539,13 +536,27 @@ function refreshDashboardPanel(fp, store, callbacks = {}) {
       ductRows ? `<div class="dash-table">${ductRows}</div>` : '',
       `</div>`,
     ].join('') : ''),
-    `<div class="dashboard-section">`,
-    `<div class="dashboard-section-title">Reference Image</div>`,
-    `<div class="dashboard-controls">`,
+  ].join('');
+}
+
+function refreshReferencePanel(fp, store, callbacks = {}) {
+  const panel = document.getElementById('referenceImageOutput');
+  if (!panel) return;
+
+  if (!fp) {
+    panel.innerHTML = '';
+    return;
+  }
+
+  const ref = fp.referenceImage || {};
+  const unitLabel = fp.units?.length || 'mm';
+  const opacityPercent = Math.round((Number.isFinite(ref.opacity) ? ref.opacity : 0.35) * 100);
+
+  panel.innerHTML = [
     `<div class="dashboard-actions">`,
-    `<button type="button" id="importReferenceBtn" class="gp-btn">Import Reference</button>`,
+    `<button type="button" id="importReferenceBtn" class="gp-btn">Import</button>`,
     `<button type="button" id="fitReferenceBtn" class="gp-btn">Fit to View</button>`,
-    `<button type="button" id="scaleReferenceBtn" class="gp-btn"${!ref.src ? ' disabled' : ''}>Scale Reference</button>`,
+    `<button type="button" id="scaleReferenceBtn" class="gp-btn"${!ref.src ? ' disabled' : ''}>Scale</button>`,
     `<button type="button" id="clearReferenceBtn" class="gp-btn gp-btn-clear">Remove</button>`,
     `</div>`,
     `<div class="cg-row"><label class="cg-label" for="referenceVisibleChk">Visible</label><input id="referenceVisibleChk" type="checkbox" ${ref.visible === false ? '' : 'checked'}></div>`,
@@ -553,10 +564,7 @@ function refreshDashboardPanel(fp, store, callbacks = {}) {
     `<div class="cg-row"><label class="cg-label" for="referenceYInput">Y</label><input id="referenceYInput" type="number" step="0.1" value="${Number.isFinite(ref.y) ? ref.y : 0}"></div>`,
     `<div class="cg-row"><label class="cg-label" for="referenceWidthInput">Width</label><input id="referenceWidthInput" type="number" min="0.1" step="0.1" value="${Number.isFinite(ref.width) ? ref.width : 10}"><span class="cg-unit">${unitLabel}</span></div>`,
     `<div class="cg-row"><label class="cg-label" for="referenceOpacityInput">Opacity</label><input id="referenceOpacityInput" type="range" min="0" max="100" value="${opacityPercent}"><span class="cg-pct" id="referenceOpacityPct">${opacityPercent}%</span></div>`,
-    `<div class="dashboard-note">Use the reference image as a tracing underlay. Set the width in plan units to scale it, then adjust X/Y to align it with the drawing.</div>`,
-    ref.fileName ? `<div class="dashboard-note">Loaded: ${ref.fileName}</div>` : '',
-    `</div>`,
-    `</div>`,
+    ref.fileName ? `<div class="dashboard-note">Loaded: ${ref.fileName}</div>` : `<div class="dashboard-note">No reference image loaded.</div>`,
   ].join('');
 
   const bindNumber = (id, callback) => {
@@ -591,7 +599,7 @@ function refreshDashboardPanel(fp, store, callbacks = {}) {
   }
 
   const opacityInput = document.getElementById('referenceOpacityInput');
-  const opacityPct = document.getElementById('referenceOpacityPct');
+  const opacityPct   = document.getElementById('referenceOpacityPct');
   if (opacityInput && opacityPct) {
     opacityInput.addEventListener('input', () => {
       if (!fp.referenceImage) return;
@@ -614,8 +622,8 @@ function refreshDashboardPanel(fp, store, callbacks = {}) {
 
   document.getElementById('fitReferenceBtn')?.addEventListener('click', () => {
     if (!fp.referenceImage) return;
-    const pxPerUnit = fp.units?.pxPerUnit || 1;
-    fp.referenceImage.width = Math.max(1, Math.round(((window.innerWidth || 1024) / pxPerUnit) * 0.55 * 100) / 100);
+    const ppu = fp.units?.pxPerUnit || 1;
+    fp.referenceImage.width = Math.max(1, Math.round(((window.innerWidth || 1024) / ppu) * 0.55 * 100) / 100);
     store.update(fp);
   });
 
@@ -623,6 +631,7 @@ function refreshDashboardPanel(fp, store, callbacks = {}) {
     if (!window.electronAPI?.pickReferenceAsset || !store.active) return;
     const result = await window.electronAPI.pickReferenceAsset();
     if (!result?.success || !result.asset) return;
+    const ppu = store.active.units?.pxPerUnit || 1;
     store.active.referenceImage = {
       fileName: result.asset.fileName,
       filePath: result.asset.filePath,
@@ -632,7 +641,7 @@ function refreshDashboardPanel(fp, store, callbacks = {}) {
       naturalHeight: result.asset.naturalHeight,
       x: 0,
       y: 0,
-      width: Math.max(1, Math.round(((store.active.units?.pxPerUnit || 1) > 0 ? (window.innerWidth || 1024) / (store.active.units?.pxPerUnit || 1) : 10) * 0.45 * 100) / 100),
+      width: Math.max(1, Math.round(((window.innerWidth || 1024) / ppu) * 0.45 * 100) / 100),
       opacity: 0.35,
       visible: true,
       image: null,
@@ -970,6 +979,11 @@ export function bindUI(store, canvas, mouse) {
   });
   setActivePanelTab('dashboard');
 
+  document.querySelectorAll('[data-display-tab]').forEach(btn => {
+    btn.addEventListener('click', () => setActiveDisplayTab(btn.dataset.displayTab || 'grid'));
+  });
+  setActiveDisplayTab('grid');
+
   // Floating palette drag support
   const palette = document.getElementById('toolPalette');
   const paletteTitle = palette?.querySelector('.palette-title');
@@ -1095,17 +1109,15 @@ export function bindUI(store, canvas, mouse) {
       indicator.textContent = calMsg;
     }
 
-    // Show/hide finishCoreBtn depending on current mode
+    // Show/hide finish buttons depending on current mode
     const finishCoreBtn = document.getElementById('finishCoreBtn');
     if (finishCoreBtn) {
       finishCoreBtn.style.display = store.mode === 'core' ? '' : 'none';
     }
-
     // Highlight active mode button in tool palette
     const modeButtonMap = {
       select:       'selectModeBtn',
       draw:         'drawModeBtn',
-      area:         'areaModeBtn',
       core:         'coreModeBtn',
       'grid-origin': null,
       door:         'entranceModeBtn',
@@ -1130,21 +1142,21 @@ export function bindUI(store, canvas, mouse) {
     refreshThermalZonesList(store);
 
     ensureReferenceImageLoaded(store.active, () => store.update(store.active));
-    refreshDashboardPanel(store.active, store, {
-      onScaleReference: () => {
-        if (!store.active?.referenceImage) return;
-        _refScalePoints = [];
-        document.getElementById('refScaleOverlay').style.display = 'none';
-        store.setMode('ref-scale');
-        const statusEl = document.getElementById('calibrateStatus');
-        if (statusEl) {
-          statusEl.style.color = '#4fc3f7';
-          statusEl.textContent = 'Scale Reference — click first point on the reference image';
-          statusEl.style.display = 'block';
-        }
-        store.notify();
+    refreshDashboardPanel(store.active, store);
+    const _onScaleReference = () => {
+      if (!store.active?.referenceImage) return;
+      _refScalePoints = [];
+      document.getElementById('refScaleOverlay').style.display = 'none';
+      store.setMode('ref-scale');
+      const statusEl = document.getElementById('calibrateStatus');
+      if (statusEl) {
+        statusEl.style.color = '#4fc3f7';
+        statusEl.textContent = 'Scale Reference — click first point on the reference image';
+        statusEl.style.display = 'block';
       }
-    });
+      store.notify();
+    };
+    refreshReferencePanel(store.active, store, { onScaleReference: _onScaleReference });
   });
 
   // Mode controls (example buttons)
@@ -1160,15 +1172,6 @@ export function bindUI(store, canvas, mouse) {
   if (drawBtn) {
     drawBtn.addEventListener('click', () => {
       store.setMode('draw');
-      store.notify();
-    });
-  }
-
-  const areaBtn = document.getElementById('areaModeBtn');
-  if (areaBtn) {
-    areaBtn.addEventListener('click', () => {
-      store.setMode("area");
-      store.tempAreaActive = true;
       store.notify();
     });
   }
@@ -1410,6 +1413,28 @@ export function bindUI(store, canvas, mouse) {
   // Initial solutions panel render
   refreshSolutionsPanel(store);
 
+  // ── Server status indicator ─────────────────────────────────────────────────
+  const _serverDot   = document.getElementById('serverStatusDot');
+  const _serverLabel = document.getElementById('serverStatusLabel');
+
+  function _applyServerStatus({ status, message }) {
+    if (!_serverDot || !_serverLabel) return;
+    const configs = {
+      starting: { dot: 'dot-starting', label: 'server starting…' },
+      ready:    { dot: 'dot-ready',    label: 'server ready' },
+      error:    { dot: 'dot-error',    label: message || 'server error' },
+      offline:  { dot: 'dot-offline',  label: 'server offline' },
+    };
+    const cfg = configs[status] ?? configs.offline;
+    _serverDot.className   = `server-dot ${cfg.dot}`;
+    _serverLabel.textContent = cfg.label;
+    _serverLabel.title = message || '';
+  }
+
+  if (window.electronAPI?.onServerStatus) {
+    window.electronAPI.onServerStatus(_applyServerStatus);
+  }
+
   // Track mouse movement and constraint flag (Shift key)
   canvas.addEventListener('mousemove', (e) => {
     const rect = canvas.getBoundingClientRect();
@@ -1533,12 +1558,6 @@ export function bindUI(store, canvas, mouse) {
       store.active.draggingSegment = null;
       store.dragStart = null;
       store.update(store.active); // commit final state
-    }
-  });
-
-  document.getElementById("finishAreaBtn").addEventListener("click", () => {
-    if (store.mode === "area") {
-      commitArea(store);
     }
   });
 
@@ -2183,12 +2202,24 @@ export function bindUI(store, canvas, mouse) {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // GRID GENERATION CONTROLS
+  // GRID GENERATION MODAL
   // ═══════════════════════════════════════════════════════════
-  
-  const generateGridBtn = document.getElementById('generateGridBtn');
-  const clearGridBtn    = document.getElementById('clearGridBtn');
-  const gridSpacingInput = document.getElementById('gridSpacingInput');
+
+  const _gridModal = document.getElementById('gridGenModal');
+
+  function _openGridModal() {
+    if (_gridModal) _gridModal.style.display = 'block';
+  }
+  function _closeGridModal() {
+    if (_gridModal) _gridModal.style.display = 'none';
+  }
+
+  document.getElementById('openGridModalBtn')?.addEventListener('click', _openGridModal);
+  document.getElementById('closeGridModalBtn')?.addEventListener('click', _closeGridModal);
+
+  const generateGridBtn   = document.getElementById('generateGridBtn');
+  const clearGridBtn      = document.getElementById('clearGridBtn');
+  const gridSpacingInput  = document.getElementById('gridSpacingInput');
   const gridOriginDisplay = document.getElementById('gridOriginDisplay');
 
   if (generateGridBtn) {
@@ -2200,21 +2231,19 @@ export function bindUI(store, canvas, mouse) {
       }
       const spacing = parseFloat(gridSpacingInput?.value || 1000);
       if (spacing <= 0) { alert('Grid spacing must be greater than 0'); return; }
-      // Enter origin-picking mode
       store._pendingGridSpacing = spacing;
       store.setMode('grid-origin');
       if (gridOriginDisplay) gridOriginDisplay.textContent = 'Click a wall node to set origin…';
+      _closeGridModal();
       store.notify();
     });
   }
-  
+
   if (clearGridBtn) {
     clearGridBtn.addEventListener('click', () => {
       if (!store.active) return;
-      
       store.active.clearGrid();
       store.update(store.active);
-      console.log('Grid cleared');
     });
   }
 
@@ -2717,7 +2746,7 @@ export function bindUI(store, canvas, mouse) {
 
       const alive = await checkHealth();
       if (!alive) {
-        if (aiError) { aiError.style.display = 'block'; aiError.style.color = ''; aiError.textContent = 'Optimisation server not reachable. Start it with: python server.py (in Project-71/)'; }
+        if (aiError) { aiError.style.display = 'block'; aiError.style.color = ''; aiError.textContent = 'Optimisation server is not responding. Please restart the app.'; }
         return;
       }
 
@@ -3181,7 +3210,7 @@ export function refreshThermalZonesList(store) {
 
   const regions = store.active?.Thermal_Zones || [];
   if (regions.length === 0) {
-    listEl.innerHTML = '<li style="color:#888; font-size:0.9em;">None — run optimisation to generate zones</li>';
+    listEl.innerHTML = '<li style="color:var(--text-muted); font-size:0.85em; padding:6px 0;">No zones yet — run Thermal Zones or Full Optimise to generate.</li>';
     return;
   }
 
@@ -3235,8 +3264,8 @@ export function refreshThermalZonesList(store) {
     info.style.cssText = 'font-size:0.82em; line-height:1.5; color:#ccc;';
 
     const type = region.type || 'perimeter';
-    const orient = region.orientation !== null && region.orientation !== undefined
-      ? `${region.orientation.toFixed(0)}°` : 'internal';
+    const isIntZone = region.orientation === null || region.orientation === undefined;
+    const typeLabel = isIntZone ? 'internal' : type;
     const vavCount = Array.isArray(region.thermalControlZones) ? region.thermalControlZones.length : 0;
     const airReqPerArea = Number.isFinite(region.air_requirement)
       ? region.air_requirement
@@ -3247,19 +3276,15 @@ export function refreshThermalZonesList(store) {
     const totalLoad = (Number.isFinite(region.total_load) && region.total_load > 0)
       ? region.total_load
       : (vavCount > 0 ? summedVavLoad : null);
-    const zoneAirReq = Number.isFinite(region.air_requirement)
-      ? `${Math.round(region.air_requirement)} L/s·m²`
-      : null;
-    const air = totalLoad !== null
+    // Show total airflow load if computed; otherwise show rate if set; otherwise pending
+    const airDisplay = totalLoad !== null
       ? `${Math.round(totalLoad)} L/s`
-      : (airReqPerArea !== null ? `${Math.round(airReqPerArea)} L/s·m²` : '—');
+      : (airReqPerArea !== null ? `${Math.round(airReqPerArea)} L/s·m²` : 'not set');
 
     info.innerHTML =
-      `<strong>Zone ${ri + 1}</strong> · ${type} · ${orient}<br>` +
-      `vav zones: ${vavCount}<br>` +
-      `air req: ${air}<br>` +
-      `surface: ${zoneAreaText}` +
-      (zoneAirReq ? `<br>edited req: ${zoneAirReq}` : '');
+      `<strong>Zone ${ri + 1}</strong> <span style="color:var(--text-muted);">${typeLabel}</span><br>` +
+      `VAV zones: ${vavCount} · ${zoneAreaText}<br>` +
+      `Airflow: <span style="color:${airReqPerArea !== null || totalLoad !== null ? 'var(--text)' : 'var(--text-muted)'};">${airDisplay}</span>`;
 
     li.appendChild(info);
 
@@ -3276,9 +3301,9 @@ export function refreshThermalZonesList(store) {
         const subAreaText = Number.isFinite(subArea) ? `${subArea.toFixed(2)} ${unitLabel}²` : '—';
         if (displayedSource === 'control') {
           const load = displayedRegions.loads[si];
-          subBtn.textContent = `region ${si + 1} (${_subregionVertexCount(sub)} pts, ${subAreaText}${Number.isFinite(load) ? `, ${Math.round(load)} l/s` : ''}${Number.isFinite(subAir) ? `, ${Math.round(subAir)} L/s·m²` : ''})`;
+          subBtn.textContent = `Control region ${si + 1} · ${subAreaText}${Number.isFinite(load) ? ` · ${Math.round(load)} L/s` : ''}${Number.isFinite(subAir) ? ` · ${Math.round(subAir)} L/s·m²` : ''}`;
         } else {
-          subBtn.textContent = `region ${si + 1} (${_subregionVertexCount(sub)} pts, ${subAreaText}${Number.isFinite(subAir) ? `, ${Math.round(subAir)} L/s·m²` : ''})`;
+          subBtn.textContent = `Region ${si + 1} · ${subAreaText}${Number.isFinite(subAir) ? ` · ${Math.round(subAir)} L/s·m²` : ''}`;
         }
         subBtn.style.cssText = `font-size:10px; padding:2px 4px; text-align:left; background:${isSelectedSub ? '#223822' : '#1a1a1a'}; color:#bbb; border:1px solid #333; cursor:pointer;`;
         subBtn.onclick = (ev) => {

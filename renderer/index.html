@@ -11,7 +11,7 @@
 
   <!-- Toolbar -->
   <div id="toolbar">
-    <label style="margin-left:12px; color:#fff; font-family: monospace; font-size:10px;">
+    <label>
       Canvas width:
       <input id="canvasWidthValue" type="number" value="50" min="0.01" step="0.01" style="width:90px; margin-left:6px" />
       <select id="canvasUnitSelect" style="margin-left:6px">
@@ -22,9 +22,12 @@
         <option value="ft">ft</option>
       </select>
     </label>
-    <div id="ai-error" style="display:none; color:#b00020; margin-top:8px;"></div>
-    <div id="calibrateStatus" style="display:none; color:#ff9800; font-family:monospace; font-size:10px; margin-left:12px;"></div>
-    <!-- <div id="modeIndicator">Edit Mode</div> -->
+    <div id="calibrateStatus" style="display:none; color:var(--warn); font-size:var(--fs-xs); margin-left:12px;"></div>
+    <div id="ai-error" style="display:none; font-size:var(--fs-xs); margin-left:12px;"></div>
+    <div id="serverStatusBar" class="server-status-bar">
+      <span id="serverStatusDot" class="server-dot dot-starting"></span>
+      <span id="serverStatusLabel" class="server-label">starting…</span>
+    </div>
   </div>
 
   <!-- Main App -->
@@ -36,20 +39,19 @@
       <div class="palette-buttons">
         <button id="selectModeBtn">Select</button>
         <button id="drawModeBtn">Draw Boundary</button>
-        <button id="clearBtn">Clear</button>
-        <button id="areaModeBtn">Add Excl. Area</button>
-        <button id="coreModeBtn">Add Core</button>
+        <button id="coreModeBtn">Draw Core</button>
         <button id="finishCoreBtn" style="display:none">Finish Core</button>
-        <!-- <button id="editModeBtn">Edit</button> -->
         <button id="entranceModeBtn">Place Door</button>
+        <button id="clearBtn">Clear Canvas</button>
         <button id="lockBtn">Lock</button>
         <button id="view3dBtn">3D View</button>
-        <!-- <button id="saveReqBtn">Save Requirements</button> -->
         <button id="calibrateLineBtn">Calibrate Scale</button>
         <button id="openFloorplanBtn">Open Floorplan</button>
         <button id="saveFloorplanBtn">Save Floorplan</button>
         <button id="snapshotSolutionBtn">Snapshot</button>
         <div style="border-top:1px solid #333; margin:4px 0;"></div>
+        <div class="palette-title">Optimisation</div>
+        <button id="openGridModalBtn">Place Grid…</button>
         <button id="optimiseStructureBtn">Structure</button>
         <button id="optimiseThermalBtn">Thermal Zones</button>
         <button id="optimiseDuctBtn">Duct Routing</button>
@@ -57,6 +59,26 @@
         <button id="stopOptBtn" style="display:none; background:#c0392b; color:#fff; border:none; border-radius:4px; padding:4px 10px; cursor:pointer;">stop</button>
         <button id="continueOptBtn" style="display:none; background:#0f5f2e; color:#fff; border:none; border-radius:4px; padding:4px 10px; cursor:pointer;">continue</button>
         <div id="optimiseStatus" style="display:none; font-family:'Courier New',monospace; font-size:10px; color:#aaa; margin-top:6px; line-height:1.5;"></div>
+      </div>
+    </div>
+
+    <!-- Grid generation modal -->
+    <div id="gridGenModal" class="floating-modal" style="display:none;">
+      <div class="modal-header">
+        <span class="modal-title">Grid Generation</span>
+        <button id="closeGridModalBtn" class="modal-close">×</button>
+      </div>
+      <div class="cg-row">
+        <label class="cg-label" for="gridSpacingInput">Spacing</label>
+        <div class="cg-input-group">
+          <input type="number" id="gridSpacingInput" value="1000" min="100" step="100">
+          <span class="cg-unit">mm</span>
+        </div>
+      </div>
+      <div id="gridOriginDisplay" class="gp-origin-display"></div>
+      <div class="cg-row gp-btn-row">
+        <button id="generateGridBtn" class="gp-btn">Place Grid</button>
+        <button id="clearGridBtn" class="gp-btn gp-btn-clear">Clear Grid</button>
       </div>
     </div>
 
@@ -116,6 +138,14 @@
           <button type="button" class="panel-tab" data-panel-tab="json">JSON</button>
         </div>
         <div id="dashboardPanelView" class="panel-view active">
+          <!-- Snapshot save -->
+          <div class="dash-snapshot-bar">
+            <input type="text" id="snapshotNameInput" placeholder="Snapshot name…" class="solutions-name-input">
+            <button id="snapshotBtn" class="gp-btn">Save</button>
+          </div>
+          <!-- Saved snapshots list -->
+          <div id="solutionsList" class="solutions-list"></div>
+          <!-- Dynamic results: structure, mechanical, reference image -->
           <div id="dashboardOutput" class="dashboard-output"></div>
         </div>
         <div id="jsonPanelView" class="panel-view">
@@ -131,59 +161,9 @@
 
     <!-- Bottom block: panels -->
     <div id="bottomPanels">
+
       <div id="inspectorPanel" class="panel">
         <p class="inspector-empty">Properties (Nothing Selected)</p>
-      </div>
-      
-      <div id="canvasGridPanel" class="panel">
-        <div class="cg-header">Canvas Grid</div>
-        <div class="cg-body">
-          <div class="cg-row">
-            <label class="cg-label" for="cgSnapEnabled">Snap enabled</label>
-            <input type="checkbox" id="cgSnapEnabled" checked>
-          </div>
-          <div class="cg-row">
-            <label class="cg-label" for="cgSpacing">Spacing</label>
-            <div class="cg-input-group">
-              <input type="number" id="cgSpacing" placeholder="auto" min="0" step="0.5" value="2">
-              <span class="cg-unit" id="cgSpacingUnit">m</span>
-            </div>
-          </div>
-          <div class="cg-row">
-            <label class="cg-label" for="cgOpacity">Line intensity</label>
-            <input type="range" id="cgOpacity" min="0" max="100" value="50">
-            <span class="cg-pct" id="cgOpacityPct">50%</span>
-          </div>
-        </div>
-      </div>
-
-      
-      <div id="gridPanel" class="panel">
-        <div class="cg-header">Grid Generation</div>
-        <div class="cg-body">
-          <div class="cg-row">
-            <label class="cg-label" for="gridSpacingInput">Spacing</label>
-            <div class="cg-input-group">
-              <input type="number" id="gridSpacingInput" value="1000" min="100" step="100">
-              <span class="cg-unit">mm</span>
-            </div>
-          </div>
-          <div id="gridOriginDisplay" class="gp-origin-display"></div>
-          <div class="cg-row gp-btn-row">
-            <button id="generateGridBtn" class="gp-btn">Generate Grid</button>
-            <button id="clearGridBtn" class="gp-btn gp-btn-clear">Clear Grid</button>
-          </div>
-        </div>
-      </div>
-      
-      <div id="areasPanel" class="panel">
-        <div class="cg-header">Exclusion Areas</div>
-        <div class="cg-body">
-          <div class="cg-row">
-            <button id="finishAreaBtn" class="gp-btn">Finish Area</button>
-          </div>
-          <ul id="areasList" class="ea-list"></ul>
-        </div>
       </div>
 
       <div id="thermalZonesPanel" class="panel">
@@ -191,79 +171,99 @@
         <div class="cg-body">
           <ul id="thermalZonesList" class="ea-list"></ul>
           <div id="thermalEditor" class="thermal-editor">
-            <div id="thermalSelectionLabel" class="thermal-selection-label">Selected: none</div>
-            <label class="cg-label" for="thermalAirReqInput">Air req (L/s·m²)</label>
+            <div id="thermalSelectionLabel" class="thermal-selection-label">Select a zone to edit</div>
+            <label class="cg-label" for="thermalAirReqInput">Airflow rate (L/s·m²)</label>
             <input id="thermalAirReqInput" type="number" min="0" step="0.1" placeholder="e.g. 7.5">
-            <button id="applyThermalAirBtn" class="gp-btn" disabled>Apply Air Requirement</button>
+            <button id="applyThermalAirBtn" class="gp-btn" disabled>Set Airflow Rate</button>
             <label class="cg-label" style="margin-top:8px;">Entry Points</label>
             <div id="thermalEntryList"></div>
             <button id="assignEntryPointBtn" class="gp-btn" disabled style="margin-top:4px;">Assign Entry Point</button>
           </div>
-        </div>
-      </div>
-      
-      <div id="criteriaPanel" class="panel">
-        <div class="cg-header">Criteria</div>
-        <div class="cg-body">
-          <div class="cg-row">
-            <label class="cg-label" for="defaultAirReqInput">Default air req</label>
-            <div class="cg-input-group">
-              <input type="number" id="defaultAirReqInput" min="0" step="0.5" value="7.5" style="width:52px;">
-              <span class="cg-unit">l/s·m²</span>
+          <!-- Airflow criteria, embedded below zone editor -->
+          <div class="thermal-criteria">
+            <div class="cg-header" style="margin-top:8px;">Airflow Criteria</div>
+            <div class="cg-row">
+              <label class="cg-label" for="defaultAirReqInput">Default rate</label>
+              <div class="cg-input-group">
+                <input type="number" id="defaultAirReqInput" min="0" step="0.5" value="7.5" style="width:52px;">
+                <span class="cg-unit">L/s·m²</span>
+              </div>
             </div>
-          </div>
-          <div class="cg-row">
-            <button id="applyDefaultAirBtn" class="gp-btn">Apply to all zones</button>
-          </div>
-          <div class="cg-row" style="margin-top:4px;">
-            <label class="cg-label" for="pinchVelocityInput">Pinch threshold</label>
-            <div class="cg-input-group">
-              <input type="number" id="pinchVelocityInput" min="0.1" step="0.5" value="8" style="width:52px;">
-              <span class="cg-unit">m/s</span>
+            <div class="cg-row">
+              <button id="applyDefaultAirBtn" class="gp-btn">Apply to unset zones</button>
             </div>
+            <div class="cg-row" style="margin-top:8px; border-top:1px solid var(--border-mid); padding-top:8px;">
+              <label class="cg-label" for="pinchVelocityInput">Max duct velocity</label>
+              <div class="cg-input-group">
+                <input type="number" id="pinchVelocityInput" min="0.1" step="0.5" value="8" style="width:52px;">
+                <span class="cg-unit">m/s</span>
+              </div>
+            </div>
+            <div class="cg-row">
+              <label class="cg-label" for="showPinchChk">Highlight overloaded</label>
+              <input type="checkbox" id="showPinchChk" checked>
+            </div>
+            <div id="pinchSummary" class="criteria-note"></div>
           </div>
-          <div class="cg-row">
-            <label class="cg-label" for="showPinchChk">Show pinch pts</label>
-            <input type="checkbox" id="showPinchChk" checked>
-          </div>
-          <div id="pinchSummary" class="criteria-note"></div>
-        </div>
-      </div>
-
-      <div id="solutionsPanel" class="panel">
-        <div class="cg-header">Solutions</div>
-        <div class="cg-body">
-          <div class="cg-row">
-            <input type="text" id="snapshotNameInput" placeholder="Name…" class="solutions-name-input">
-          </div>
-          <div class="cg-row">
-            <button id="snapshotBtn" class="gp-btn">Save snapshot</button>
-          </div>
-          <div id="solutionsList" class="solutions-list"></div>
         </div>
       </div>
 
       <div id="layersPanel" class="panel">
-        <div class="cg-header">Layers</div>
-        <div class="cg-body">
-          <div class="cg-row">
-            <label class="cg-label" for="planNameInput">Plan name</label>
-            <input id="planNameInput" type="text" placeholder="Untitled plan">
+        <div class="panel-tabs">
+          <button type="button" class="panel-tab active" data-display-tab="grid">Grid</button>
+          <button type="button" class="panel-tab" data-display-tab="layers">Layers</button>
+          <button type="button" class="panel-tab" data-display-tab="reference">Reference</button>
+        </div>
+
+        <!-- Grid tab -->
+        <div id="displayGridView" class="panel-view active">
+          <div class="cg-body">
+            <div class="cg-row">
+              <label class="cg-label" for="planNameInput">Plan name</label>
+              <input id="planNameInput" type="text" placeholder="Untitled plan">
+            </div>
+            <div class="cg-row">
+              <label class="cg-label" for="cgSnapEnabled">Snap</label>
+              <input type="checkbox" id="cgSnapEnabled" checked>
+            </div>
+            <div class="cg-row">
+              <label class="cg-label" for="cgSpacing">Spacing</label>
+              <div class="cg-input-group">
+                <input type="number" id="cgSpacing" placeholder="auto" min="0" step="0.5" value="2">
+                <span class="cg-unit" id="cgSpacingUnit">m</span>
+              </div>
+            </div>
+            <div class="cg-row">
+              <label class="cg-label" for="cgOpacity">Line intensity</label>
+              <input type="range" id="cgOpacity" min="0" max="100" value="50">
+              <span class="cg-pct" id="cgOpacityPct">50%</span>
+            </div>
           </div>
-          <div class="layer-controls">
-          <label><input type="checkbox" id="planBoundaryLayer" checked> Plan Boundary</label>
-          <label><input type="checkbox" id="boundaryAreaLayer" checked> Boundary Area</label>
-          <label><input type="checkbox" id="coreBoundaryLayer" checked> Core Boundary</label>
-          <label><input type="checkbox" id="coreAreaLayer" checked> Core Area</label>
-          <label><input type="checkbox" id="columnsLayer" checked> Columns</label>
-          <label><input type="checkbox" id="exclusionAreasLayer" checked> Exclusion Areas</label>
-          <label><input type="checkbox" id="thermalZonesLayer" checked> Thermal Zones</label>
-          <label><input type="checkbox" id="beamsLayer"> Beams</label>
-          <label><input type="checkbox" id="pointsLayer"> Grid Points</label>
-          <label><input type="checkbox" id="entryPointsLayer" checked> Entry Points</label>
-          <label><input type="checkbox" id="edgesLayer"> Grid Edges</label>
-          <label><input type="checkbox" id="ductPlanLayer"> Ducts</label>
+        </div>
+
+        <!-- Layers tab -->
+        <div id="displayLayersView" class="panel-view">
+          <div class="cg-body">
+            <div class="layer-controls">
+              <label><input type="checkbox" id="planBoundaryLayer" checked> Boundary</label>
+              <label><input type="checkbox" id="boundaryAreaLayer" checked> Boundary Area</label>
+              <label><input type="checkbox" id="coreBoundaryLayer" checked> Core</label>
+              <label><input type="checkbox" id="coreAreaLayer" checked> Core Area</label>
+              <label><input type="checkbox" id="columnsLayer" checked> Columns</label>
+              <label><input type="checkbox" id="exclusionAreasLayer" checked> Excl. Areas</label>
+              <label><input type="checkbox" id="thermalZonesLayer" checked> Thermal Zones</label>
+              <label><input type="checkbox" id="beamsLayer"> Beams</label>
+              <label><input type="checkbox" id="pointsLayer"> Grid Points</label>
+              <label><input type="checkbox" id="entryPointsLayer" checked> Entry Points</label>
+              <label><input type="checkbox" id="edgesLayer"> Grid Edges</label>
+              <label><input type="checkbox" id="ductPlanLayer"> Ducts</label>
+            </div>
           </div>
+        </div>
+
+        <!-- Reference Image tab -->
+        <div id="displayReferenceView" class="panel-view">
+          <div id="referenceImageOutput" class="cg-body"></div>
         </div>
       </div>
 

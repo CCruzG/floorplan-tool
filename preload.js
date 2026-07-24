@@ -12,6 +12,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFloorplan: () => ipcRenderer.invoke('open-floorplan'),
   pickReferenceAsset: () => ipcRenderer.invoke('pick-reference-asset'),
 
+  onServerStatus: (callback) => {
+    ipcRenderer.on('server-status', (_event, payload) => callback(payload));
+  },
+
   // // new validator API
   // validateFloorplan: (plan) => {
   //   const ok = validate(plan);

@@ -1,10 +1,99 @@
-// const { app, BrowserWindow } = require('electron');
-// const path = require('path');
-
 const { app, BrowserWindow, ipcMain, dialog, nativeImage } = require('electron');
 const fs = require('fs/promises');
+const fsSync = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
+const { spawn } = require('child_process');
+
+// ── Server lifecycle ──────────────────────────────────────────────────────────
+
+const SERVER_DIR    = path.join(__dirname, '../Project-71');
+const SERVER_SCRIPT = path.join(SERVER_DIR, 'server.py');
+const PYTHON_BIN    = path.join(SERVER_DIR, '.venv/bin/python');
+
+let serverProcess = null;
+let mainWin       = null;
+let _appQuitting  = false;
+
+function _broadcastStatus(status, message = '') {
+  if (mainWin && !mainWin.isDestroyed()) {
+    mainWin.webContents.send('server-status', { status, message });
+  }
+}
+
+function startServer() {
+  if (!fsSync.existsSync(PYTHON_BIN)) {
+    _broadcastStatus('error', 'Python environment not found. Run setup first.');
+    return;
+  }
+  if (!fsSync.existsSync(SERVER_SCRIPT)) {
+    _broadcastStatus('error', 'Server script not found.');
+    return;
+  }
+
+  _broadcastStatus('starting');
+
+  const proc = spawn(PYTHON_BIN, [SERVER_SCRIPT], {
+    cwd: SERVER_DIR,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  serverProcess = proc;
+  let ready = false;
+
+  // Flask outputs "Running on http://..." to stderr when it starts.
+  // Watch both streams so we catch it regardless of Flask version.
+  const checkReady = (data) => {
+    const text = data.toString();
+    console.log('[server]', text.trimEnd());
+    if (!ready && (text.includes('Running on') || text.includes('Serving Flask'))) {
+      ready = true;
+      _broadcastStatus('ready');
+    }
+  };
+  proc.stdout.on('data', checkReady);
+  proc.stderr.on('data', checkReady);
+
+  // Fallback health poll — if Flask doesn't log the expected line within 8s,
+  // try the health endpoint directly before giving up.
+  const fallbackTimer = setTimeout(async () => {
+    if (ready) return;
+    try {
+      const http = require('http');
+      await new Promise((resolve, reject) => {
+        const req = http.get('http://127.0.0.1:5001/health', (res) => {
+          if (res.statusCode === 200) { ready = true; _broadcastStatus('ready'); }
+          resolve();
+        });
+        req.on('error', reject);
+        req.setTimeout(2000, () => { req.destroy(); reject(new Error('timeout')); });
+      });
+    } catch {
+      if (!ready) _broadcastStatus('error', 'Server did not start in time.');
+    }
+  }, 8000);
+
+  proc.on('error', (err) => {
+    clearTimeout(fallbackTimer);
+    console.error('[server] spawn error:', err.message);
+    _broadcastStatus('error', 'Failed to start optimisation server.');
+    serverProcess = null;
+  });
+
+  proc.on('exit', (code, signal) => {
+    clearTimeout(fallbackTimer);
+    console.log(`[server] exited (code=${code}, signal=${signal})`);
+    if (serverProcess === proc) serverProcess = null;
+    if (!_appQuitting) _broadcastStatus('offline', 'Optimisation server stopped.');
+  });
+}
+
+function stopServer() {
+  if (serverProcess) {
+    serverProcess.kill('SIGTERM');
+    serverProcess = null;
+  }
+}
 
 async function renderPdfPreview(filePath) {
   return new Promise((resolve, reject) => {
@@ -174,27 +263,35 @@ ipcMain.handle('pick-reference-asset', async () => {
 
 
 function createWindow() {
-  const win = new BrowserWindow({
-    width: 1024,
-    height: 1024,
-    webPreferences: { 
+  mainWin = new BrowserWindow({
+    width: 1280,
+    height: 900,
+    minWidth: 1024,
+    minHeight: 700,
+    webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: true,
-      contextIsolation: true      
+      contextIsolation: true,
     },
   });
-  win.loadFile('renderer/index.html');
+  mainWin.loadFile('renderer/index.html');
 
-  // Forward renderer console messages to the main process terminal so
-  // logs emitted in the renderer (e.g. console.log from renderer/index.js)
-  // are visible when running `npm start`.
-  if (win && win.webContents && typeof win.webContents.on === 'function') {
-    win.webContents.on('console-message', (event, level, message, line, sourceId) => {
-      // level: 0 = log, 1 = warn, 2 = error (may vary by Electron version)
-      const levelStr = level === 2 ? 'ERROR' : level === 1 ? 'WARN' : 'LOG';
-      console.log(`[renderer] [${levelStr}] ${message} (${sourceId}:${line})`);
-    });
-  }
+  mainWin.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    const levelStr = level === 2 ? 'ERROR' : level === 1 ? 'WARN' : 'LOG';
+    console.log(`[renderer] [${levelStr}] ${message} (${sourceId}:${line})`);
+  });
+
+  mainWin.on('closed', () => { mainWin = null; });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createWindow();
+  // Wait until the renderer has loaded before broadcasting the initial status,
+  // otherwise the IPC message arrives before the listener is registered.
+  mainWin.webContents.once('did-finish-load', () => startServer());
+});
+
+app.on('before-quit', () => {
+  _appQuitting = true;
+  stopServer();
+});
