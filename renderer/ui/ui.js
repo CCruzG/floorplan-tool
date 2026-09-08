@@ -170,12 +170,20 @@ function refreshInspector(fp, store) {
       const pt = selected[0];
       const zones = fp.Thermal_Zones || [];
       const ptZoneIndices = Array.isArray(pt.thermalZoneIndices) ? pt.thermalZoneIndices : [];
-      const zoneChecks = zones.length > 0 && pt.entryPoint === true
+      const hasVavAssignments = pt.entryPoint === true && Array.isArray(pt.thermalRegions) && pt.thermalRegions.length > 0;
+      const zoneChecks = zones.length > 0 && pt.entryPoint === true && !hasVavAssignments
         ? zones.map((z, i) =>
             `<label style="display:flex; align-items:center; gap:5px; font-size:var(--fs-xs); color:var(--text); cursor:pointer;">` +
             `<input class="insp-pt-zone-cb" type="checkbox" value="${i}"${ptZoneIndices.includes(i) ? ' checked' : ''}> Zone ${i + 1}${z.name ? ' — ' + z.name : ''}` +
             `</label>`
           ).join('')
+        : '';
+      const vavRows = hasVavAssignments
+        ? [...pt.thermalRegions]
+            .sort((a, b) => (a.zoneIndex - b.zoneIndex) || ((a.vavZoneIndex ?? a.subZoneIndex ?? 0) - (b.vavZoneIndex ?? b.subZoneIndex ?? 0)))
+            .map(r =>
+              `<div style="font-size:var(--fs-xs); color:var(--text);">Zone ${r.zoneIndex + 1} / VAV ${(r.vavZoneIndex ?? r.subZoneIndex ?? 0) + 1}</div>`
+            ).join('')
         : '';
       panel.innerHTML = [
         `<div class="inspector-header"><span class="inspector-kind">Grid Point</span></div>`,
@@ -187,12 +195,15 @@ function refreshInspector(fp, store) {
         `<div class="inspector-row"><span class="inspector-label">Entry Point</span><input id="insp-pt-entrypoint" type="checkbox"${pt.entryPoint === true ? ' checked' : ''}></div>`,
         pt.entryPoint === true && zones.length > 0 ? [
           `<div class="inspector-row" style="flex-direction:column; align-items:flex-start; gap:3px;">`,
-          `<span class="inspector-label">Thermal Zones</span>`,
+          `<span class="inspector-label">${hasVavAssignments ? 'VAV Control Zones' : 'Thermal Zones'}</span>`,
           `<div id="insp-pt-zone-list" style="display:flex; flex-direction:column; gap:2px; padding-left:2px;">`,
-          zoneChecks,
+          hasVavAssignments ? vavRows : zoneChecks,
           `</div>`,
           `</div>`,
         ].join('') : '',
+        hasVavAssignments
+          ? `<div class="inspector-row" style="margin-top:6px;"><button id="insp-pt-clear-assignment" class="insp-btn">Clear zone assignment</button></div>`
+          : '',
         `</div>`
       ].join('');
       panel.querySelector('#insp-pt-column').addEventListener('change', e => {
@@ -213,6 +224,14 @@ function refreshInspector(fp, store) {
           store.update(fp);
         });
       });
+      const clearBtn = panel.querySelector('#insp-pt-clear-assignment');
+      if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+          pt.thermalRegions = [];
+          pt.thermalZoneIndices = [];
+          store.update(fp);
+        });
+      }
     } else {
       // Mixed-value helpers: true if all match, null if mixed
       const allColumn     = selected.every(p => p.column !== false);
@@ -3687,6 +3706,7 @@ export function bindUI(store, canvas, mouse) {
     };
 
     const runStage = async (phases, pollIntervalMs = 2000, config = null) => {
+      if (phases.includes('zones')) clearAllEntryPointAssignments(fp);
       const planJson = fp.toJSON();
       const units = fp.units || { length: getUnitLabel() || 'm', pxPerUnit: getPixelsPerUnit() || 1 };
       if (phases.length > 0) _currentPhase = phases[0];
@@ -4087,6 +4107,17 @@ function _mergeThermalZonesFromBackend(fp, thermalZones) {
   }));
 }
 
+// The backend "zones" phase recomputes region/vavZone indices for ALL zones
+// with no per-zone scoping, so any existing entry-point → VAV-zone
+// assignment (pt.thermalRegions / pt.thermalZoneIndices) is stale the moment
+// this phase reruns. Call before every code path that triggers it.
+function clearAllEntryPointAssignments(fp) {
+  for (const p of (fp?.Points || [])) {
+    if (p.thermalRegions && p.thermalRegions.length) p.thermalRegions = [];
+    if (p.thermalZoneIndices && p.thermalZoneIndices.length) p.thermalZoneIndices = [];
+  }
+}
+
 // Re-runs the backend "zones" phase so existing sub-zone (vav_control_zones)
 // boundaries reflect an edited zone's air_requirement, then redraws the
 // canvas. Recomputes every zone's sub-zones (the backend has no per-zone
@@ -4107,6 +4138,7 @@ async function _recomputeZoneSubdivisions(store) {
   if (labelEl) labelEl.textContent = 'Recalculating sub-zones…';
 
   try {
+    clearAllEntryPointAssignments(fp);
     const planJson = fp.toJSON();
     const units = fp.units || { length: getUnitLabel() || 'm', pxPerUnit: getPixelsPerUnit() || 1 };
     const started = await startOptimisation(planJson, units, { phases: ['zones'] });
