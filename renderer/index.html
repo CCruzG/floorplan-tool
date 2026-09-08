@@ -40,18 +40,18 @@
     <div id="toolPalette" class="floating-palette">
       <div class="palette-title">Tools</div>
       <div class="palette-buttons">
+        <button id="clearBtn">New Project</button>
+        <button id="openFloorplanBtn">Open Floorplan</button>
+        <button id="saveQuickBtn">Save</button>
+        <button id="saveFloorplanBtn">Save As…</button>
+        <div style="border-top:1px solid #333; margin:4px 0;"></div>
         <button id="selectModeBtn">Select</button>
         <button id="drawModeBtn">Draw Boundary</button>
         <button id="coreModeBtn">Draw Core</button>
         <button id="finishCoreBtn" style="display:none">Finish Core</button>
         <button id="entranceModeBtn">Place Door</button>
-        <button id="clearBtn">Clear Canvas</button>
-        <button id="lockBtn">Lock</button>
         <button id="view3dBtn">3D View</button>
         <button id="calibrateLineBtn">Calibrate Scale</button>
-        <button id="openFloorplanBtn">Open Floorplan</button>
-        <button id="saveQuickBtn">Save</button>
-        <button id="saveFloorplanBtn">Save As…</button>
         <button id="snapshotSolutionBtn">Snapshot</button>
         <div style="border-top:1px solid #333; margin:4px 0;"></div>
         <div class="palette-title">Optimisation</div>
@@ -206,6 +206,22 @@
       </div>
     </div>
 
+    <!-- New Project modal -->
+    <div id="newProjectModal" class="floating-modal" style="display:none;">
+      <div class="modal-header">
+        <span class="modal-title">New Project</span>
+        <button id="closeNewProjectModalBtn" class="modal-close">×</button>
+      </div>
+      <div class="cg-row" style="justify-content:center; text-align:center;">
+        <span class="cg-label">Save your current work before starting a new project?</span>
+      </div>
+      <div class="cg-row" style="justify-content:center; gap:6px; margin-top:14px;">
+        <button id="newProjSaveBtn" class="gp-btn">Save</button>
+        <button id="newProjDiscardBtn" class="gp-btn gp-btn-clear">Don't Save</button>
+        <button id="newProjCancelBtn" class="gp-btn gp-btn-clear">Cancel</button>
+      </div>
+    </div>
+
     <!-- Top block: canvas + JSON -->
     <div id="canvasAndJson">
       <div id="canvasPanel">
@@ -299,7 +315,7 @@
           <div class="thermal-col-left">
             <div class="cg-header" style="display:flex; align-items:center; justify-content:space-between;">
               <span>Thermal Zones</span>
-              <button id="mergeZonesBtn" class="gp-btn" disabled style="font-size:10px; padding:2px 6px;" title="Click ○ next to zones to select for merge">Merge Selected</button>
+              <button id="mergeVavZonesBtn" class="gp-btn" disabled style="font-size:10px; padding:2px 6px;">Merge VAV Zones</button>
             </div>
             <ul id="thermalZonesList" class="ea-list"></ul>
           </div>
@@ -448,6 +464,7 @@
       // ── Horizontal resize: right JSON panel ──────────────────────────────────
       const handle    = document.getElementById('panelResizeHandle');
       const jsonPanel = document.getElementById('jsonPanel');
+      const layersPanel = document.getElementById('layersPanel');
       let dragging = false, startX = 0, startW = 0;
 
       handle.addEventListener('mousedown', e => {
@@ -464,6 +481,7 @@
         const delta = startX - e.clientX;
         const newW  = Math.max(200, Math.min(startW + delta, window.innerWidth * 0.6));
         jsonPanel.style.flex = `0 0 ${newW}px`;
+        if (layersPanel) layersPanel.style.flex = `0 0 ${newW}px`;
       });
 
       document.addEventListener('mouseup', () => {

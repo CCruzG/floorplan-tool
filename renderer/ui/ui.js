@@ -169,15 +169,7 @@ function refreshInspector(fp, store) {
     if (selected.length === 1) {
       const pt = selected[0];
       const zones = fp.Thermal_Zones || [];
-      const ptZoneIndices = Array.isArray(pt.thermalZoneIndices) ? pt.thermalZoneIndices : [];
       const hasVavAssignments = pt.entryPoint === true && Array.isArray(pt.thermalRegions) && pt.thermalRegions.length > 0;
-      const zoneChecks = zones.length > 0 && pt.entryPoint === true && !hasVavAssignments
-        ? zones.map((z, i) =>
-            `<label style="display:flex; align-items:center; gap:5px; font-size:var(--fs-xs); color:var(--text); cursor:pointer;">` +
-            `<input class="insp-pt-zone-cb" type="checkbox" value="${i}"${ptZoneIndices.includes(i) ? ' checked' : ''}> Zone ${i + 1}${z.name ? ' — ' + z.name : ''}` +
-            `</label>`
-          ).join('')
-        : '';
       const vavRows = hasVavAssignments
         ? [...pt.thermalRegions]
             .sort((a, b) => (a.zoneIndex - b.zoneIndex) || ((a.vavZoneIndex ?? a.subZoneIndex ?? 0) - (b.vavZoneIndex ?? b.subZoneIndex ?? 0)))
@@ -193,11 +185,11 @@ function refreshInspector(fp, store) {
         `<div class="inspector-row"><span class="inspector-label">Column</span><input id="insp-pt-column" type="checkbox"${pt.column !== false ? ' checked' : ''}></div>`,
         `<div class="inspector-row"><span class="inspector-label">Mechanical</span><input id="insp-pt-mechanical" type="checkbox"${pt.mechanical !== false ? ' checked' : ''}></div>`,
         `<div class="inspector-row"><span class="inspector-label">Entry Point</span><input id="insp-pt-entrypoint" type="checkbox"${pt.entryPoint === true ? ' checked' : ''}></div>`,
-        pt.entryPoint === true && zones.length > 0 ? [
+        hasVavAssignments ? [
           `<div class="inspector-row" style="flex-direction:column; align-items:flex-start; gap:3px;">`,
-          `<span class="inspector-label">${hasVavAssignments ? 'VAV Control Zones' : 'Thermal Zones'}</span>`,
+          `<span class="inspector-label">VAV Control Zones</span>`,
           `<div id="insp-pt-zone-list" style="display:flex; flex-direction:column; gap:2px; padding-left:2px;">`,
-          hasVavAssignments ? vavRows : zoneChecks,
+          vavRows,
           `</div>`,
           `</div>`,
         ].join('') : '',
@@ -216,13 +208,6 @@ function refreshInspector(fp, store) {
         pt.entryPoint = e.target.checked;
         if (!e.target.checked) { pt.thermalZoneIndices = []; pt.thermalRegions = []; }
         store.update(fp);
-      });
-      panel.querySelectorAll('.insp-pt-zone-cb').forEach(cb => {
-        cb.addEventListener('change', () => {
-          const checked = [...panel.querySelectorAll('.insp-pt-zone-cb:checked')].map(el => parseInt(el.value, 10));
-          pt.thermalZoneIndices = checked;
-          store.update(fp);
-        });
       });
       const clearBtn = panel.querySelector('#insp-pt-clear-assignment');
       if (clearBtn) {
@@ -1941,20 +1926,6 @@ export function bindUI(store, canvas, mouse) {
   }
 
   // Lock button - toggle lock on selected segment
-  const lockBtn = document.getElementById('lockBtn');
-  if (lockBtn) {
-    lockBtn.addEventListener('click', () => {
-      if (store.mode === "select") {
-        const seg = store.active.selectedSegment;
-        if (seg != null) {
-          const edge = store.active.wall_graph.edges[seg];
-          edge.locked = !edge.locked;
-          store.update(store.active);
-          console.log("Segment lock toggled", store.active.wall_graph.edges[seg].locked);
-        }
-      }
-    });
-  }
 
   // 3D View toggle button
   const view3dBtn      = document.getElementById('view3dBtn');
@@ -2696,6 +2667,9 @@ export function bindUI(store, canvas, mouse) {
           _setThermalSelection(store, hit.zoneIndex, hit.vavZoneIndex);
         }
         store.active._thermalSelectionRegions = store._selectedRegions;
+        // Mirror canvas region selection into the VAV-merge selection so the panel
+        // toggles light up and "Merge VAV Zones" enables from a canvas selection.
+        store._vavMergeSelection = (store._selectedRegions || []).map(r => ({ zoneIndex: r.zoneIndex, vavIndex: r.vavZoneIndex }));
         refreshThermalZonesList(store);
         refreshThermalEditor(store);
         store.notify();
@@ -2991,16 +2965,55 @@ export function bindUI(store, canvas, mouse) {
     }
   });
 
-  // 👉 Add Clear button listener here
+  // 👉 New Project: save-first modal, then clear (never clear before an awaited save resolves)
   const clearBtn = document.getElementById('clearBtn');
+  const newProjectModal = document.getElementById('newProjectModal');
+  const _doNewProject = () => {
+    store.active = new FloorPlan();   // reset to a new empty plan
+    store.setMode('draw');
+    _currentFilePath = null;          // new project has no file; a later quick-save must not overwrite the old one
+    store.update(store.active);       // trigger re-render
+    if (newProjectModal) newProjectModal.style.display = 'none';
+    console.log("Canvas cleared, new floorplan started");
+  };
   if (clearBtn) {
     clearBtn.addEventListener('click', () => {
-      store.active = new FloorPlan();   // reset to a new empty plan
-      store.setMode("draw");
-      store.update(store.active);       // trigger re-render
-      console.log("Canvas cleared, new floorplan started");
+      if (newProjectModal) newProjectModal.style.display = 'block';
     });
   }
+  document.getElementById('newProjSaveBtn')?.addEventListener('click', async () => {
+    if (!store.active) { _doNewProject(); return; }
+    let result;
+    try {
+      if (_currentFilePath) {
+        result = await window.electronAPI.saveFloorplanSilent({
+          filePath: _currentFilePath,
+          payload: _buildSavePayload()
+        });
+      } else {
+        result = await window.electronAPI.saveFloorplan({
+          filenameSuggested: `floorplan-${store.active.name}.json`,
+          payload: _buildSavePayload()
+        });
+        if (result?.success) _currentFilePath = result.path;
+      }
+    } catch (err) {
+      console.error("New Project save error:", err);
+      result = { success: false };
+    }
+    if (result?.success) {
+      _doNewProject();
+    } else {
+      alert('Save was cancelled or failed — your project was not cleared.');
+    }
+  });
+  document.getElementById('newProjDiscardBtn')?.addEventListener('click', _doNewProject);
+  document.getElementById('newProjCancelBtn')?.addEventListener('click', () => {
+    if (newProjectModal) newProjectModal.style.display = 'none';
+  });
+  document.getElementById('closeNewProjectModalBtn')?.addEventListener('click', () => {
+    if (newProjectModal) newProjectModal.style.display = 'none';
+  });
 
   // ═══════════════════════════════════════════════════════════
   // GRID GENERATION MODAL
@@ -4304,65 +4317,205 @@ function refreshThermalEditor(store) {
   }
 }
 
-function _mergeThermalZones(fp, zoneIndices) {
-  if (!fp || !Array.isArray(fp.Thermal_Zones) || zoneIndices.length < 2) return;
-  const sorted = [...zoneIndices].sort((a, b) => a - b);
-  const targetIdx = sorted[0];
-  const toRemove  = sorted.slice(1);
-  const target = fp.Thermal_Zones[targetIdx];
 
-  // Track VAV offset so entry point vavZoneIndex can be remapped
-  const vavOffsets = new Map();
-  for (const srcIdx of toRemove) {
-    const src = fp.Thermal_Zones[srcIdx];
-    vavOffsets.set(srcIdx, (target.vav_control_zones || []).length);
-    target.thermal_region_geometry = [
-      ...(target.thermal_region_geometry || []),
-      ...(src.thermal_region_geometry   || []),
-    ];
-    target.vav_control_zones = [
-      ...(target.vav_control_zones || []),
-      ...(src.vav_control_zones   || []),
-    ];
-    if (!Number.isFinite(target.air_requirement) && Number.isFinite(src.air_requirement)) {
-      target.air_requirement = src.air_requirement;
-    }
-    if (!target.orientation && src.orientation) target.orientation = src.orientation;
+// Grid step (mm) — min positive gap between sorted unique X coords of fp.Points,
+// falling back to the Y-coord gap, else 1. Mirrors the spacing logic in
+// renderers.js _gridStepPx's fallback path.
+function _vavGridStep(fp) {
+  const pts = fp?.Points || [];
+  if (pts.length > 1) {
+    const xs = [...new Set(pts.map(p => p.x))].sort((a, b) => a - b);
+    const xDiffs = xs.slice(1).map((x, i) => x - xs[i]).filter(d => d > 0);
+    if (xDiffs.length) return Math.min(...xDiffs);
+    const ys = [...new Set(pts.map(p => p.y))].sort((a, b) => a - b);
+    const yDiffs = ys.slice(1).map((y, i) => y - ys[i]).filter(d => d > 0);
+    if (yDiffs.length) return Math.min(...yDiffs);
   }
+  return 1;
+}
 
-  // Remove merged zones in descending order to preserve lower indices
-  for (const idx of [...toRemove].reverse()) fp.Thermal_Zones.splice(idx, 1);
-
-  // Build old→new zone index remap
-  const originalLength = fp.Thermal_Zones.length + toRemove.length;
-  const removedSet = new Set(toRemove);
-  const remap = new Map();
-  let shift = 0;
-  for (let i = 0; i < originalLength; i++) {
-    if (removedSet.has(i)) { remap.set(i, targetIdx); shift++; }
-    else                   { remap.set(i, i - shift); }
+// Union of `step`-sized grid cells centred on each coord, boundary traced into
+// a single closed ring (reproduces the backend's cell-union method). Returns
+// [] if the cells don't form exactly one connected ring (caller falls back).
+function _vavCellUnionPolygon(coords, step) {
+  if (!Array.isArray(coords) || coords.length === 0) return [];
+  const x0 = Math.min(...coords.map(c => c.x));
+  const y0 = Math.min(...coords.map(c => c.y));
+  const occ = new Set();
+  for (const c of coords) {
+    const i = Math.round((c.x - x0) / step);
+    const j = Math.round((c.y - y0) / step);
+    occ.add(i + ',' + j);
   }
+  const key = (x, y) => x + ',' + y;
+  const edges = [];
+  for (const cellKey of occ) {
+    const [i, j] = cellKey.split(',').map(Number);
+    if (!occ.has((i - 1) + ',' + j)) edges.push([key(i, j), key(i, j + 1)]);         // left
+    if (!occ.has((i + 1) + ',' + j)) edges.push([key(i + 1, j), key(i + 1, j + 1)]); // right
+    if (!occ.has(i + ',' + (j - 1))) edges.push([key(i, j), key(i + 1, j)]);         // bottom
+    if (!occ.has(i + ',' + (j + 1))) edges.push([key(i, j + 1), key(i + 1, j + 1)]); // top
+  }
+  if (!edges.length) return [];
 
-  // Update entry point assignments
-  (fp.Points || []).forEach(pt => {
-    if (Array.isArray(pt.thermalRegions)) {
-      const seen = new Set();
-      pt.thermalRegions = pt.thermalRegions.map(r => {
-        const newZone = remap.get(r.zoneIndex) ?? r.zoneIndex;
-        const newVav  = removedSet.has(r.zoneIndex) && vavOffsets.has(r.zoneIndex)
-          ? r.vavZoneIndex + vavOffsets.get(r.zoneIndex) : r.vavZoneIndex;
-        return { ...r, zoneIndex: newZone, vavZoneIndex: newVav };
-      }).filter(r => { const k = `${r.zoneIndex}:${r.vavZoneIndex}`; if (seen.has(k)) return false; seen.add(k); return true; });
-    }
-    if (Array.isArray(pt.thermalZoneIndices)) {
-      pt.thermalZoneIndices = [...new Set(pt.thermalZoneIndices.map(zi => remap.get(zi) ?? zi))];
+  const adj = new Map();
+  edges.forEach((e, idx) => {
+    for (const [a, b] of [[e[0], e[1]], [e[1], e[0]]]) {
+      if (!adj.has(a)) adj.set(a, []);
+      adj.get(a).push({ to: b, edgeIdx: idx });
     }
   });
+  const usedEdge = new Array(edges.length).fill(false);
 
-  // Fix selected zone index
-  if (Number.isInteger(fp.selectedThermalZoneIndex) && remap.has(fp.selectedThermalZoneIndex)) {
-    fp.selectedThermalZoneIndex = remap.get(fp.selectedThermalZoneIndex);
+  const start = edges[0][0];
+  const ring = [start];
+  let current = start;
+  let steps = 0;
+  const maxSteps = edges.length + 1;
+  while (steps < maxSteps) {
+    const options = (adj.get(current) || []).filter(o => !usedEdge[o.edgeIdx]);
+    if (!options.length) break;
+    const next = options[0];
+    usedEdge[next.edgeIdx] = true;
+    current = next.to;
+    steps++;
+    if (current === start) break;
+    ring.push(current);
   }
+  if (current !== start) return [];          // walk failed to close
+  if (usedEdge.some(u => !u)) return [];      // leftover edges -> disconnected / multiple loops
+
+  let worldRing = ring.map(k => {
+    const [ci, cj] = k.split(',').map(Number);
+    return { x: x0 + (ci - 0.5) * step, y: y0 + (cj - 0.5) * step };
+  });
+
+  // Drop collinear intermediate points for a cleaner outline.
+  if (worldRing.length >= 3) {
+    const n = worldRing.length;
+    const simplified = [];
+    for (let k = 0; k < n; k++) {
+      const prev = worldRing[(k - 1 + n) % n];
+      const cur = worldRing[k];
+      const next = worldRing[(k + 1) % n];
+      const d1x = cur.x - prev.x, d1y = cur.y - prev.y;
+      const d2x = next.x - cur.x, d2y = next.y - cur.y;
+      if (d1x * d2y - d1y * d2x !== 0) simplified.push(cur);
+    }
+    if (simplified.length >= 3) worldRing = simplified;
+  }
+
+  return worldRing;
+}
+
+// Merge the VAV control zones currently queued in store._vavMergeSelection
+// (array of {zoneIndex, vavIndex} — vavIndex is the original index into that
+// zone's vav_control_zones). Supports intra-zone merges (any count within one
+// thermal zone) and cross-zone merges across exactly two thermal zones,
+// provided at least one of the two zones is being fully consumed by the merge.
+function _mergeVavZones(store) {
+  const fp = store?.active;
+  if (!fp || !Array.isArray(fp.Thermal_Zones)) return;
+
+  const seen = new Set();
+  const sel = (store._vavMergeSelection || []).filter(r => {
+    const k = `${r.zoneIndex}:${r.vavIndex}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  if (sel.length < 2) return;
+
+  const involvedZones = [...new Set(sel.map(r => r.zoneIndex))];
+
+  if (involvedZones.length >= 3) {
+    alert('VAV zones can be merged across at most two thermal zones at a time.');
+    return;
+  }
+
+  let survivorIdx;
+  let otherIdx = null;
+  if (involvedZones.length === 2) {
+    const [za, zb] = involvedZones;
+    const countIn = zi => sel.filter(r => r.zoneIndex === zi).length;
+    const totalIn = zi => (fp.Thermal_Zones[zi]?.vav_control_zones || []).length;
+    const aFull = countIn(za) === totalIn(za);
+    const bFull = countIn(zb) === totalIn(zb);
+    if (!aFull && !bFull) {
+      alert("Cannot merge VAV control zones from different thermal zones unless one of these is true:\n • one of the thermal zones has only a single VAV control zone, or\n • the merge includes all of the VAV control zones of one of the thermal zones.");
+      return;
+    }
+    if (aFull && !bFull) { survivorIdx = zb; otherIdx = za; }
+    else if (bFull && !aFull) { survivorIdx = za; otherIdx = zb; }
+    else { survivorIdx = Math.min(za, zb); otherIdx = Math.max(za, zb); }
+  } else {
+    survivorIdx = involvedZones[0];
+  }
+
+  // Resolve the selected cz objects before any mutation.
+  const resolved = sel
+    .map(r => ({ ...r, cz: fp.Thermal_Zones[r.zoneIndex]?.vav_control_zones?.[r.vavIndex] }))
+    .filter(r => r.cz);
+  if (resolved.length < 2) return;
+
+  // Build the merged VAV zone.
+  const load = resolved.reduce((s, r) => s + (Number.isFinite(r.cz.load) ? r.cz.load : 0), 0);
+  const pointsSeen = new Set();
+  const points = [];
+  for (const r of resolved) {
+    for (const pid of (r.cz.points || [])) {
+      if (!pointsSeen.has(pid)) { pointsSeen.add(pid); points.push(pid); }
+    }
+  }
+  const ptById = new Map((fp.Points || []).map(p => [p.id, p]));
+  const coords = points.map(pid => ptById.get(pid)).filter(Boolean).map(p => ({ x: p.x, y: p.y }));
+  const step = _vavGridStep(fp);
+  const pxPerUnit = fp.units?.pxPerUnit || 1;
+  const mmPerUnit = ({ mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 })[fp.units?.length] ?? 1;
+  // _vavCellUnionPolygon works in fp.Points' pixel space; convert its ring to the
+  // millimetre space that cz.polygon, the renderer, and the area calc all use.
+  // 1 plan-unit = mmPerUnit mm = pxPerUnit px  ->  mm = px * mmPerUnit / pxPerUnit.
+  let polygon = _vavCellUnionPolygon(coords, step).map(pt => ({ x: pt.x * mmPerUnit / pxPerUnit, y: pt.y * mmPerUnit / pxPerUnit }));
+  if (!polygon.length) {
+    // Fallback: largest selected cz's existing polygon, so render still works.
+    const largest = resolved.reduce((best, r) => {
+      const area = Array.isArray(r.cz.polygon) ? _polygonArea(r.cz.polygon) : 0;
+      return (!best || area > best.area) ? { area, cz: r.cz } : best;
+    }, null);
+    polygon = largest?.cz?.polygon || [];
+  }
+  const mergedCz = { polygon, load, points, entry_point: 0 };
+
+  // Remove selected czs from their zones, descending vavIndex order per zone.
+  const byZone = new Map();
+  for (const r of resolved) {
+    if (!byZone.has(r.zoneIndex)) byZone.set(r.zoneIndex, []);
+    byZone.get(r.zoneIndex).push(r.vavIndex);
+  }
+  for (const [zi, idxs] of byZone) {
+    const zone = fp.Thermal_Zones[zi];
+    for (const vi of [...idxs].sort((a, b) => b - a)) {
+      zone.vav_control_zones.splice(vi, 1);
+      if (Array.isArray(zone.vavAirRequirements)) zone.vavAirRequirements.splice(vi, 1);
+    }
+  }
+
+  const survivor = fp.Thermal_Zones[survivorIdx];
+  survivor.vav_control_zones.push(mergedCz);
+  if (Array.isArray(survivor.vavAirRequirements)) survivor.vavAirRequirements.push(null);
+
+  if (otherIdx !== null) {
+    const other = fp.Thermal_Zones[otherIdx];
+    survivor.thermal_region_geometry = [...(survivor.thermal_region_geometry || []), ...(other?.thermal_region_geometry || [])];
+    fp.Thermal_Zones.splice(otherIdx, 1);
+  }
+
+  clearAllEntryPointAssignments(fp);
+  fp.selectedThermalZoneIndex = null;
+  fp.selectedVavZoneIndex = null;
+  store._vavMergeSelection = [];
+  store.update(fp);
+  refreshThermalZonesList(store);
 }
 
 export function refreshThermalZonesList(store) {
@@ -4375,26 +4528,24 @@ export function refreshThermalZonesList(store) {
   const regions = store.active?.Thermal_Zones || [];
   if (regions.length === 0) {
     listEl.innerHTML = '<li style="color:var(--text-muted); font-size:0.85em; padding:6px 0;">No zones yet — run Thermal Zones or Full Optimise to generate.</li>';
-    const mergeBtn = document.getElementById('mergeZonesBtn');
-    if (mergeBtn) mergeBtn.disabled = true;
+    const mergeVavBtn = document.getElementById('mergeVavZonesBtn');
+    if (mergeVavBtn) mergeVavBtn.disabled = true;
     return;
   }
 
-  // Enable merge button when 2+ distinct zones are selected via the per-zone toggle buttons.
-  // _mergeSelection is separate from _selectedRegions (canvas/entry-point selection).
-  const selectedZoneIndices = [...new Set((store._mergeSelection || []).map(r => r.zoneIndex))];
-  const mergeBtn = document.getElementById('mergeZonesBtn');
-  if (mergeBtn) {
-    mergeBtn.disabled = selectedZoneIndices.length < 2;
-    mergeBtn.title = selectedZoneIndices.length < 2
-      ? 'Click ○ next to zones below to select for merge'
-      : `Merge ${selectedZoneIndices.length} selected zones into one`;
-    mergeBtn.onclick = () => {
-      if (!store.active || selectedZoneIndices.length < 2) return;
-      _mergeThermalZones(store.active, selectedZoneIndices);
-      store._mergeSelection = [];
-      store.update(store.active);
-      refreshThermalZonesList(store);
+  // Enable VAV-merge button when 2+ VAV control zones are selected via the
+  // per-vav toggle buttons in the sub-list. Validation of which combinations
+  // are actually mergeable happens inside _mergeVavZones.
+  const vavSelCount = (store._vavMergeSelection || []).length;
+  const mergeVavBtn = document.getElementById('mergeVavZonesBtn');
+  if (mergeVavBtn) {
+    mergeVavBtn.disabled = vavSelCount < 2;
+    mergeVavBtn.title = vavSelCount < 2
+      ? 'Click ○ next to VAV zones below to select for merge'
+      : `Merge ${vavSelCount} selected VAV zones into one`;
+    mergeVavBtn.onclick = () => {
+      if (!store.active || vavSelCount < 2) return;
+      _mergeVavZones(store);
     };
   }
 
@@ -4408,12 +4559,10 @@ export function refreshThermalZonesList(store) {
     const zoneArea = subZones.reduce((sum, sub) => sum + _thermalAreaInPlanUnits(store, sub), 0);
     const zoneAreaText = Number.isFinite(zoneArea) ? `${zoneArea.toFixed(2)} ${unitLabel}²` : '—';
 
-    // inMergeSet: zone is queued for merging via the ○ toggle button
-    const inMergeSet = (store._mergeSelection || []).some(r => r.zoneIndex === ri);
     // inAssignSet: zone has canvas-selected regions (for entry point assignment)
     const inAssignSet = (store._selectedRegions || []).some(r => r.zoneIndex === ri);
     const li = document.createElement('li');
-    li.style.cssText = `display:flex; align-items:flex-start; gap:6px; padding:4px 0; border-bottom:1px solid #2a2a2a; cursor:pointer; user-select:none; ${selectedZone ? 'background:#182018;' : inMergeSet ? 'background:#1a2030;' : ''}`;
+    li.style.cssText = `display:flex; align-items:flex-start; gap:6px; padding:4px 0; border-bottom:1px solid #2a2a2a; cursor:pointer; user-select:none; ${selectedZone ? 'background:#182018;' : ''}`;
     li.onclick = () => {
       _setThermalSelection(store, ri, null);
       store.update(store.active);
@@ -4423,23 +4572,6 @@ export function refreshThermalZonesList(store) {
     const swatch = document.createElement('span');
     swatch.style.cssText = `display:inline-block; width:12px; height:12px; border-radius:2px; background:${colour}; flex-shrink:0; margin-top:2px;`;
     li.appendChild(swatch);
-    // Merge-set toggle button — always present
-    const mergeToggle = document.createElement('button');
-    mergeToggle.textContent = inMergeSet ? '⊕' : '○';
-    mergeToggle.title = inMergeSet ? 'Selected for merge — click to deselect' : 'Click to select this zone for merge';
-    mergeToggle.style.cssText = `font-size:11px; color:${inMergeSet ? '#7cb8ff' : '#555'}; background:none; border:none; cursor:pointer; flex-shrink:0; padding:0 2px; line-height:1; margin-top:1px;`;
-    mergeToggle.onclick = (ev) => {
-      ev.stopPropagation();
-      if (!store._mergeSelection) store._mergeSelection = [];
-      const already = store._mergeSelection.some(r => r.zoneIndex === ri);
-      if (already) {
-        store._mergeSelection = store._mergeSelection.filter(r => r.zoneIndex !== ri);
-      } else {
-        store._mergeSelection = [...store._mergeSelection, { zoneIndex: ri }];
-      }
-      refreshThermalZonesList(store);
-    };
-    li.appendChild(mergeToggle);
     // Canvas-selection badge (entry point assignment)
     if (inAssignSet) {
       const badge = document.createElement('span');
@@ -4482,20 +4614,42 @@ export function refreshThermalZonesList(store) {
       const subList = document.createElement('div');
       subList.style.cssText = 'display:flex; flex-direction:column; gap:2px; margin-left:4px;';
       subZones.forEach((sub, si) => {
-        const subBtn = document.createElement('button');
         const vavIdx = displayedRegions.indices[si];
         const isSelectedSub = selectedZone && store.active?.selectedVavZoneIndex === vavIdx;
         const subArea = _thermalAreaInPlanUnits(store, sub);
         const subAreaText = Number.isFinite(subArea) ? `${subArea.toFixed(2)} ${unitLabel}²` : '—';
         const load = displayedRegions.loads[si];
+        const inVavMergeSet = (store._vavMergeSelection || []).some(r => r.zoneIndex === ri && r.vavIndex === vavIdx);
+
+        const subRow = document.createElement('div');
+        subRow.style.cssText = 'display:flex; align-items:center; gap:2px;';
+
+        const vavMergeToggle = document.createElement('button');
+        vavMergeToggle.textContent = inVavMergeSet ? '⊕' : '○';
+        vavMergeToggle.title = inVavMergeSet ? 'Selected for VAV merge — click to deselect' : 'Click to select this VAV zone for merge';
+        vavMergeToggle.style.cssText = `font-size:10px; color:${inVavMergeSet ? '#7cb8ff' : '#555'}; background:none; border:none; cursor:pointer; flex-shrink:0; padding:0 2px; line-height:1;`;
+        vavMergeToggle.onclick = (ev) => {
+          ev.stopPropagation();
+          if (!store._vavMergeSelection) store._vavMergeSelection = [];
+          const already = store._vavMergeSelection.some(r => r.zoneIndex === ri && r.vavIndex === vavIdx);
+          store._vavMergeSelection = already
+            ? store._vavMergeSelection.filter(r => !(r.zoneIndex === ri && r.vavIndex === vavIdx))
+            : [...store._vavMergeSelection, { zoneIndex: ri, vavIndex: vavIdx }];
+          refreshThermalZonesList(store);
+        };
+        subRow.appendChild(vavMergeToggle);
+
+        const subBtn = document.createElement('button');
         subBtn.textContent = `VAV zone ${vavIdx + 1} · ${subAreaText}${Number.isFinite(load) ? ` · ${Math.round(load)} L/s` : ''}`;
-        subBtn.style.cssText = `font-size:10px; padding:2px 4px; text-align:left; background:${isSelectedSub ? '#223822' : '#1a1a1a'}; color:#bbb; border:1px solid #333; cursor:pointer;`;
+        subBtn.style.cssText = `flex:1; font-size:10px; padding:2px 4px; text-align:left; background:${isSelectedSub ? '#223822' : '#1a1a1a'}; color:#bbb; border:1px solid ${inVavMergeSet ? '#7cb8ff' : '#333'}; cursor:pointer;`;
         subBtn.onclick = (ev) => {
           ev.stopPropagation();
           _setThermalSelection(store, ri, vavIdx);
           store.update(store.active);
         };
-        subList.appendChild(subBtn);
+        subRow.appendChild(subBtn);
+
+        subList.appendChild(subRow);
       });
       li.appendChild(subList);
     }
