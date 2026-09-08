@@ -1,4 +1,5 @@
 // renderer/index.js
+import './api/electronCompat.js';
 import { FloorPlanStore } from './state/store.js';
 import { FloorPlan } from './models/FloorPlan.js';
 import { DrawingService } from './drawing/drawingService.js';

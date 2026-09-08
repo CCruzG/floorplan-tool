@@ -8,9 +8,19 @@
  */
 
 if (!window.electronAPI) {
+  // Retained file handle so saveFloorplanSilent can write back to the same
+  // file without showing a picker every time (File System Access API only).
+  let _activeFileHandle = null;
+
+  async function _writeJson(handle, json) {
+    const writable = await handle.createWritable();
+    await writable.write(json);
+    await writable.close();
+  }
+
   window.electronAPI = {
 
-    // ── Save floorplan ────────────────────────────────────────────────────────
+    // ── Save floorplan (Save As — always shows picker) ────────────────────────
     // Returns { success, path? }
     async saveFloorplan({ filenameSuggested, payload }) {
       const json = JSON.stringify(payload, null, 2);
@@ -23,9 +33,8 @@ if (!window.electronAPI) {
             suggestedName: name,
             types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }],
           });
-          const writable = await handle.createWritable();
-          await writable.write(json);
-          await writable.close();
+          await _writeJson(handle, json);
+          _activeFileHandle = handle;
           return { success: true, path: handle.name };
         } catch (err) {
           if (err.name === 'AbortError') return { success: false };
@@ -33,7 +42,8 @@ if (!window.electronAPI) {
         }
       }
 
-      // Fallback: trigger a browser download
+      // Fallback: trigger a browser download (no persistent handle)
+      _activeFileHandle = null;
       const blob = new Blob([json], { type: 'application/json' });
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement('a');
@@ -44,16 +54,31 @@ if (!window.electronAPI) {
       return { success: true, path: name };
     },
 
-    // ── Silent save (autosave) ────────────────────────────────────────────────
+    // ── Silent save — writes to the active file handle without a picker ───────
     // Returns { success, path? }
     async saveFloorplanSilent({ filePath, payload }) {
-      try {
-        const key = `floorplan_autosave:${filePath || 'default'}`;
-        localStorage.setItem(key, JSON.stringify(payload));
-        return { success: true, path: filePath };
-      } catch {
-        return { success: false };
+      const json = JSON.stringify(payload, null, 2);
+
+      if (_activeFileHandle) {
+        try {
+          await _writeJson(_activeFileHandle, json);
+          return { success: true, path: _activeFileHandle.name };
+        } catch (err) {
+          return { success: false, error: err.message };
+        }
       }
+
+      // No handle available (file was opened via legacy input fallback).
+      // Trigger a download so at least something is saved to disk.
+      const name = (filePath ? filePath.split('/').pop() : null) || 'floorplan.json';
+      const blob = new Blob([json], { type: 'application/json' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(url);
+      return { success: true, path: name };
     },
 
     // ── Open floorplan ────────────────────────────────────────────────────────
@@ -68,6 +93,7 @@ if (!window.electronAPI) {
           });
           const file = await handle.getFile();
           const text = await file.text();
+          _activeFileHandle = handle;
           return { success: true, data: JSON.parse(text), path: file.name };
         } catch (err) {
           if (err.name === 'AbortError') return { success: false };
@@ -75,7 +101,7 @@ if (!window.electronAPI) {
         }
       }
 
-      // Fallback: hidden file input
+      // Fallback: hidden file input (no writable handle — Save will download)
       return new Promise((resolve) => {
         const input    = document.createElement('input');
         input.type     = 'file';
@@ -85,6 +111,7 @@ if (!window.electronAPI) {
           if (!file) return resolve({ success: false });
           try {
             const text = await file.text();
+            _activeFileHandle = null; // no write-back possible
             resolve({ success: true, data: JSON.parse(text), path: file.name });
           } catch (err) {
             resolve({ success: false, error: 'Invalid JSON file' });
@@ -147,7 +174,7 @@ if (!window.electronAPI) {
 
       const poll = async () => {
         try {
-          const res = await fetch('http://127.0.0.1:5001/health', {
+          const res = await fetch('/health', {
             signal: AbortSignal.timeout(3000),
           });
           if (res.ok) {

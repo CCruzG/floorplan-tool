@@ -107,14 +107,14 @@ export function drawReferenceImage(ctx, fp) {
 export function drawAreas(ctx, fp) {
   const unified = [];
 
-  // thermal_zones: take first subZone polygon ([{x,y}, ...]) for compact area rendering.
-  // subZones coordinates are always in mm (from backend) — convert to canvas pixels.
+  // thermal_zones: take first thermal_region_geometry polygon for compact area rendering.
+  // Coordinates are always in mm (from backend) — convert to canvas pixels.
   const _mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
   const _pxPerUnit = fp.units?.pxPerUnit ?? 1;
   const _toCanvas = mm => mm * _pxPerUnit / _mmPerUnit;
 
   (fp.Thermal_Zones || []).forEach(region => {
-    const sub = (region.subZones && region.subZones[0]) || [];
+    const sub = (region.thermal_region_geometry && region.thermal_region_geometry[0]) || [];
     const coords = sub
       .map((v) => {
         if (!v || typeof v.x !== 'number' || typeof v.y !== 'number') return null;
@@ -1514,15 +1514,25 @@ export function drawCoreProjectionGuides(ctx, fp, tempCore, mouse) {
 export function drawColumns(ctx, fp) {
   if (!fp.Columns || fp.Columns.length === 0) return;
 
-  const half = Math.max(4, (fp.units?.pxPerUnit ?? 1) * 0.25);
+  // Columns are square footprints; `width` (mm) is both edges. Fall back to
+  // the old fixed marker size for columns saved before this field existed.
+  // Drawn at 2x true scale — true-scale columns are too thin to read on
+  // screen at typical plan zoom levels.
+  const DISPLAY_SCALE = 2;
+  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
+  const pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const toPx = mm => mm * pxPerUnit / mmPerUnit;
+  const fallbackHalf = Math.max(4, pxPerUnit * 0.25);
+
   ctx.save();
   ctx.fillStyle   = 'rgba(50, 50, 70, 0.85)';
   ctx.strokeStyle = '#222';
   ctx.lineWidth   = 1;
 
   fp.Columns.forEach(col => {
-    const { x, y } = col;
+    const { x, y, width } = col;
     if (x === undefined || y === undefined) return;
+    const half = Number.isFinite(width) && width > 0 ? Math.max(1, toPx(width) * DISPLAY_SCALE / 2) : fallbackHalf;
     ctx.beginPath();
     ctx.rect(x - half, y - half, half * 2, half * 2);
     ctx.fill();
@@ -1663,7 +1673,7 @@ export function drawGridPoints(ctx, fp) {
   ctx.restore();
 }
 
-// Helper: compute centroid (in canvas px) of a single subZone polygon.
+// Helper: compute centroid (in canvas px) of a polygon.
 function _subZoneCentroid(subZone, toCanvas) {
   let sumX = 0, sumY = 0, count = 0;
   (subZone || []).forEach(pt => {
@@ -1694,7 +1704,7 @@ export function drawEntryConnections(ctx, fp) {
   fp.Points.forEach(point => {
     if (point.entryPoint !== true) return;
 
-    // Build the list of {zoneIndex, subZoneIndex} pairs to draw lines to.
+    // Build the list of {zoneIndex, vavZoneIndex} pairs to draw lines to.
     // Use thermalRegions (new format) when present; fall back to legacy fields.
     let regionList = [];
     if (Array.isArray(point.thermalRegions) && point.thermalRegions.length > 0) {
@@ -1702,36 +1712,31 @@ export function drawEntryConnections(ctx, fp) {
     } else {
       regionList = (point.thermalZoneIndices || [])
         .filter(zi => zi >= 0 && zi < zones.length)
-        .map(zi => ({ zoneIndex: zi, subZoneIndex: point.thermalSubZoneMap?.[zi] ?? null }));
+        .map(zi => ({ zoneIndex: zi, vavZoneIndex: null }));
     }
 
-    regionList.forEach(({ zoneIndex: zi, subZoneIndex: szi }) => {
+    regionList.forEach(({ zoneIndex: zi, vavZoneIndex: vzi }) => {
       const zone = zones[zi];
       if (!zone) return;
-      const controlZones = Array.isArray(zone.thermalControlZones) ? zone.thermalControlZones : [];
-      const useControl   = controlZones.some(cz => Array.isArray(cz?.polygon) && cz.polygon.length >= 3);
-      const subZones     = zone.subZones || [];
+      const vavZones = Array.isArray(zone.vav_control_zones) ? zone.vav_control_zones : [];
 
       let targetPoly = null;
-      if (typeof szi === 'number' && szi >= 0) {
-        if (useControl) {
-          const cz = controlZones[szi];
-          if (Array.isArray(cz?.polygon) && cz.polygon.length >= 3) targetPoly = cz.polygon;
-        } else if (szi < subZones.length) {
-          targetPoly = subZones[szi];
-        }
+      if (typeof vzi === 'number' && vzi >= 0 && vzi < vavZones.length) {
+        const cz = vavZones[vzi];
+        if (Array.isArray(cz?.polygon) && cz.polygon.length >= 3) targetPoly = cz.polygon;
       }
 
       let cx, cy;
       if (targetPoly) {
         ({ cx, cy } = _subZoneCentroid(targetPoly, toCanvas));
       } else {
-        // Fallback: centroid of all geometry in the zone.
-        const allPolygons = useControl
-          ? controlZones.map(cz => cz?.polygon).filter(p => Array.isArray(p))
-          : subZones;
+        // Fallback: centroid of all vav_control_zones in the zone.
+        const allPolygons = vavZones.map(cz => cz?.polygon).filter(p => Array.isArray(p));
+        const fallbackPolygons = allPolygons.length
+          ? allPolygons
+          : (zone.thermal_region_geometry || []);
         let sumX = 0, sumY = 0, count = 0;
-        allPolygons.forEach(sub => {
+        fallbackPolygons.forEach(sub => {
           (sub || []).forEach(pt => {
             if (pt && typeof pt.x === 'number' && typeof pt.y === 'number') {
               sumX += toCanvas(pt.x); sumY += toCanvas(pt.y); count++;
@@ -1931,22 +1936,25 @@ export function drawThermalZones(ctx, fp) {
   const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
   const pxPerUnit = fp.units?.pxPerUnit ?? 1;
   const toCanvas = mm => mm * pxPerUnit / mmPerUnit;
+  // Debug toggle ("Thermal Regions" layer, off by default): force the full
+  // region polygon to draw even once VAV control zones exist, so the raw
+  // region geometry (e.g. a core-hole slit) can be inspected directly instead
+  // of being hidden behind the decluttered VAV-zone rendering.
+  const showFullRegions = fp.layers?.Thermal_Regions === true;
 
   ctx.save();
 
   regions.forEach((region, ri) => {
-    const subZones = region.subZones || [];
+    const thermalGeom = region.thermal_region_geometry || [];
     const isInternal = region.type === 'internal' || region.orientation === null || region.orientation === undefined;
     const palette = _zoneColour(ri, isInternal);
     const label = _orientationName(region.orientation);
-    const isSelectedZone = fp.selectedThermalZoneIndex === ri;
-    const selectedSubZone = fp.selectedThermalSubZoneIndex;
-    const selectedSubSource = fp.selectedThermalSubZoneSource || 'sub';
     const selRegions = fp._thermalSelectionRegions || [];
-    const hasControlZones = Array.isArray(region.thermalControlZones) && region.thermalControlZones.length > 0;
+    const hasVavZones = Array.isArray(region.vav_control_zones) && region.vav_control_zones.length > 0;
+    const isRegionSelected = selRegions.some(r => r.zoneIndex === ri);
     const validRings = [];
 
-    (subZones || []).forEach((subZone) => {
+    (thermalGeom || []).forEach((subZone) => {
       const coords = (subZone || [])
         .map((pt) => {
           if (!pt || typeof pt.x !== 'number' || typeof pt.y !== 'number') return null;
@@ -1959,7 +1967,31 @@ export function drawThermalZones(ctx, fp) {
 
     if (!validRings.length) return;
 
-    // Draw one merged fill per thermal region so sub-zone seams are not visible.
+    if (hasVavZones && !showFullRegions) {
+      // drawThermalControlZones() is the real visual once VAV control zones
+      // exist — the region itself only needs a thin outline when part of a
+      // multi-region selection (e.g. batch entry-point assignment), no fill
+      // or labels, so it doesn't double up with the control-zone rendering.
+      // (Overridden by the "Thermal Regions" debug toggle above.)
+      if (!isRegionSelected) return;
+      validRings.forEach((coords) => {
+        ctx.beginPath();
+        coords.forEach((pt, i) => {
+          const cx = toCanvas(pt[0]);
+          const cy = toCanvas(pt[1]);
+          if (i === 0) ctx.moveTo(cx, cy);
+          else ctx.lineTo(cx, cy);
+        });
+        ctx.closePath();
+        ctx.strokeStyle = '#7cb8ff';
+        ctx.lineWidth = 2.0;
+        ctx.stroke();
+      });
+      return;
+    }
+
+    // No VAV control zones yet (pre-partition review) — show the region
+    // itself as the only available feedback.
     ctx.beginPath();
     validRings.forEach((coords) => {
       coords.forEach((pt, i) => {
@@ -1974,7 +2006,6 @@ export function drawThermalZones(ctx, fp) {
     ctx.fillStyle = palette.fill;
     ctx.fill();
 
-    // Draw boundaries so selected thermal regions are clearly visible.
     validRings.forEach((coords, subIdx) => {
       ctx.beginPath();
       coords.forEach((pt, i) => {
@@ -1985,23 +2016,17 @@ export function drawThermalZones(ctx, fp) {
       });
       ctx.closePath();
 
-      const isSelectedSub = isSelectedZone && selectedSubSource === 'sub'
-        && Number.isInteger(selectedSubZone) && selectedSubZone === subIdx;
-      const isRegionSelected = selRegions.some(r => r.zoneIndex === ri && r.subZoneIndex === subIdx);
-      ctx.strokeStyle = isSelectedSub ? '#ffe082' : isRegionSelected ? '#7cb8ff' : palette.stroke;
-      ctx.lineWidth = isSelectedSub ? 2.6 : isRegionSelected ? 2.0 : 1.2;
+      ctx.strokeStyle = isRegionSelected ? '#7cb8ff' : palette.stroke;
+      ctx.lineWidth = isRegionSelected ? 2.0 : 1.2;
       ctx.stroke();
 
-      // If control zones are not available, label each sub-region directly.
-      if (!hasControlZones) {
-        const rcx = coords.reduce((s, p) => s + toCanvas(p[0]), 0) / coords.length;
-        const rcy = coords.reduce((s, p) => s + toCanvas(p[1]), 0) / coords.length;
-        ctx.font = '10px monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = '#1a1a1a';
-        ctx.fillText(`Zone ${ri + 1}.${subIdx + 1}`, rcx, rcy + 11);
-      }
+      const rcx = coords.reduce((s, p) => s + toCanvas(p[0]), 0) / coords.length;
+      const rcy = coords.reduce((s, p) => s + toCanvas(p[1]), 0) / coords.length;
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillText(`Zone ${ri + 1}.${subIdx + 1}`, rcx, rcy + 11);
     });
 
     const first = validRings[0];
@@ -2022,7 +2047,7 @@ export function drawThermalZones(ctx, fp) {
 }
 
 // ── Thermal control zone renderer ───────────────────────────────────────────
-// Draws the thermalControlZones sub-divisions that live inside each thermal zone.
+// Draws the vav_control_zones sub-divisions that live inside each thermal zone.
 // Each control zone is a list of grid-point indices (into fp.Points).
 // Strategy: cell-expansion + rectilinear boundary tracing.
 //   • Fill  – fillRect(x-h, y-h, step, step) per point; adjacent cells merge.
@@ -2064,16 +2089,15 @@ export function drawThermalControlZones(ctx, fp) {
     const hue = isInternal ? 0 : _ZONE_HUES[ri % _ZONE_HUES.length];
     const sat = isInternal ? '0%' : '70%';
 
-    const controlZones = region.thermalControlZones ?? [];
+    const controlZones = region.vav_control_zones ?? [];
     if (!controlZones.length) return;
     const isSelectedZone = fp.selectedThermalZoneIndex === ri;
-    const selectedSubZone = fp.selectedThermalSubZoneIndex;
-    const selectedSubSource = fp.selectedThermalSubZoneSource || 'sub';
+    const selectedVavZone = fp.selectedVavZoneIndex;
     const selRegions = fp._thermalSelectionRegions || [];
 
     controlZones.forEach((cz, ci) => {
-      const subAir = Array.isArray(region.subZoneAirRequirements)
-        ? region.subZoneAirRequirements[ci]
+      const subAir = Array.isArray(region.vavAirRequirements)
+        ? region.vavAirRequirements[ci]
         : null;
       const polygon = cz.polygon;
       if (Array.isArray(polygon) && polygon.length >= 3) {
@@ -2097,9 +2121,9 @@ export function drawThermalControlZones(ctx, fp) {
             ? `rgba(140,140,140,${fillAlpha})`
             : `hsla(${hue},${sat},${lightness}%,${fillAlpha})`;
           ctx.fill();
-          const isSelectedControl = isSelectedZone && selectedSubSource === 'control'
-            && Number.isInteger(selectedSubZone) && selectedSubZone === ci;
-          const isRegionSelected = selRegions.some(r => r.zoneIndex === ri && r.subZoneIndex === ci);
+          const isSelectedControl = isSelectedZone
+            && Number.isInteger(selectedVavZone) && selectedVavZone === ci;
+          const isRegionSelected = selRegions.some(r => r.zoneIndex === ri && r.vavZoneIndex === ci);
           ctx.strokeStyle = isSelectedControl
             ? '#ffe082'
             : isRegionSelected
@@ -2145,7 +2169,7 @@ export function drawThermalControlZones(ctx, fp) {
       const occupied = new Set();
       const gridCoords = [];
       for (const idx of ptIndices) {
-        const pt = fp.Points[idx];
+        const pt = getNodeById(fp.Points, idx);
         if (!pt) continue;
         const gx = Math.round(pt.x / step);
         const gy = Math.round(pt.y / step);
@@ -2234,14 +2258,22 @@ export function drawThermalControlZones(ctx, fp) {
 export function drawBeams(ctx, fp) {
   if (!fp.Beams || fp.Beams.length === 0) return;
 
+  // Stroking a straight line at the beam's real plan-view width (mm) draws
+  // an accurately-scaled band regardless of orientation. Falls back to the
+  // old fixed stroke for beams saved before `width` existed.
+  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
+  const pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const toPx = mm => mm * pxPerUnit / mmPerUnit;
+  const fallbackWidth = Math.max(1, pxPerUnit * 0.06);
+
   ctx.save();
   ctx.strokeStyle = 'rgba(50, 50, 70, 0.55)';
-  ctx.lineWidth   = Math.max(1, (fp.units?.pxPerUnit ?? 1) * 0.06);
   ctx.lineCap     = 'round';
 
   fp.Beams.forEach(beam => {
-    const { start, end } = beam;
+    const { start, end, width } = beam;
     if (!start || !end) return;
+    ctx.lineWidth = Number.isFinite(width) && width > 0 ? Math.max(1, toPx(width)) : fallbackWidth;
     ctx.beginPath();
     ctx.moveTo(start.x, start.y);
     ctx.lineTo(end.x, end.y);
@@ -2267,6 +2299,12 @@ export function drawDuctPlan(ctx, fp) {
     if (p.id) pointMap.set(p.id, p);
   });
 
+  // Duct width/height are stored in metres; convert to content px for
+  // to-scale drawing.
+  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
+  const pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const toPx = mm => mm * pxPerUnit / mmPerUnit;
+
   ctx.save();
 
   // Colour palette per riser/plant index
@@ -2285,7 +2323,7 @@ export function drawDuctPlan(ctx, fp) {
       if (firstVavId) {
         // Find which thermal zone contains this point
         const region = (fp.Thermal_Zones || []).find(r => 
-          (r.thermalControlZones || []).some(cz => cz.points.includes(firstVavId))
+          (r.vav_control_zones || []).some(cz => cz.points.includes(firstVavId))
         );
         if (region) {
           // Use explicit color if present, else fallback to zoneColor logic
@@ -2338,7 +2376,9 @@ export function drawDuctPlan(ctx, fp) {
       }
 
       ctx.strokeStyle = drawColour;
-      ctx.lineWidth = Math.min(4, Math.max(0.5, Math.log2(flow + 1) * 0.5 + 0.5));
+      // Duct width is stored in metres — draw the band at its real plan-view
+      // width (e.g. 700mm) rather than a flow-derived line thickness.
+      ctx.lineWidth = Math.max(1, toPx((width || 0.3) * 1000));
       if (isPinch && !isSelected) ctx.lineWidth = Math.max(ctx.lineWidth, 1.5);
       ctx.beginPath();
       ctx.moveTo(pA.x, pA.y);
@@ -2372,13 +2412,12 @@ export function drawDuctPlan(ctx, fp) {
                          fp.selectedVav.ptId === vav[0] && 
                          fp.selectedVav.load === vav[1];
 
-      ctx.beginPath();
-      ctx.arc(pt.x, pt.y, isSelected ? 6 : 3, 0, Math.PI * 2); // Highlight by size
+      const vavSize = isSelected ? 8 : 5;
       ctx.fillStyle = isSelected ? '#00e676' : colour;
-      ctx.fill();
       ctx.strokeStyle = '#fff';
       ctx.lineWidth = 0.5;
-      ctx.stroke();
+      ctx.fillRect(pt.x - vavSize / 2, pt.y - vavSize / 2, vavSize, vavSize);
+      ctx.strokeRect(pt.x - vavSize / 2, pt.y - vavSize / 2, vavSize, vavSize);
     });
 
     // Draw entry point (riser root)
@@ -2432,6 +2471,188 @@ export function drawDuctPlan(ctx, fp) {
     }
   });
 
+  // ── Bend point detection ──────────────────────────────────────────────────────
+  // Build adjacency across all risers: pointId → [{w, h, otherPt}]
+  const adjacency = new Map();
+  plan.forEach(riser => {
+    (riser.ducts || []).forEach(duct => {
+      if (duct.length !== 5) return;
+      const [idA, idB, w, h] = duct;
+      const pA = pointMap.get(idA);
+      const pB = pointMap.get(idB);
+      if (!pA || !pB) return;
+      if (!adjacency.has(idA)) adjacency.set(idA, []);
+      if (!adjacency.has(idB)) adjacency.set(idB, []);
+      adjacency.get(idA).push({ w, h, otherPt: pB });
+      adjacency.get(idB).push({ w, h, otherPt: pA });
+    });
+  });
+
+  const elbowPoints = [];
+  const transitionPoints = [];
+  const teePoints = [];
+
+  adjacency.forEach((ducts, ptId) => {
+    const pt = pointMap.get(ptId);
+    if (!pt) return;
+
+    if (ducts.length >= 3) { teePoints.push(pt); return; }
+
+    if (ducts.length === 2) {
+      const [d1, d2] = ducts;
+
+      if (d1.w !== d2.w || d1.h !== d2.h) { transitionPoints.push(pt); return; }
+
+      const dx1 = d1.otherPt.x - pt.x, dy1 = d1.otherPt.y - pt.y;
+      const dx2 = d2.otherPt.x - pt.x, dy2 = d2.otherPt.y - pt.y;
+      const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+      const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+      if (len1 > 0 && len2 > 0) {
+        const dot = (dx1 / len1) * (dx2 / len2) + (dy1 / len1) * (dy2 / len2);
+        if (Math.abs(dot) < 0.3) elbowPoints.push(pt);
+      }
+    }
+  });
+
+  const drawFittingDots = (points, fillColor) => {
+    if (points.length === 0) return;
+    ctx.save();
+    ctx.fillStyle = fillColor;
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.lineWidth = 0.75;
+    points.forEach(pt => {
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+    ctx.restore();
+  };
+
+  drawFittingDots(elbowPoints,      '#ffeb3b'); // yellow
+  drawFittingDots(transitionPoints, '#ce93d8'); // purple
+  drawFittingDots(teePoints,        '#ff9800'); // orange
+
+  // Highlight selected fitting node
+  if (fp.selectedFitting) {
+    const selPt = pointMap.get(fp.selectedFitting.ptId);
+    if (selPt) {
+      ctx.save();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(selPt.x, selPt.y, 7, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  ctx.restore();
+}
+
+/**
+ * Draw buildup warning markers from fp._buildupPoints.
+ * Orange = approaching threshold (≥80%), Red = exceeds threshold.
+ */
+export function drawBuildupWarnings(ctx, fp) {
+  const points = fp._buildupPoints;
+  if (!points || points.length === 0) return;
+
+  ctx.save();
+  points.forEach(bp => {
+    const { pt, buildupMm, thresholdMm } = bp;
+    const ratio = buildupMm / thresholdMm;
+    if (ratio < 0.8) return;
+
+    const critical = ratio >= 1;
+    const isSelected = fp.selectedBuildup &&
+      Math.hypot(fp.selectedBuildup.pt.x - pt.x, fp.selectedBuildup.pt.y - pt.y) < 2;
+
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, isSelected ? 8 : 6, 0, Math.PI * 2);
+    ctx.fillStyle   = critical ? 'rgba(229,57,53,0.85)' : 'rgba(255,152,0,0.75)';
+    ctx.strokeStyle = critical ? '#b71c1c' : '#e65100';
+    ctx.lineWidth   = isSelected ? 2 : 1;
+    ctx.fill();
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+
+// ── North symbol + scale bar ───────────────────────────────────────────────
+// Fixed HUD elements drawn in screen space (called outside the pan/zoom
+// transform), so they never move or resize with the plan itself.
+
+function _niceScaleNumber(raw) {
+  if (!raw || !isFinite(raw) || raw <= 0) return 1;
+  const exponent = Math.floor(Math.log10(raw));
+  const base = Math.pow(10, exponent);
+  const fraction = raw / base;
+  let niceFraction;
+  if (fraction < 1.5) niceFraction = 1;
+  else if (fraction < 3.5) niceFraction = 2;
+  else if (fraction < 7.5) niceFraction = 5;
+  else niceFraction = 10;
+  return niceFraction * base;
+}
+
+// vpScale: current zoom factor of the canvas viewport (1 = no zoom).
+export function drawScaleBar(ctx, fp, vpScale = 1) {
+  const pxPerUnit = fp.units?.pxPerUnit;
+  if (!pxPerUnit || !isFinite(pxPerUnit) || pxPerUnit <= 0) return;
+  const unitLabel = fp.units?.length || 'm';
+
+  const screenPxPerUnit = pxPerUnit * (vpScale || 1);
+  const targetPx = 100;
+  const niceUnits = _niceScaleNumber(targetPx / screenPxPerUnit);
+  const barPx = niceUnits * screenPxPerUnit;
+
+  const H = ctx.canvas.height;
+  const marginX = 20, marginY = 24;
+  const x0 = marginX, y0 = H - marginY, x1 = x0 + barPx;
+
+  ctx.save();
+  ctx.strokeStyle = '#222';
+  ctx.fillStyle = '#222';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0); ctx.lineTo(x1, y0);
+  ctx.moveTo(x0, y0 - 5); ctx.lineTo(x0, y0 + 5);
+  ctx.moveTo(x1, y0 - 5); ctx.lineTo(x1, y0 + 5);
+  ctx.stroke();
+
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(`${niceUnits} ${unitLabel}`, (x0 + x1) / 2, y0 - 8);
+  ctx.restore();
+}
+
+// Standard compass-rose arrowhead, pointing up, "N" above the tip.
+// Bottom-left corner, stacked directly above the scale bar.
+export function drawNorthSymbol(ctx) {
+  const marginX = 20;
+  const H = ctx.canvas.height;
+  const cx = marginX + 14;
+  const tipY = H - 96;
+  const notchY = H - 72;
+  const baseY = H - 60;
+  const halfW = 9;
+
+  ctx.save();
+  ctx.fillStyle = '#222';
+  ctx.beginPath();
+  ctx.moveTo(cx, tipY);
+  ctx.lineTo(cx + halfW, baseY);
+  ctx.lineTo(cx, notchY);
+  ctx.lineTo(cx - halfW, baseY);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText('N', cx, tipY - 4);
   ctx.restore();
 }
 
@@ -2472,5 +2693,8 @@ export default {
   drawThermalZones,
   drawThermalControlZones,
   drawDuctPlan,
-  drawBeams
+  drawBeams,
+  drawBuildupWarnings,
+  drawScaleBar,
+  drawNorthSymbol
 };

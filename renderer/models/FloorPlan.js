@@ -244,13 +244,7 @@ export class FloorPlan {
       Plan_Boundary: this.Plan_Boundary,
       Core_Boundary: this.Core_Boundary,
       Columns: this.Columns,
-      // Map frontend property Thermal_Zones back to backend key thermal_zones,
-      // and map frontend property subZones back to backend key thermal_region_geometry
-      thermal_zones: this.Thermal_Zones.map(tz => ({
-        ...tz,
-        thermal_region_geometry: tz.subZones || [],
-        vav_control_zones: tz.thermalControlZones || []
-      })),
+      thermal_zones: this.Thermal_Zones.map(tz => ({ ...tz })),
       Beams: this.Beams,
       Points: this.Points,
       Edges: this.Edges,
@@ -300,15 +294,13 @@ export class FloorPlan {
       return out;
     });
     fp.Columns = obj.Columns || [];
-    // Map backend key thermal_zones to frontend property Thermal_Zones,
-    // and rename backend key thermal_region_geometry to frontend property subZones
     fp.Thermal_Zones = (obj.thermal_zones || []).map(({ thermal_region_geometry, vav_control_zones, ...tz }) => ({
       ...tz,
-      // Accept both backend and frontend key variants when opening saved plans.
-      subZones: Array.isArray(thermal_region_geometry)
+      // Accept both backend key and legacy frontend alias when opening saved plans.
+      thermal_region_geometry: Array.isArray(thermal_region_geometry)
         ? thermal_region_geometry
         : (Array.isArray(tz.subZones) ? tz.subZones : []),
-      thermalControlZones: Array.isArray(vav_control_zones)
+      vav_control_zones: Array.isArray(vav_control_zones)
         ? vav_control_zones
         : (Array.isArray(tz.thermalControlZones) ? tz.thermalControlZones : [])
     }));
@@ -784,7 +776,7 @@ export class FloorPlan {
     const zone = makeThermalZone(id, {
       name: name || '',
       zoneType: type || 'internal',
-      subZones: [subZone],
+      thermal_region_geometry: [subZone],
       airRequirement:   properties.air_requirement   ?? properties.airRequirement   ?? 7.5,
       numberOfRisers:   properties.number_of_risers  ?? properties.numberOfRisers   ?? 1,
       vavNumber:        properties.VAV_number         ?? properties.vavNumber         ?? 1,
@@ -792,7 +784,7 @@ export class FloorPlan {
       totalLoad:        properties.total_load         ?? properties.totalLoad         ?? 0,
       totalArea:        properties.total_area         ?? properties.totalArea         ?? 0,
       entryCandidates:  properties.entry_candidates   ?? properties.entryCandidates  ?? [[]],
-      thermalControlZones: properties.vav_control_zones ?? properties.thermalControlZones ?? [],
+      vav_control_zones: properties.vav_control_zones ?? properties.thermalControlZones ?? [],
       color: properties.color ?? null,
       alpha: typeof properties.alpha === 'number' ? properties.alpha : 0.3
     });
@@ -983,7 +975,7 @@ export class FloorPlan {
 
     // Resolve core exclusion polygons
     const corePolys = (this.Core_Boundary || []).map(core => {
-      const pts = Object.values(core);
+      const pts = Object.entries(core).filter(([k]) => k !== '_coreId').map(([, v]) => v);
       // Drop the auto-repeated closing point (same as first)
       const unique = pts.filter((p, i) => i === 0 || p[0] !== pts[0][0] || p[1] !== pts[0][1]);
       return unique.map(p => [p[0], p[1]]);
@@ -1007,16 +999,31 @@ export class FloorPlan {
     // 3 m proximity threshold — points within this distance of any core edge get column:false
     const coreProximityPx = mmToUnit(3000) * pxPerUnit;
 
+    // Interior lattice points (inside a core, so excluded from the usable grid
+    // below) are kept aside per core as fallback entry-point candidates for
+    // cores whose boundary doesn't run close to any exterior grid point — see
+    // markCoreAdjacentPointsAsEntry().
+    const coreInteriorCandidates = corePolys.map(() => []);
+
     const gridPoints = [];
     for (let x = startX; x <= maxX + spacingPx * 0.5; x += spacingPx) {
       for (let y = startY; y <= maxY + spacingPx * 0.5; y += spacingPx) {
         // Must be inside (or on) boundary
         if (!this._isPointInPolygon(x, y, boundaryPoly) &&
             !this._isPointOnPolygonEdge(x, y, boundaryPoly)) continue;
-        // Must not be strictly inside any core (edge points are allowed)
-        const inCore = corePolys.some(poly =>
-          this._isPointInPolygon(x, y, poly) && !this._isPointOnPolygonEdge(x, y, poly));
-        if (inCore) continue;
+        // Must not be strictly inside any core (edge points are allowed).
+        // Explicit small real-world tolerance — the bare default (1 raw
+        // coordinate unit) can exceed the grid spacing itself at small
+        // px-per-unit scales, misclassifying interior points as "on edge".
+        const onEdgeTol = mmToUnit(1) * pxPerUnit;
+        const insideCoreIdx = corePolys.findIndex(poly =>
+          this._isPointInPolygon(x, y, poly) && !this._isPointOnPolygonEdge(x, y, poly, onEdgeTol));
+        if (insideCoreIdx !== -1) {
+          coreInteriorCandidates[insideCoreIdx].push({
+            x, y, dist: this._distToPolygon(x, y, corePolys[insideCoreIdx])
+          });
+          continue;
+        }
         // column:false if within 3m (in px) of any core polygon edge
         const nearCore = corePolys.length > 0 &&
           corePolys.some(poly => this._distToPolygon(x, y, poly) < coreProximityPx);
@@ -1031,16 +1038,25 @@ export class FloorPlan {
     }
 
     this.Points = gridPoints;
+    this._coreInteriorEntryCandidates = coreInteriorCandidates;
+    this._lastGridSpacingPx = spacingPx;
     console.log(`Generated ${gridPoints.length} grid points from origin (${ox.toFixed(1)}, ${oy.toFixed(1)})`);
     return gridPoints;
   }
 
-  // Mark all existing grid points close to the core boundary as entry points.
+  // Mark grid points on or inside each core boundary as entry points — one
+  // per edge, never a point that sits outside the core. Prefers an existing
+  // grid point that lies on the edge itself; when the core isn't aligned
+  // with the grid and no point falls on a given edge, falls back to the
+  // interior lattice point closest to it (see generateGrid). This keeps
+  // entry points on-lattice (avoiding the data-consistency issues of
+  // intersection-snapped points) at the cost of some imprecision where
+  // ducts/beams meet the core boundary.
   markCoreAdjacentPointsAsEntry() {
     if (!Array.isArray(this.Points) || this.Points.length === 0) return 0;
 
     const corePolys = (this.Core_Boundary || []).map(core => {
-      const pts = Object.values(core);
+      const pts = Object.entries(core).filter(([k]) => k !== '_coreId').map(([, v]) => v);
       const unique = pts.filter((p, i) => i === 0 || p[0] !== pts[0][0] || p[1] !== pts[0][1]);
       return unique.map(p => [p[0], p[1]]);
     }).filter(poly => poly.length >= 3);
@@ -1059,7 +1075,15 @@ export class FloorPlan {
         default:   return mm;
       }
     };
-    const coreProximityPx = mmToUnit(200) * pxPerUnit;
+    // Proximity threshold for "is this grid point near enough to the core
+    // edge to count as an entry point": just under one grid unit, so the
+    // whole ring of points adjacent to the core qualifies rather than only
+    // points that fall almost exactly on the boundary line. Falls back to a
+    // fixed 200mm if called without a preceding generateGrid() (spacing
+    // unknown).
+    const coreProximityPx = this._lastGridSpacingPx != null
+      ? this._lastGridSpacingPx * 0.99
+      : mmToUnit(200) * pxPerUnit;
     const boundaryExclusionPx = mmToUnit(200) * pxPerUnit;
 
     // Resolve boundary polygon once for the proximity check.
@@ -1073,18 +1097,86 @@ export class FloorPlan {
       : [];
 
     let marked = 0;
-    for (const p of this.Points) {
-      if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') continue;
-      const nearCore = corePolys.some(poly => this._distToPolygon(p.x, p.y, poly) < coreProximityPx);
-      if (!nearCore) continue;
-      // Exclude points that are too close to the outer boundary wall.
-      const nearBoundary = boundaryPoly.length >= 3 &&
-        this._distToPolygon(p.x, p.y, boundaryPoly) < boundaryExclusionPx;
-      if (!nearBoundary && p.entryPoint !== true) {
-        p.entryPoint = true;
-        marked += 1;
+    // "On the boundary line" tolerance for treating an existing grid point as
+    // sitting on a core edge. Defined in real-world mm (not a bare coordinate
+    // constant) so it stays a small fraction of a grid unit regardless of
+    // the plan's px-per-unit scale.
+    const onEdgeTol = mmToUnit(1) * pxPerUnit;
+
+    const nearOuterBoundary = (x, y) => boundaryPoly.length >= 3 &&
+      this._distToPolygon(x, y, boundaryPoly) < boundaryExclusionPx;
+
+    // Phase 1: mark every existing grid point that lies on a core boundary
+    // edge — never a point that's merely nearby but outside the core.
+    for (const poly of corePolys) {
+      for (const p of this.Points) {
+        if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') continue;
+        if (!this._isPointOnPolygonEdge(p.x, p.y, poly, onEdgeTol)) continue;
+        if (nearOuterBoundary(p.x, p.y)) continue;
+        if (p.entryPoint !== true) {
+          p.entryPoint = true;
+          marked += 1;
+        }
       }
     }
+
+    // Phase 2: entry points "all around" the core — not one per polygon
+    // edge, but one per grid line (row or column) that crosses the core
+    // boundary. For every grid row/column the core spans, each place that
+    // line crosses the boundary either already has an on-edge point from
+    // phase 1, or gets the closest available interior lattice point on that
+    // same line, capped at just under one grid unit so it never reaches
+    // deep inside.
+    const interiorCandidates = this._coreInteriorEntryCandidates || [];
+    for (let ci = 0; ci < corePolys.length; ci++) {
+      const poly = corePolys[ci];
+      const candidates = interiorCandidates[ci];
+      if (!candidates || candidates.length === 0) continue;
+
+      const tryAddNearCrossing = (line) => {
+        // Already covered by a real on-boundary point at this crossing?
+        if (this.Points.some(p => Math.hypot(p.x - line.cx, p.y - line.cy) < onEdgeTol)) return;
+
+        const ranked = line.points
+          .map(c => ({ c, d: Math.hypot(c.x - line.cx, c.y - line.cy) }))
+          .filter(({ d }) => d < coreProximityPx)
+          .sort((a, b) => a.d - b.d);
+        const pick = ranked.find(({ c }) =>
+          !this.Points.some(p => p.x === c.x && p.y === c.y) && !nearOuterBoundary(c.x, c.y));
+        if (!pick) return;
+
+        const id = this._genId('gp');
+        this.Points.push({ id, x: pick.c.x, y: pick.c.y, column: false, mechanical: true, entryPoint: true });
+        marked += 1;
+      };
+
+      // Rows: group interior candidates by y, find where each row crosses
+      // the core boundary.
+      const rows = new Map();
+      for (const c of candidates) {
+        if (!rows.has(c.y)) rows.set(c.y, []);
+        rows.get(c.y).push(c);
+      }
+      for (const [y, points] of rows) {
+        for (const cx of this._horizontalCrossings(y, poly)) {
+          tryAddNearCrossing({ cx, cy: y, points });
+        }
+      }
+
+      // Columns: group interior candidates by x, find where each column
+      // crosses the core boundary.
+      const cols = new Map();
+      for (const c of candidates) {
+        if (!cols.has(c.x)) cols.set(c.x, []);
+        cols.get(c.x).push(c);
+      }
+      for (const [x, points] of cols) {
+        for (const cy of this._verticalCrossings(x, poly)) {
+          tryAddNearCrossing({ cx: x, cy, points });
+        }
+      }
+    }
+
     return marked;
   }
 
@@ -1103,6 +1195,44 @@ export class FloorPlan {
       if (d < minDist) minDist = d;
     }
     return minDist;
+  }
+
+  // Minimum distance from point (px,py) to a single segment a→b
+  _distToSegment(px, py, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+    let t = lenSq > 0 ? ((px - ax) * dx + (py - ay) * dy) / lenSq : 0;
+    t = Math.max(0, Math.min(1, t));
+    const cx = ax + t * dx, cy = ay + t * dy;
+    return Math.hypot(px - cx, py - cy);
+  }
+
+  // X-coordinates where the horizontal line y=const crosses the polygon boundary.
+  _horizontalCrossings(y, polygon) {
+    const xs = [];
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const [x1, y1] = polygon[j], [x2, y2] = polygon[i];
+      if (y1 === y2) continue; // horizontal edges never cross a horizontal line
+      if ((y1 <= y && y < y2) || (y2 <= y && y < y1)) {
+        const t = (y - y1) / (y2 - y1);
+        xs.push(x1 + t * (x2 - x1));
+      }
+    }
+    return xs.sort((a, b) => a - b);
+  }
+
+  // Y-coordinates where the vertical line x=const crosses the polygon boundary.
+  _verticalCrossings(x, polygon) {
+    const ys = [];
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const [x1, y1] = polygon[j], [x2, y2] = polygon[i];
+      if (x1 === x2) continue; // vertical edges never cross a vertical line
+      if ((x1 <= x && x < x2) || (x2 <= x && x < x1)) {
+        const t = (x - x1) / (x2 - x1);
+        ys.push(y1 + t * (y2 - y1));
+      }
+    }
+    return ys.sort((a, b) => a - b);
   }
 
   // Returns true when (x,y) lies on any edge of the closed polygon (within 1px tolerance)
@@ -1139,6 +1269,19 @@ export class FloorPlan {
     this.Duct_Plan = [];
     this.layers.Duct_Plan = false;
     console.log('Grid cleared');
+  }
+
+  resetGridPoints() {
+    (this.Points || []).forEach(pt => {
+      pt.entryPoint = false;
+      pt.thermalZoneIndices = [];
+      pt.thermalRegions = [];
+      pt.mechanical = true;
+      pt.column = true;
+    });
+    this.Duct_Plan = [];
+    this.layers.Duct_Plan = false;
+    console.log('Grid points reset to original state');
   }
 
   /**
@@ -1310,11 +1453,11 @@ export class FloorPlan {
     fp.Duct_Plan = this.Duct_Plan ? [...this.Duct_Plan] : [];
     fp.Thermal_Zones = this.Thermal_Zones ? this.Thermal_Zones.map(tr => ({
       ...tr,
-      subZones: tr.subZones ? tr.subZones.map(sz => (sz || []).map(p => ({ ...p }))) : [],
+      thermal_region_geometry: tr.thermal_region_geometry
+        ? tr.thermal_region_geometry.map(sz => (sz || []).map(p => ({ ...p })))
+        : [],
       entry_candidates: tr.entry_candidates ? tr.entry_candidates.map(ec => [...ec]) : [[]],
-      vav_control_zones: tr.thermalControlZones ? [...tr.thermalControlZones] : [],
-      // Map frontend property subZones back to backend key thermal_region_geometry for JSON output
-      thermal_region_geometry: tr.subZones || []
+      vav_control_zones: tr.vav_control_zones ? [...tr.vav_control_zones] : [],
     })) : [];
     fp.Exclusion_Areas = (this.Exclusion_Areas || []).map(ea => ({ ...ea, vertices: ea.vertices.map(v => [...v]) }));
     fp.Beams = (this.Beams || []).map(b => ({ ...b, start: b.start ? { ...b.start } : { x: 0, y: 0 }, end: b.end ? { ...b.end } : { x: 0, y: 0 } }));
@@ -1446,7 +1589,7 @@ export class FloorPlan {
 
     // ── grid points ───────────────────────────────────────────────────────
     const gridPoints = (this.Points || []).map(p => ({
-      id: p.id, x: u(p.x), y: u(p.y), column: p.column ?? true, mechanical: p.mechanical ?? true, entryPoint: p.entryPoint ?? false, thermalRegions: Array.isArray(p.thermalRegions) ? p.thermalRegions.map(r => ({ ...r })) : [], thermalZoneIndices: Array.isArray(p.thermalZoneIndices) ? p.thermalZoneIndices.slice() : [], thermalSubZoneMap: p.thermalSubZoneMap ? { ...p.thermalSubZoneMap } : {}
+      id: p.id, x: u(p.x), y: u(p.y), column: p.column ?? true, mechanical: p.mechanical ?? true, entryPoint: p.entryPoint ?? false, thermalRegions: Array.isArray(p.thermalRegions) ? p.thermalRegions.map(r => ({ zoneIndex: r.zoneIndex, vavZoneIndex: r.vavZoneIndex ?? r.subZoneIndex })) : [], thermalZoneIndices: Array.isArray(p.thermalZoneIndices) ? p.thermalZoneIndices.slice() : []
     }));
 
     // ── exclusion areas ───────────────────────────────────────────────────
@@ -1511,6 +1654,8 @@ export class FloorPlan {
           end:   b.end   ? { x: u(b.end.x),   y: u(b.end.y)   } : { x: 0, y: 0 },
         })),
       },
+
+      structural_meta: this.Structural_Meta || null,
 
       grid_edges: (this.Edges || []).map(e => ({ v1: e.v1, v2: e.v2, length: e.length ?? e.step ?? 1 })),
 
@@ -1731,14 +1876,12 @@ export class FloorPlan {
     // Keep areas that have at least 3 vertices (coordinate or ids).
     .filter(a => a.vertices && a.vertices.length >= 3);
 
-    // Use canonical Thermal_Zones only (no legacy migration fallback).
-    // Accept both backend and frontend key variants when opening saved plans.
     fp.Thermal_Zones = (obj.thermal_zones || []).map(({ thermal_region_geometry, vav_control_zones, ...tz }) => ({
       ...tz,
-      subZones: Array.isArray(thermal_region_geometry)
+      thermal_region_geometry: Array.isArray(thermal_region_geometry)
         ? thermal_region_geometry
         : (Array.isArray(tz.subZones) ? tz.subZones : []),
-      thermalControlZones: Array.isArray(vav_control_zones)
+      vav_control_zones: Array.isArray(vav_control_zones)
         ? vav_control_zones
         : (Array.isArray(tz.thermalControlZones) ? tz.thermalControlZones : [])
     }));
@@ -1775,9 +1918,9 @@ export class FloorPlan {
       return out;
     });
 
-    // Normalize Thermal_Zones subZones coordinates
+    // Normalize Thermal_Zones thermal_region_geometry coordinates
     (fp.Thermal_Zones || []).forEach(region => {
-      region.subZones = (region.subZones || []).map(sub => {
+      region.thermal_region_geometry = (region.thermal_region_geometry || []).map(sub => {
         return (sub || []).map((pt) => {
           const found = findCanonical(pt.x, pt.y);
           return found ? { x: found.x, y: found.y } : { x: pt.x, y: pt.y };
@@ -2030,12 +2173,12 @@ export class FloorPlan {
     // ── grid points ───────────────────────────────────────────────────────
     fp.Points = (obj.grid_points || []).map(p => ({
       id: p.id, x: px(p.x), y: px(p.y), column: p.column ?? true, mechanical: p.mechanical ?? true, entryPoint: p.entryPoint ?? false,
-      thermalRegions: Array.isArray(p.thermalRegions) ? p.thermalRegions.map(r => ({ ...r })) : [],
-      // Migrate old single-index format to array; preserve existing arrays.
-      thermalZoneIndices: Array.isArray(p.thermalZoneIndices) ? p.thermalZoneIndices : (p.thermalZoneIndex != null ? [p.thermalZoneIndex] : []),
-      // Migrate old scalar thermalSubZoneIndex (applied to first zone) into the per-zone map.
-      thermalSubZoneMap: p.thermalSubZoneMap ? { ...p.thermalSubZoneMap }
-        : (p.thermalSubZoneIndex != null && p.thermalZoneIndex != null ? { [p.thermalZoneIndex]: p.thermalSubZoneIndex } : {})
+      // Migrate subZoneIndex → vavZoneIndex for backward compat with saved files.
+      thermalRegions: Array.isArray(p.thermalRegions) ? p.thermalRegions.map(r => ({
+        zoneIndex: r.zoneIndex,
+        vavZoneIndex: r.vavZoneIndex ?? r.subZoneIndex,
+      })) : [],
+      thermalZoneIndices: Array.isArray(p.thermalZoneIndices) ? p.thermalZoneIndices : (p.thermalZoneIndex != null ? [p.thermalZoneIndex] : [])
     }));
 
     // ── exclusion areas ───────────────────────────────────────────────────
@@ -2045,15 +2188,13 @@ export class FloorPlan {
     }));
 
     // ── thermal zones ─────────────────────────────────────────────────────
-    // Map backend key thermal_region_geometry to frontend property subZones
     fp.Thermal_Zones = (obj.thermal_zones || []).map(({ thermal_region_geometry, vav_control_zones, ...tz }) => ({
       ...tz,
       color: tz.color ?? null,
-      // Accept both backend and frontend key variants when opening saved plans.
-      subZones: Array.isArray(thermal_region_geometry)
+      thermal_region_geometry: Array.isArray(thermal_region_geometry)
         ? thermal_region_geometry
         : (Array.isArray(tz.subZones) ? tz.subZones : []),
-      thermalControlZones: Array.isArray(vav_control_zones)
+      vav_control_zones: Array.isArray(vav_control_zones)
         ? vav_control_zones
         : (Array.isArray(tz.thermalControlZones) ? tz.thermalControlZones : [])
     }));
@@ -2091,6 +2232,8 @@ export class FloorPlan {
         end:   (ex !== undefined && ey !== undefined) ? { x: sPx(ex), y: sPx(ey) } : { x: 0, y: 0 },
       };
     });
+
+    fp.Structural_Meta = obj.structural_meta || null;
 
     // ── mechanical ────────────────────────────────────────────────────────
     fp.Ducts = obj.mechanical_components?.duct_configs || obj.mechanical_components?.ducts || [];

@@ -9,6 +9,9 @@
 
 <body>
 
+  <!-- App title -->
+  <div id="appHeader">Structural and Mechanical Optimisation</div>
+
   <!-- Toolbar -->
   <div id="toolbar">
     <label>
@@ -47,12 +50,14 @@
         <button id="view3dBtn">3D View</button>
         <button id="calibrateLineBtn">Calibrate Scale</button>
         <button id="openFloorplanBtn">Open Floorplan</button>
-        <button id="saveFloorplanBtn">Save Floorplan</button>
+        <button id="saveQuickBtn">Save</button>
+        <button id="saveFloorplanBtn">Save As…</button>
         <button id="snapshotSolutionBtn">Snapshot</button>
         <div style="border-top:1px solid #333; margin:4px 0;"></div>
         <div class="palette-title">Optimisation</div>
         <button id="openGridModalBtn">Place Grid…</button>
         <button id="openStructuralModalBtn">Structural Settings…</button>
+        <button id="openDuctSettingsBtn">Duct Settings…</button>
         <button id="optimiseStructureBtn">Structure</button>
         <button id="optimiseThermalBtn">Thermal Zones</button>
         <button id="optimiseDuctBtn">Duct Routing</button>
@@ -80,6 +85,9 @@
       <div class="cg-row gp-btn-row">
         <button id="generateGridBtn" class="gp-btn">Place Grid</button>
         <button id="clearGridBtn" class="gp-btn gp-btn-clear">Clear Grid</button>
+      </div>
+      <div class="cg-row gp-btn-row">
+        <button id="resetGridBtn" class="gp-btn gp-btn-clear" style="width:100%;" title="Keep grid point positions but reset all assignments (entry points, thermal zones, duct plan)">Reset Points</button>
       </div>
     </div>
 
@@ -112,16 +120,89 @@
         </div>
       </div>
       <div class="cg-row">
-        <label class="cg-label">Grid size</label>
-        <div class="struct-options">
-          <label><input type="radio" name="structGridSize" value="3"> 3 m</label>
-          <label><input type="radio" name="structGridSize" value="6"> 6 m</label>
-          <label><input type="radio" name="structGridSize" value="9" checked> 9 m</label>
+        <label class="cg-label" for="structBeamSpanInput">Beam span</label>
+        <div class="cg-input-group">
+          <input type="number" id="structBeamSpanInput" value="9" min="1" step="0.5" style="width:60px;">
+          <span class="cg-unit">m</span>
+        </div>
+      </div>
+      <div class="cg-row">
+        <label class="cg-label" for="structBeamDistInput">Beam distance</label>
+        <div class="cg-input-group">
+          <input type="number" id="structBeamDistInput" value="9" min="1" step="0.5" style="width:60px;">
+          <span class="cg-unit">m</span>
         </div>
       </div>
       <div class="cg-row gp-btn-row" style="margin-top:8px;">
         <button id="structSettingsOkBtn" class="gp-btn">OK</button>
         <button id="structSettingsCancelBtn" class="gp-btn gp-btn-clear">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Duct Routing Settings modal -->
+    <div id="ductRoutingSettingsModal" class="floating-modal" style="display:none;">
+      <div class="modal-header">
+        <span class="modal-title">Duct Routing Settings</span>
+        <button id="closeDuctSettingsModalBtn" class="modal-close">×</button>
+      </div>
+      <div class="cg-row" style="margin-bottom:4px;">
+        <span class="cg-label" style="font-weight:600;">L/s per m² by orientation</span>
+      </div>
+      <div class="cg-row">
+        <label class="cg-label" for="ductLps_north">North</label>
+        <div class="cg-input-group">
+          <input type="number" id="ductLps_north" value="7.5" min="0" step="0.5" style="width:60px;">
+          <span class="cg-unit">L/s·m²</span>
+        </div>
+      </div>
+      <div class="cg-row">
+        <label class="cg-label" for="ductLps_east">East</label>
+        <div class="cg-input-group">
+          <input type="number" id="ductLps_east" value="7.5" min="0" step="0.5" style="width:60px;">
+          <span class="cg-unit">L/s·m²</span>
+        </div>
+      </div>
+      <div class="cg-row">
+        <label class="cg-label" for="ductLps_south">South</label>
+        <div class="cg-input-group">
+          <input type="number" id="ductLps_south" value="7.5" min="0" step="0.5" style="width:60px;">
+          <span class="cg-unit">L/s·m²</span>
+        </div>
+      </div>
+      <div class="cg-row">
+        <label class="cg-label" for="ductLps_west">West</label>
+        <div class="cg-input-group">
+          <input type="number" id="ductLps_west" value="7.5" min="0" step="0.5" style="width:60px;">
+          <span class="cg-unit">L/s·m²</span>
+        </div>
+      </div>
+      <div class="cg-row">
+        <label class="cg-label" for="ductLps_internal">Internal</label>
+        <div class="cg-input-group">
+          <input type="number" id="ductLps_internal" value="7.5" min="0" step="0.5" style="width:60px;">
+          <span class="cg-unit">L/s·m²</span>
+        </div>
+      </div>
+      <div class="cg-row" style="margin-top:8px; border-top:1px solid var(--border-mid); padding-top:8px;">
+        <label class="cg-label" for="ductMaxVelocityInput">Max air velocity</label>
+        <div class="cg-input-group">
+          <input type="number" id="ductMaxVelocityInput" value="8" min="0.1" step="0.5" style="width:60px;">
+          <span class="cg-unit">m/s</span>
+        </div>
+      </div>
+      <div class="cg-row">
+        <label class="cg-label" for="ductMaxBuildupInput">Max buildup</label>
+        <div class="cg-input-group">
+          <input type="number" id="ductMaxBuildupInput" value="800" min="0" step="10" style="width:60px;">
+          <span class="cg-unit">mm</span>
+        </div>
+      </div>
+      <div class="cg-row gp-btn-row" style="margin-top:8px; flex-direction:column; gap:4px;">
+        <button id="applyDuctLpsBtn" class="gp-btn" style="width:100%;">Apply rates to unset zones</button>
+        <div style="display:flex; gap:4px; width:100%;">
+          <button id="ductSettingsOkBtn" class="gp-btn" style="flex:1;">OK</button>
+          <button id="closeDuctSettingsModalBtn2" class="gp-btn gp-btn-clear" style="flex:1;" onclick="document.getElementById('ductRoutingSettingsModal').style.display='none'">Cancel</button>
+        </div>
       </div>
     </div>
 
@@ -168,8 +249,8 @@
                background:rgba(8,8,8,0.85); border:1px solid #282828;
                padding:6px 14px; align-items:center; gap:10px; font-family:'Courier New',monospace; font-size:10px; color:#c8c8c8; white-space:nowrap;">
             <span>Height</span>
-            <input id="heightSlider" type="range" min="270" max="600" value="300" step="10" style="width:120px; accent-color:#00e676;">
-            <span id="heightSliderPct">300 cm</span>
+            <input id="heightSlider" type="range" min="270" max="600" value="400" step="10" style="width:120px; accent-color:#00e676;">
+            <span id="heightSliderPct">400 cm</span>
           </div>
         </div>
         <div class="mode-indicator" id="canvasModeIndicator">Edit Mode</div>
@@ -179,18 +260,19 @@
       <div id="jsonPanel" class="panel">
         <div class="panel-tabs">
           <button type="button" class="panel-tab active" data-panel-tab="dashboard">Dashboard</button>
+          <button type="button" class="panel-tab" data-panel-tab="snapshots">Snapshots</button>
           <button type="button" class="panel-tab" data-panel-tab="json">JSON</button>
         </div>
         <div id="dashboardPanelView" class="panel-view active">
-          <!-- Snapshot save -->
-          <div class="dash-snapshot-bar">
-            <input type="text" id="snapshotNameInput" placeholder="Snapshot name…" class="solutions-name-input">
-            <button id="snapshotBtn" class="gp-btn">Save</button>
-          </div>
-          <!-- Saved snapshots list -->
-          <div id="solutionsList" class="solutions-list"></div>
           <!-- Dynamic results: structure, mechanical, reference image -->
           <div id="dashboardOutput" class="dashboard-output"></div>
+        </div>
+        <div id="snapshotsPanelView" class="panel-view">
+          <div class="dash-snapshot-bar">
+            <input type="text" id="snapshotNameInput" placeholder="Snapshot name…" class="solutions-name-input">
+            <button id="snapshotBtn" class="gp-btn">+ Snapshot</button>
+          </div>
+          <div id="solutionsList" class="solutions-list"></div>
         </div>
         <div id="jsonPanelView" class="panel-view">
           <h3>Floorplan JSON</h3>
@@ -215,7 +297,10 @@
 
           <!-- Left column: zone list -->
           <div class="thermal-col-left">
-            <div class="cg-header">Thermal Zones</div>
+            <div class="cg-header" style="display:flex; align-items:center; justify-content:space-between;">
+              <span>Thermal Zones</span>
+              <button id="mergeZonesBtn" class="gp-btn" disabled style="font-size:10px; padding:2px 6px;" title="Click ○ next to zones to select for merge">Merge Selected</button>
+            </div>
             <ul id="thermalZonesList" class="ea-list"></ul>
           </div>
 
@@ -305,6 +390,8 @@
               <label><input type="checkbox" id="columnsLayer" checked> Columns</label>
               <label><input type="checkbox" id="exclusionAreasLayer" checked> Excl. Areas</label>
               <label><input type="checkbox" id="thermalZonesLayer" checked> Thermal Zones</label>
+              <label><input type="checkbox" id="thermalRegionsLayer"> Thermal Regions (debug)</label>
+              <label><input type="checkbox" id="vavControlZonesLayer" checked> VAV Control Zones</label>
               <label><input type="checkbox" id="beamsLayer"> Beams</label>
               <label><input type="checkbox" id="pointsLayer"> Grid Points</label>
               <label><input type="checkbox" id="entryPointsLayer" checked> Entry Points</label>
@@ -323,7 +410,6 @@
 
     </div>
   <!-- Browser-native electronAPI shim (no-op when running inside Electron) -->
-  <script src="api/electronCompat.js"></script>
   <!-- Your JS entry point -->
   <script type="module" src="index.js"></script>
   <script>

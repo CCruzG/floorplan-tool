@@ -9,6 +9,7 @@ import { validateFloorPlan } from '../models/validation.js';
 import { renderPrompt } from '../models/promptRenderer.js';
 import { View3D } from '../drawing/view3d.js';
 import { checkHealth, startOptimisation, pollOptimisation, cancelOptimisation } from '../api/apiService.js';
+import MECH_DATA from '../../../Project-71/data/general/Mechanical.json';
 
 // import { DrawingService, findClosestBoundaryPoint } from '../drawing/drawingService.js';
 
@@ -58,6 +59,13 @@ const criteriaSettings = {
   showPinch: true,
 };
 
+// Duct routing design settings — per-orientation air requirements + velocity/buildup limits
+const ductRoutingSettings = {
+  lpsPerM2: { north: 7.5, east: 7.5, south: 7.5, west: 7.5, internal: 7.5 },
+  maxVelocity: 8.0,     // m/s
+  maxBuildupMm: 800,    // mm
+};
+
 // Returns the canvas-pixel spacing of one grid cell. Respects a manual
 // spacingOverride from gridSettings; otherwise rounds to a "nice" interval
 // targeting ~40 px visual spacing.
@@ -85,6 +93,40 @@ function _snapGrid(coord, intervalPx) {
 function refreshInspector(fp, store) {
   const panel = document.getElementById('inspectorPanel');
   if (!panel) return;
+
+  // ── Buildup Inspector ──────────────────────────────────────────────────────
+  if (fp?.selectedBuildup) {
+    const { buildupMm, thresholdMm, type, detail } = fp.selectedBuildup;
+    const fmtCost = v => `$${Math.round(v).toLocaleString()}`;
+    const pct = Math.round(buildupMm / thresholdMm * 100);
+    const severity = buildupMm >= thresholdMm ? 'Exceeds threshold' : `${pct}% of threshold`;
+    const typeLabel = { 'duct-duct': 'Duct × Duct', 'duct-beam': 'Duct × Beam', 'duct-duct-beam': 'Duct × Duct × Beam' }[type] ?? type;
+    panel.innerHTML = [
+      `<div class="inspector-header"><span class="inspector-kind">Buildup</span></div>`,
+      `<div class="inspector-body">`,
+      `<div class="inspector-row"><span class="inspector-label">Type</span><span class="inspector-value">${typeLabel}</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Total</span><span class="inspector-value">${Math.round(buildupMm)} mm</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Threshold</span><span class="inspector-value">${Math.round(thresholdMm)} mm</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Status</span><span class="inspector-value">${severity}</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Breakdown</span><span class="inspector-value" style="font-size:0.85em">${detail}</span></div>`,
+      `</div>`,
+    ].join('');
+    return;
+  }
+
+  // ── Fitting Inspector ──────────────────────────────────────────────────────
+  if (fp?.selectedFitting) {
+    const { type, cost } = fp.selectedFitting;
+    const fmtCost = v => `$${Math.round(v).toLocaleString()}`;
+    panel.innerHTML = [
+      `<div class="inspector-header"><span class="inspector-kind">${type}</span></div>`,
+      `<div class="inspector-body">`,
+      `<div class="inspector-row"><span class="inspector-label">Type</span><span class="inspector-value">${type}</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Fitting cost</span><span class="inspector-value">${fmtCost(cost)}</span></div>`,
+      `</div>`,
+    ].join('');
+    return;
+  }
 
   // ── Duct Inspector ──────────────────────────────────────────────────────
   if (fp?.selectedDuct) {
@@ -161,7 +203,7 @@ function refreshInspector(fp, store) {
       });
       panel.querySelector('#insp-pt-entrypoint').addEventListener('change', e => {
         pt.entryPoint = e.target.checked;
-        if (!e.target.checked) { pt.thermalZoneIndices = []; pt.thermalSubZoneMap = {}; }
+        if (!e.target.checked) { pt.thermalZoneIndices = []; pt.thermalRegions = []; }
         store.update(fp);
       });
       panel.querySelectorAll('.insp-pt-zone-cb').forEach(cb => {
@@ -434,11 +476,11 @@ export function ensureReferenceImageLoaded(fp, notify) {
 
 function setActivePanelTab(tabName) {
   const tabs = document.querySelectorAll('[data-panel-tab]');
-  const dashboardView = document.getElementById('dashboardPanelView');
-  const jsonView = document.getElementById('jsonPanelView');
   tabs.forEach(btn => btn.classList.toggle('active', btn.dataset.panelTab === tabName));
-  if (dashboardView) dashboardView.classList.toggle('active', tabName === 'dashboard');
-  if (jsonView) jsonView.classList.toggle('active', tabName === 'json');
+  ['dashboard', 'snapshots', 'json'].forEach(name => {
+    const el = document.getElementById(`${name}PanelView`);
+    if (el) el.classList.toggle('active', name === tabName);
+  });
 }
 
 function setActiveDisplayTab(tabName) {
@@ -451,6 +493,327 @@ function setActiveDisplayTab(tabName) {
     if (el) el.classList.toggle('active', tab === tabName);
   });
 }
+
+function _resolveVertex(v, nodes) {
+  if (typeof v === 'string') { const n = nodes.find(n => n.id === v); return n ? [n.x, n.y] : null; }
+  if (Array.isArray(v)) return [v[0], v[1]];
+  if (v && typeof v.x === 'number') return [v.x, v.y];
+  return null;
+}
+
+function _shoelaceAreaPx(pts) {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x1, y1] = pts[i];
+    const [x2, y2] = pts[(i + 1) % pts.length];
+    a += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(a) / 2;
+}
+
+const _ZONE_HUES = [200, 145, 25, 280, 170, 50, 320, 90, 0, 245, 340, 120, 60, 190, 300];
+
+function _riserColour(fp, riser) {
+  if (riser.vav && riser.vav.length > 0) {
+    const firstVavId = typeof riser.vav[0][0] === 'string'
+      ? riser.vav[0][0]
+      : fp.Points?.[riser.vav[0][0]]?.id;
+    if (firstVavId) {
+      const region = (fp.Thermal_Zones || []).find(r =>
+        (r.vav_control_zones || []).some(cz => cz.points.includes(firstVavId))
+      );
+      if (region) {
+        if (region.color && /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/.test(region.color)) {
+          return region.color;
+        }
+        const zi = fp.Thermal_Zones.indexOf(region);
+        const isInternal = region.type === 'internal' || region.orientation === null;
+        if (isInternal) return 'rgba(90,90,90,0.9)';
+        const hue = _ZONE_HUES[zi % _ZONE_HUES.length];
+        return `hsla(${hue},60%,45%,1)`;
+      }
+    }
+  }
+  return '#888';
+}
+
+/**
+ * Compute per-riser metrics (lm, lmCost, fitting counts/costs) and the
+ * global list of fitting nodes used by the hit test.
+ */
+function _buildRiserMetrics(fp) {
+  const ductPlan = fp.Duct_Plan || [];
+  const pointMap = new Map();
+  (fp.Points || []).forEach(p => { if (p.id) pointMap.set(p.id, p); });
+
+  const ductConfigs = MECH_DATA.duct_configs || [];
+  const ductUnitCostFallback = MECH_DATA.DuctUnitCost ?? 0;
+  const configByKey = new Map(
+    ductConfigs.map(c => [`${Math.round(c.width * 1000)}×${Math.round(c.height * 1000)} mm`, c])
+  );
+
+  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
+  const pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const metersPerPixel = mmPerUnit / (pxPerUnit * 1000);
+
+  const riserLm     = ductPlan.map(() => 0);
+  const riserLmCost = ductPlan.map(() => 0);
+
+  ductPlan.forEach((riser, ri) => {
+    (riser.ducts || []).forEach(duct => {
+      if (duct.length !== 5) return;
+      const [idA, idB, w, h] = duct;
+      const pA = pointMap.get(idA);
+      const pB = pointMap.get(idB);
+      if (!pA || !pB) return;
+      const segLm = Math.sqrt((pB.x - pA.x) ** 2 + (pB.y - pA.y) ** 2) * metersPerPixel;
+      riserLm[ri] += segLm;
+      const key = `${Math.round(w * 1000)}×${Math.round(h * 1000)} mm`;
+      const cfg = configByKey.get(key);
+      riserLmCost[ri] += segLm * (cfg ? cfg.unitCost + ductUnitCostFallback : ductUnitCostFallback);
+    });
+  });
+
+  // Global adjacency — each edge tagged with its riser index
+  const adj = new Map();
+  ductPlan.forEach((riser, ri) => {
+    (riser.ducts || []).forEach(duct => {
+      if (duct.length !== 5) return;
+      const [idA, idB, w, h] = duct;
+      const pA = pointMap.get(idA);
+      const pB = pointMap.get(idB);
+      if (!pA || !pB) return;
+      if (!adj.has(idA)) adj.set(idA, []);
+      if (!adj.has(idB)) adj.set(idB, []);
+      adj.get(idA).push({ w, h, otherPt: pB, ri });
+      adj.get(idB).push({ w, h, otherPt: pA, ri });
+    });
+  });
+
+  const riserFittings = ductPlan.map(() => ({
+    elbows:      { count: 0, cost: 0 },
+    transitions: { count: 0, cost: 0 },
+    tees:        { count: 0, cost: 0 },
+  }));
+  const allFittingNodes = [];
+
+  adj.forEach((edges, ptId) => {
+    const pt = pointMap.get(ptId);
+    if (!pt) return;
+    const largest = edges.reduce((best, e) => (e.w * e.h > best.w * best.h ? e : best), edges[0]);
+    const cfg = configByKey.get(`${Math.round(largest.w * 1000)}×${Math.round(largest.h * 1000)} mm`);
+    const ri = edges[0].ri;
+
+    if (edges.length >= 3) {
+      const cost = cfg?.bendingCost ?? 0;
+      riserFittings[ri].tees.count++; riserFittings[ri].tees.cost += cost;
+      allFittingNodes.push({ ptId, pt, type: 'Tee', cost });
+      return;
+    }
+    if (edges.length === 2) {
+      const [e1, e2] = edges;
+      if (e1.w !== e2.w || e1.h !== e2.h) {
+        const cost = cfg?.transitionCost ?? 0;
+        riserFittings[ri].transitions.count++; riserFittings[ri].transitions.cost += cost;
+        allFittingNodes.push({ ptId, pt, type: 'Transition', cost });
+        return;
+      }
+      const dx1 = e1.otherPt.x - pt.x, dy1 = e1.otherPt.y - pt.y;
+      const dx2 = e2.otherPt.x - pt.x, dy2 = e2.otherPt.y - pt.y;
+      const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+      const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+      if (len1 > 0 && len2 > 0) {
+        const dot = (dx1 / len1) * (dx2 / len2) + (dy1 / len1) * (dy2 / len2);
+        if (Math.abs(dot) < 0.3) {
+          const cost = cfg?.bendingCost ?? 0;
+          riserFittings[ri].elbows.count++; riserFittings[ri].elbows.cost += cost;
+          allFittingNodes.push({ ptId, pt, type: 'Elbow', cost });
+        }
+      }
+    }
+  });
+
+  return {
+    risers: ductPlan.map((riser, ri) => ({
+      riser,
+      colour:  _riserColour(fp, riser),
+      lm:      riserLm[ri],
+      lmCost:  riserLmCost[ri],
+      fittings: riserFittings[ri],
+    })),
+    allFittingNodes,
+  };
+}
+
+/**
+ * Find buildup points by locating grid points where beams and/or ducts from
+ * multiple risers coincide. Ducts route along grid edges (never crossing beams
+ * geometrically), so crossings are detected per grid point rather than by
+ * segment intersection.
+ *
+ * Two cases generate a buildup point:
+ *   1. Duct × beam  — a duct segment endpoint is within beamTolPx of a beam,
+ *      AND the duct segment is NOT parallel to that beam (parallelism would
+ *      mean the duct runs alongside the beam, not across it).
+ *   2. Duct × duct  — a grid point is used by ducts from ≥ 2 different risers.
+ *
+ * Result is cached on fp._buildupPoints for the renderer.
+ */
+function _computeBuildupPoints(fp) {
+  const settings    = fp.buildupSettings || {};
+  const slabMm      = settings.slabThicknessMm ?? 120;
+  const thresholdMm = settings.thresholdMm ?? 800;
+
+  const pointMap = new Map();
+  (fp.Points || []).forEach(p => { if (p.id) pointMap.set(p.id, p); });
+
+  // beamTolPx: used for perpendicular-crossing proximity gate (dist to beam segment).
+  // A genuine crossing has one endpoint exactly on the beam (dist≈0), so 1.1 cells
+  // is loose enough without causing false positives in that case.
+  const beamTolPx      = (fp.units?.pxPerUnit || 1) * 1.1;
+  // collinearTolPx: how close (perpendicularly) a parallel duct must be to the beam
+  // LINE to be treated as collinear. A duct on the beam grid line has |sd|≈0; a duct
+  // one grid step away has |sd|=pxPerUnit — half a cell safely separates them.
+  const collinearTolPx = (fp.units?.pxPerUnit || 1) * 0.5;
+  // cos of the angle above which two segments are considered parallel (~26°).
+  const PARALLEL_COS = 0.9;
+
+  function _distPtToSeg(px, py, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-10) return Math.hypot(px - ax, py - ay);
+    const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+    return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+  }
+
+  // Signed distance from (px,py) to the infinite line through (ax,ay)→(bx,by).
+  // Positive on the left, negative on the right.
+  function _signedDistToLine(px, py, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-10) return Math.hypot(px - ax, py - ay);
+    return (dx * (py - ay) - dy * (px - ax)) / len;
+  }
+
+  const beams = (fp.Beams || []).filter(b => b.start && b.end);
+
+  // Accumulator keyed by grid-point id:
+  //   risers:  Map<ri, maxHeightMm>   (populated for both cases)
+  //   beamSet: Set<beamIndex>         (prevents double-counting the same beam)
+  //   totalBeamMm: number
+  const acc = new Map();
+  const getAcc = id => {
+    if (!acc.has(id)) acc.set(id, { risers: new Map(), beamSet: new Set(), totalBeamMm: 0 });
+    return acc.get(id);
+  };
+
+  (fp.Duct_Plan || []).forEach((riser, ri) => {
+    (riser.ducts || []).forEach(d => {
+      if (d.length !== 5) return;
+      const [idA, idB, , heightM] = d;
+      const pA = pointMap.get(idA), pB = pointMap.get(idB);
+      if (!pA || !pB) return;
+      const heightMm = Math.round(heightM * 1000);
+
+      // ── Case 2: register both endpoints for duct×duct detection ──────────
+      for (const id of [idA, idB]) {
+        const r = getAcc(id).risers;
+        r.set(ri, Math.max(r.get(ri) ?? 0, heightMm));
+      }
+
+      // ── Case 1: duct×beam — segment must NOT be parallel to the beam ─────
+      const ddx = pB.x - pA.x, ddy = pB.y - pA.y;
+      const dlen = Math.hypot(ddx, ddy);
+      if (dlen < 1e-6) return;
+
+      beams.forEach((beam, bi) => {
+        const bdx = beam.end.x - beam.start.x, bdy = beam.end.y - beam.start.y;
+        const blen = Math.hypot(bdx, bdy);
+        if (blen < 1e-6) return;
+
+        // Signed perpendicular distances — needed for both the collinear and
+        // straddling checks below, so compute once here.
+        const sdA = _signedDistToLine(pA.x, pA.y, beam.start.x, beam.start.y, beam.end.x, beam.end.y);
+        const sdB = _signedDistToLine(pB.x, pB.y, beam.start.x, beam.start.y, beam.end.x, beam.end.y);
+
+        if (Math.abs((ddx * bdx + ddy * bdy) / (dlen * blen)) > PARALLEL_COS) {
+          // Duct runs parallel to this beam.
+          // Only a buildup if the duct is COLLINEAR (lying on the beam line),
+          // not merely running alongside it at an offset.
+          if (Math.abs(sdA) > collinearTolPx || Math.abs(sdB) > collinearTolPx) return;
+
+          // Collinear: project endpoints onto the beam direction and check for
+          // overlap with the beam's extent [0, blen].
+          const bDirX = bdx / blen, bDirY = bdy / blen;
+          const projA = (pA.x - beam.start.x) * bDirX + (pA.y - beam.start.y) * bDirY;
+          const projB = (pB.x - beam.start.x) * bDirX + (pB.y - beam.start.y) * bDirY;
+          if (Math.max(projA, projB) < 0 || Math.min(projA, projB) > blen) return; // no overlap
+
+          // Flag each endpoint that falls within the beam's projected extent.
+          const depthMm = Math.round(beam.depth ?? 300);
+          for (const [id, proj] of [[idA, projA], [idB, projB]]) {
+            if (proj >= 0 && proj <= blen) {
+              const entry = getAcc(id);
+              if (!entry.beamSet.has(bi)) {
+                entry.beamSet.add(bi);
+                entry.totalBeamMm += depthMm;
+              }
+            }
+          }
+          return;
+        }
+
+        // Perpendicular crossing: skip if both endpoints are on the same side
+        // of the beam line (segment does not straddle it).
+        if (sdA * sdB > 0) return;
+
+        // Flag only the endpoint closest to the beam segment (the one "at" the beam).
+        const dA = _distPtToSeg(pA.x, pA.y, beam.start.x, beam.start.y, beam.end.x, beam.end.y);
+        const dB = _distPtToSeg(pB.x, pB.y, beam.start.x, beam.start.y, beam.end.x, beam.end.y);
+        if (Math.min(dA, dB) > beamTolPx) return;
+        const [id] = dA <= dB ? [idA] : [idB];
+
+        const depthMm = Math.round(beam.depth ?? 300);
+        const entry = getAcc(id);
+        if (!entry.beamSet.has(bi)) {
+          entry.beamSet.add(bi);
+          entry.totalBeamMm += depthMm;
+        }
+      });
+    });
+  });
+
+  // Build results: emit only points with a beam crossing OR ducts from ≥ 2 risers.
+  const results = [];
+  for (const [id, { risers, beamSet, totalBeamMm }] of acc) {
+    if (risers.size < 2 && beamSet.size === 0) continue;
+    const pt = pointMap.get(id);
+    if (!pt) continue;
+
+    const ductEls   = [...risers.entries()].map(([ri, heightMm]) => ({ type: 'duct', heightMm, ri }));
+    const buildupMm = slabMm + ductEls.reduce((s, e) => s + e.heightMm, 0) + totalBeamMm;
+
+    let type;
+    if (ductEls.length >= 2 && beamSet.size >= 1) type = 'duct-duct-beam';
+    else if (ductEls.length >= 2)                 type = 'duct-duct';
+    else                                           type = 'duct-beam';
+
+    const ductDesc = ductEls.map(d => `${d.heightMm} mm duct`).join(' + ');
+    const beamDesc = totalBeamMm ? ` + ${totalBeamMm} mm beam` : '';
+    const detail   = `${slabMm} mm slab + ${ductDesc}${beamDesc}`;
+
+    results.push({ pt: { x: pt.x, y: pt.y }, buildupMm, thresholdMm, type, detail });
+  }
+
+  return results;
+}
+
+/** Thin wrapper used by the canvas hit test. */
+function _buildFittingNodes(fp) {
+  return _buildRiserMetrics(fp).allFittingNodes;
+}
+
+let _branchesExpanded = false;
 
 function refreshDashboardPanel(fp, store) {
   const panel = document.getElementById('dashboardOutput');
@@ -467,32 +830,66 @@ function refreshDashboardPanel(fp, store) {
   const unitLabel = fp.units?.length || 'mm';
   const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[unitLabel] ?? 1000;
 
-  // ── Structure: beam length groups ────────────────────────────────────────────
-  const beamLengthGroups = {};
-  (fp.Beams || []).forEach(beam => {
-    if (!beam.start || !beam.end) return;
-    const dx = beam.end.x - beam.start.x;
-    const dy = beam.end.y - beam.start.y;
-    const pixelLen = Math.sqrt(dx * dx + dy * dy);
-    const lengthMm = Math.round(pixelLen / pxPerUnit * mmPerUnit / 10) * 10;
-    beamLengthGroups[lengthMm] = (beamLengthGroups[lengthMm] || 0) + 1;
-  });
-  const beamRows = Object.entries(beamLengthGroups)
-    .sort(([a], [b]) => Number(b) - Number(a))
-    .map(([mm, count]) => `<div class="dash-row"><span class="dash-row-label">${count} ×</span><span>${mm} mm</span></div>`)
-    .join('');
+  // ── Structure: material, dimensions, and costs from last solved solution ────
+  // Fall back to reading depth/width directly from fp.Beams/fp.Columns when
+  // Structural_Meta is absent (e.g. files saved before this field was added).
+  const _meta = fp.Structural_Meta || (
+    (fp.Beams?.length || fp.Columns?.length) ? {
+      beamMaterial:  null,
+      slabMaterial:  null,
+      slabDepthMm:   null,
+      beamDepthMm:   fp.Beams?.[0]?.depth  ?? null,
+      beamWidthMm:   fp.Beams?.[0]?.width  ?? null,
+      columnWidthMm: fp.Columns?.[0]?.width ?? null,
+      costs:         null,
+    } : null
+  );
+  const _hasCosts = _meta?.costs != null;
+  const _fmtMm  = v => (v != null && v > 0) ? `${Math.round(v)} mm` : '—';
+  const _fmtMat = s => s ? (s.charAt(0).toUpperCase() + s.slice(1).toLowerCase()) : null;
 
-  // ── Mechanical: duct linear metres per section ───────────────────────────────
+  // ── Floor plate area (shared for unit cost calculations) ─────────────────────
   const metersPerPixel = mmPerUnit / (pxPerUnit * 1000);
+  const wallNodes = fp.wall_graph?.nodes || [];
+  const rawVerts = fp.boundaryArea?.vertices || [];
+  const resolvedVerts = rawVerts.map(v => _resolveVertex(v, wallNodes)).filter(Boolean);
+  const boundaryAreaPx2 = resolvedVerts.length >= 3 ? _shoelaceAreaPx(resolvedVerts) : 0;
+
+  const corePolys = (fp.Core_Boundary || []).map(core =>
+    Object.entries(core)
+      .filter(([k]) => k.startsWith('Pt_'))
+      .sort(([a], [b]) => parseInt(a.slice(3)) - parseInt(b.slice(3)))
+      .map(([, v]) => Array.isArray(v) ? [v[0], v[1]] : null)
+      .filter(Boolean)
+  ).filter(poly => poly.length >= 3);
+  const coreAreaPx2 = corePolys.reduce((sum, poly) => sum + _shoelaceAreaPx(poly), 0);
+
+  const totalAreaM2   = boundaryAreaPx2 * metersPerPixel * metersPerPixel;
+  const coreAreaM2    = coreAreaPx2 * metersPerPixel * metersPerPixel;
+  const floorAreaM2   = Math.max(0, boundaryAreaPx2 - coreAreaPx2) * metersPerPixel * metersPerPixel;
+  const fmtArea = v => v > 0 ? `${Math.round(v).toLocaleString()} m²` : '—';
+
+  // ── Mechanical: duct linear metres and cost per section ─────────────────────
   const pointMap = new Map();
   (fp.Points || []).forEach(p => { if (p.id) pointMap.set(p.id, p); });
-  let totalDuctBranches = 0;
+
+  // Build a lookup from "W×H mm" key → duct config for costing
+  const ductConfigs = MECH_DATA.duct_configs || [];
+  const ductUnitCostFallback = MECH_DATA.DuctUnitCost ?? 0;
+  const configByKey = new Map(
+    ductConfigs.map(c => [`${Math.round(c.width * 1000)}×${Math.round(c.height * 1000)} mm`, c])
+  );
+
+  // branches = number of entry points (risers), not individual duct segments
+  const ductPlan = fp.Duct_Plan || [];
+  const branchCount = ductPlan.filter(r => (r.ducts || []).length > 0).length;
+
   const ductSectionLm = {};
-  (fp.Duct_Plan || []).forEach(riser => {
+  const ductSectionCost = {};
+  ductPlan.forEach(riser => {
     (riser.ducts || []).forEach(duct => {
       if (duct.length !== 5) return;
       const [ptA_id, ptB_id, w, h] = duct;
-      totalDuctBranches++;
       const key = `${Math.round(w * 1000)}×${Math.round(h * 1000)} mm`;
       const pA = pointMap.get(ptA_id);
       const pB = pointMap.get(ptB_id);
@@ -500,43 +897,263 @@ function refreshDashboardPanel(fp, store) {
         ? Math.sqrt((pB.x - pA.x) ** 2 + (pB.y - pA.y) ** 2) * metersPerPixel
         : 0;
       ductSectionLm[key] = (ductSectionLm[key] || 0) + segLm;
+      const cfg = configByKey.get(key);
+      const ratePerLm = cfg ? cfg.unitCost + ductUnitCostFallback : ductUnitCostFallback;
+      ductSectionCost[key] = (ductSectionCost[key] || 0) + segLm * ratePerLm;
     });
   });
+
+  const totalDuctLmCost = Object.values(ductSectionCost).reduce((s, v) => s + v, 0);
+  const fmtCost = v => `$${Math.round(v).toLocaleString()}`;
+
+  // ── Per-riser metrics (fittings + lm) ───────────────────────────────────────
+  const riserMetrics = _buildRiserMetrics(fp);
+  let elbowCount = 0, transitionCount = 0, teeCount = 0;
+  let elbowFittingCost = 0, transitionFittingCost = 0, teeFittingCost = 0;
+  riserMetrics.risers.forEach(({ fittings }) => {
+    elbowCount      += fittings.elbows.count;      elbowFittingCost      += fittings.elbows.cost;
+    transitionCount += fittings.transitions.count;  transitionFittingCost += fittings.transitions.cost;
+    teeCount        += fittings.tees.count;          teeFittingCost        += fittings.tees.cost;
+  });
+
+  const totalFittingCost = elbowFittingCost + transitionFittingCost + teeFittingCost;
+  const totalMechCost = totalDuctLmCost + totalFittingCost;
+  const mechUnitCost = floorAreaM2 > 0 ? totalMechCost / floorAreaM2 : null;
+
   const ductRows = Object.entries(ductSectionLm)
     .sort(([a], [b]) => {
       const area = s => { const m = s.match(/\d+/g); return m ? Number(m[0]) * Number(m[1]) : 0; };
       return area(b) - area(a);
     })
-    .map(([section, lm]) => `<div class="dash-row"><span class="dash-row-label">${section}</span><span>${lm.toFixed(1)} lm</span></div>`)
+    .map(([key, lm]) => [
+      `<div class="dash-row">`,
+      `<span class="dash-row-label">${key}</span>`,
+      `<span>${lm.toFixed(1)} lm</span>`,
+      `<span class="dash-row-cost">${fmtCost(ductSectionCost[key] || 0)}</span>`,
+      `</div>`,
+    ].join(''))
     .join('');
 
+  const fittingRows = [
+    elbowCount > 0
+      ? `<div class="dash-row"><span class="dash-row-label"><span class="fitting-dot" style="background:#ffeb3b"></span>Elbows</span><span>${elbowCount}</span><span class="dash-row-cost">${fmtCost(elbowFittingCost)}</span></div>`
+      : '',
+    transitionCount > 0
+      ? `<div class="dash-row"><span class="dash-row-label"><span class="fitting-dot" style="background:#ce93d8"></span>Transitions</span><span>${transitionCount}</span><span class="dash-row-cost">${fmtCost(transitionFittingCost)}</span></div>`
+      : '',
+    teeCount > 0
+      ? `<div class="dash-row"><span class="dash-row-label"><span class="fitting-dot" style="background:#ff9800"></span>Tees</span><span>${teeCount}</span><span class="dash-row-cost">${fmtCost(teeFittingCost)}</span></div>`
+      : '',
+  ].join('');
+
+  const ductSubtotalRow = totalDuctLmCost > 0 && totalFittingCost > 0
+    ? `<div class="dash-row dash-row-subtotal"><span class="dash-row-label">Duct (lm)</span><span></span><span class="dash-row-cost">${fmtCost(totalDuctLmCost)}</span></div>`
+    : '';
+
+  const ductTotalRow = totalMechCost > 0
+    ? `<div class="dash-row dash-row-total"><span class="dash-row-label">Total</span><span></span><span class="dash-row-cost">${fmtCost(totalMechCost)}</span></div>`
+    : '';
+
   const hasStructure = columnCount > 0 || beamCount > 0;
-  const hasMechanical = totalDuctBranches > 0;
+  const hasMechanical = branchCount > 0;
+
+  const thermalCount = (fp.Thermal_Zones || []).length;
+  const hasThermal = thermalCount > 0;
+
+  const sectionHeader = (title, btnId) => [
+    `<div class="dashboard-section-header">`,
+    `<span class="dashboard-section-title">${title}</span>`,
+    `<button class="dash-clear-btn" id="${btnId}">Clear</button>`,
+    `</div>`,
+  ].join('');
+
+  const structDetailRows = _meta ? [
+    _meta.beamMaterial
+      ? `<div class="dash-row"><span class="dash-row-label">Material</span><span>${_fmtMat(_meta.beamMaterial)}</span><span></span></div>`
+      : '',
+    (_meta.beamWidthMm != null || _meta.beamDepthMm != null)
+      ? (() => {
+          const parts = [_meta.beamWidthMm, _meta.beamDepthMm].filter(v => v != null).map(_fmtMm);
+          const dimStr = parts.length === 2 ? `${parts[0]} × ${parts[1]}` : `${parts[0]} (D)`;
+          return `<div class="dash-row"><span class="dash-row-label">Beam</span><span>${dimStr}</span>${_hasCosts ? `<span class="dash-row-cost">${fmtCost(_meta.costs.beams ?? 0)}</span>` : '<span></span>'}</div>`;
+        })()
+      : '',
+    _meta.columnWidthMm != null
+      ? `<div class="dash-row"><span class="dash-row-label">Column</span><span>${_fmtMm(_meta.columnWidthMm)} × ${_fmtMm(_meta.columnWidthMm)}</span>${_hasCosts ? `<span class="dash-row-cost">${fmtCost(_meta.costs.columns ?? 0)}</span>` : '<span></span>'}</div>`
+      : '',
+    _meta.slabDepthMm != null
+      ? `<div class="dash-row"><span class="dash-row-label">Slab${_meta.slabMaterial ? ` (${_fmtMat(_meta.slabMaterial)})` : ''}</span><span>${_fmtMm(_meta.slabDepthMm)}</span>${_hasCosts ? `<span class="dash-row-cost">${fmtCost(_meta.costs.slab ?? 0)}</span>` : '<span></span>'}</div>`
+      : '',
+    _hasCosts
+      ? `<div class="dash-row dash-row-total"><span class="dash-row-label">Total</span><span></span><span class="dash-row-cost">${fmtCost(_meta.costs.total)}</span></div>`
+      : '',
+  ].join('') : '';
+
+  const structUnitCost = (_hasCosts && floorAreaM2 > 0)
+    ? _meta.costs.total / floorAreaM2
+    : null;
+
+  const structHTML = hasStructure ? [
+    `<div class="dashboard-section">`,
+    sectionHeader('Structure', 'dashClearStructureBtn'),
+    `<div class="metric-note">${columnCount} column${columnCount !== 1 ? 's' : ''} · ${beamCount} beam${beamCount !== 1 ? 's' : ''}</div>`,
+    structUnitCost !== null ? [
+      `<div class="dash-unit-cost">`,
+      `<span class="dash-unit-cost-value">${fmtCost(structUnitCost)}</span>`,
+      `<span class="dash-unit-cost-label">/m²</span>`,
+      `</div>`,
+    ].join('') : '',
+    structDetailRows ? `<div class="dash-table">${structDetailRows}</div>` : '',
+    (!_hasCosts && hasStructure && _meta?.costsError)
+      ? `<div class="metric-note" style="font-style:italic;opacity:0.65;">Cost calculation failed — re-run Structural to retry</div>`
+      : '',
+    (!_hasCosts && hasStructure && !_meta?.costsError)
+      ? `<div class="metric-note" style="font-style:italic;opacity:0.65;">Re-run Structural to see costs</div>`
+      : '',
+    `</div>`,
+  ].join('') : '';
+
+  const thermalHTML = hasThermal ? [
+    `<div class="dashboard-section">`,
+    sectionHeader('Thermal', 'dashClearThermalBtn'),
+    `<div class="metric-note">${thermalCount} zone${thermalCount !== 1 ? 's' : ''}</div>`,
+    `</div>`,
+  ].join('') : '';
+
+  // ── Branch list (per-riser breakdown) ───────────────────────────────────────
+  const fmtLm = v => `${v.toFixed(1)} lm`;
+  const branchListHTML = _branchesExpanded ? riserMetrics.risers
+    .filter(r => r.lm > 0)
+    .map((r, i) => {
+      const totalCost = r.lmCost + r.fittings.elbows.cost + r.fittings.transitions.cost + r.fittings.tees.cost;
+      const fRows = [
+        r.fittings.elbows.count > 0
+          ? `<div class="branch-detail-row"><span><span class="fitting-dot" style="background:#ffeb3b"></span>Elbows</span><span>${r.fittings.elbows.count}</span><span class="dash-row-cost">${fmtCost(r.fittings.elbows.cost)}</span></div>`
+          : '',
+        r.fittings.transitions.count > 0
+          ? `<div class="branch-detail-row"><span><span class="fitting-dot" style="background:#ce93d8"></span>Transitions</span><span>${r.fittings.transitions.count}</span><span class="dash-row-cost">${fmtCost(r.fittings.transitions.cost)}</span></div>`
+          : '',
+        r.fittings.tees.count > 0
+          ? `<div class="branch-detail-row"><span><span class="fitting-dot" style="background:#ff9800"></span>Tees</span><span>${r.fittings.tees.count}</span><span class="dash-row-cost">${fmtCost(r.fittings.tees.cost)}</span></div>`
+          : '',
+      ].join('');
+      return [
+        `<div class="branch-item" style="border-left-color:${r.colour}">`,
+        `<div class="branch-item-header">`,
+        `<span class="branch-name">Branch ${i + 1}</span>`,
+        `<span class="branch-lm">${fmtLm(r.lm)}</span>`,
+        `<span class="dash-row-cost">${fmtCost(totalCost)}</span>`,
+        `</div>`,
+        fRows,
+        `</div>`,
+      ].join('');
+    }).join('')
+    : '';
+
+  // ── Buildup analysis ─────────────────────────────────────────────────────
+  const bSettings = fp.buildupSettings || {};
+  const buildupPoints = _computeBuildupPoints(fp);
+  fp._buildupPoints = buildupPoints; // cache for renderer
+
+  const bThreshold = bSettings.thresholdMm ?? 800;
+  const bSlab      = bSettings.slabThicknessMm ?? 120;
+  const bCritical  = buildupPoints.filter(b => b.buildupMm >= bThreshold).length;
+  const bWarning   = buildupPoints.filter(b => b.buildupMm >= bThreshold * 0.8 && b.buildupMm < bThreshold).length;
+
+  const buildupHTML = hasMechanical ? [
+    `<div class="dashboard-section buildup-section">`,
+    `<div class="dashboard-section-title" style="margin-bottom:6px">Buildup</div>`,
+    `<div class="buildup-settings">`,
+    `<label class="buildup-label">Slab<input class="buildup-input" id="buildupSlabInput" type="number" value="${bSlab}" min="0" step="10"> mm</label>`,
+    `<label class="buildup-label">Threshold<input class="buildup-input" id="buildupThresholdInput" type="number" value="${bThreshold}" min="0" step="10"> mm</label>`,
+    `</div>`,
+    buildupPoints.length > 0 ? [
+      bCritical > 0 ? `<div class="buildup-stat buildup-critical">${bCritical} critical</div>` : '',
+      bWarning  > 0 ? `<div class="buildup-stat buildup-warning">${bWarning} warning</div>` : '',
+      bCritical === 0 && bWarning === 0 ? `<div class="buildup-stat buildup-ok">${buildupPoints.length} crossing${buildupPoints.length !== 1 ? 's' : ''} — OK</div>` : '',
+    ].join('') : `<div class="buildup-stat" style="color:var(--text-muted)">No crossings detected</div>`,
+    `</div>`,
+  ].join('') : '';
+
+  const updatedMechHTML = hasMechanical ? [
+    `<div class="dashboard-section">`,
+    sectionHeader('Mechanical', 'dashClearMechBtn'),
+    mechUnitCost !== null ? [
+      `<div class="dash-unit-cost">`,
+      `<span class="dash-unit-cost-value">${fmtCost(mechUnitCost)}</span>`,
+      `<span class="dash-unit-cost-label">/m²</span>`,
+      `</div>`,
+    ].join('') : '',
+    `<button class="branch-toggle" id="dashBranchToggle">${branchCount} branch${branchCount !== 1 ? 'es' : ''} ${_branchesExpanded ? '▾' : '▸'}</button>`,
+    _branchesExpanded
+      ? `<div class="branch-list">${branchListHTML}</div>`
+      : (ductRows ? `<div class="dash-table">${ductRows}${ductSubtotalRow}${fittingRows}${ductTotalRow}</div>` : ''),
+    `</div>`,
+  ].join('') : '';
+
+  const areaRowHTML = totalAreaM2 > 0 ? [
+    `<div class="dash-area-grid">`,
+    `<div class="metric-card"><div class="metric-label">Total area</div><div class="metric-value">${fmtArea(totalAreaM2)}</div></div>`,
+    `<div class="metric-card"><div class="metric-label">Core area</div><div class="metric-value">${fmtArea(coreAreaM2)}</div></div>`,
+    `<div class="metric-card"><div class="metric-label">Usable area</div><div class="metric-value">${fmtArea(floorAreaM2)}</div></div>`,
+    `</div>`,
+  ].join('') : '';
 
   panel.innerHTML = [
-    hasStructure ? [
+    areaRowHTML,
+    (hasStructure || hasMechanical) ? [
       `<div class="dash-section-grid">`,
-      `<div class="dashboard-section">`,
-      `<div class="dashboard-section-title">Structure</div>`,
-      `<div class="metric-note">${columnCount} column${columnCount !== 1 ? 's' : ''} · ${beamCount} beam${beamCount !== 1 ? 's' : ''}</div>`,
-      beamRows ? `<div class="dash-table">${beamRows}</div>` : '',
+      structHTML,
+      updatedMechHTML,
       `</div>`,
-      hasMechanical ? [
-        `<div class="dashboard-section">`,
-        `<div class="dashboard-section-title">Mechanical</div>`,
-        `<div class="metric-note">${totalDuctBranches} duct branch${totalDuctBranches !== 1 ? 'es' : ''}</div>`,
-        ductRows ? `<div class="dash-table">${ductRows}</div>` : '',
-        `</div>`,
-      ].join('') : '',
-      `</div>`,
-    ].join('') : (hasMechanical ? [
-      `<div class="dashboard-section">`,
-      `<div class="dashboard-section-title">Mechanical</div>`,
-      `<div class="metric-note">${totalDuctBranches} duct branch${totalDuctBranches !== 1 ? 'es' : ''}</div>`,
-      ductRows ? `<div class="dash-table">${ductRows}</div>` : '',
-      `</div>`,
-    ].join('') : ''),
+    ].join('') : '',
+    buildupHTML,
+    thermalHTML,
   ].join('');
+
+  const bindClear = (id, action) => {
+    const btn = panel.querySelector(`#${id}`);
+    if (btn) btn.addEventListener('click', () => { action(); store.update(fp); });
+  };
+  bindClear('dashClearStructureBtn', () => {
+    const EPS = 2;
+    (fp.Points || []).forEach(pt => {
+      if ((fp.Columns || []).some(col => Math.abs(col.x - pt.x) < EPS && Math.abs(col.y - pt.y) < EPS)) {
+        pt.mechanical = true;
+      }
+    });
+    fp.Columns = [];
+    fp.Beams = [];
+  });
+  bindClear('dashClearMechBtn', () => {
+    fp.Duct_Plan = [];
+    fp.Edges = [];
+    fp._ductEdges = null;
+  });
+  bindClear('dashClearThermalBtn', () => { fp.Thermal_Zones = []; });
+
+  const branchToggleBtn = panel.querySelector('#dashBranchToggle');
+  if (branchToggleBtn) {
+    branchToggleBtn.addEventListener('click', () => {
+      _branchesExpanded = !_branchesExpanded;
+      refreshDashboardPanel(store.active, store);
+    });
+  }
+
+  const bindBuildupInput = (id, key) => {
+    const el = panel.querySelector(`#${id}`);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      const val = parseFloat(el.value);
+      if (!isNaN(val) && val >= 0) {
+        if (!fp.buildupSettings) fp.buildupSettings = {};
+        fp.buildupSettings[key] = val;
+        store.update(fp);
+      }
+    });
+  };
+  bindBuildupInput('buildupSlabInput',      'slabThicknessMm');
+  bindBuildupInput('buildupThresholdInput', 'thresholdMm');
 }
 
 function refreshReferencePanel(fp, store, callbacks = {}) {
@@ -754,6 +1371,25 @@ function setupCriteriaPanel(store) {
 
 // ── Solutions / snapshots ─────────────────────────────────────────────────────
 
+function _floorAreaM2(fp) {
+  const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[fp.units?.length] ?? 1000;
+  const pxPerUnit = fp.units?.pxPerUnit ?? 1;
+  const mPerPx = mmPerUnit / (pxPerUnit * 1000);
+  const wallNodes = fp.wall_graph?.nodes || [];
+  const rawVerts = fp.boundaryArea?.vertices || [];
+  const verts = rawVerts.map(v => _resolveVertex(v, wallNodes)).filter(Boolean);
+  const boundaryPx2 = verts.length >= 3 ? _shoelaceAreaPx(verts) : 0;
+  const corePx2 = (fp.Core_Boundary || []).reduce((sum, core) => {
+    const poly = Object.entries(core)
+      .filter(([k]) => k.startsWith('Pt_'))
+      .sort(([a], [b]) => parseInt(a.slice(3)) - parseInt(b.slice(3)))
+      .map(([, v]) => Array.isArray(v) ? [v[0], v[1]] : null)
+      .filter(Boolean);
+    return sum + (poly.length >= 3 ? _shoelaceAreaPx(poly) : 0);
+  }, 0);
+  return Math.max(0, boundaryPx2 - corePx2) * mPerPx * mPerPx;
+}
+
 function _solutionMetrics(fp) {
   const thermalZones = (fp.Thermal_Zones || []).length;
   const ductRisers   = (fp.Duct_Plan || []).length;
@@ -761,7 +1397,25 @@ function _solutionMetrics(fp) {
   const totalAirLoad = (fp.Duct_Plan || []).reduce((sum, riser) =>
     sum + (riser.vav || []).reduce((s, v) => s + (Number.isFinite(v[1]) ? v[1] : 0), 0), 0
   );
-  return { thermalZones, ductRisers, columns, totalAirLoad };
+
+  const floorAreaM2 = _floorAreaM2(fp);
+
+  // Structural $/m²
+  const structTotal = fp.Structural_Meta?.costs?.total ?? null;
+  const structPerM2 = (structTotal != null && floorAreaM2 > 0) ? structTotal / floorAreaM2 : null;
+
+  // Mechanical $/m² — sum duct lm cost + all fitting costs
+  const rm = _buildRiserMetrics(fp);
+  const mechTotal = rm.risers.reduce((sum, r) =>
+    sum + r.lmCost + r.fittings.elbows.cost + r.fittings.transitions.cost + r.fittings.tees.cost, 0
+  );
+  const mechPerM2 = (mechTotal > 0 && floorAreaM2 > 0) ? mechTotal / floorAreaM2 : null;
+
+  // Total $/m²
+  const totalCost = (structTotal ?? 0) + mechTotal;
+  const totalPerM2 = (totalCost > 0 && floorAreaM2 > 0) ? totalCost / floorAreaM2 : null;
+
+  return { thermalZones, ductRisers, columns, totalAirLoad, structPerM2, mechPerM2, totalPerM2 };
 }
 
 function refreshSolutionsPanel(store) {
@@ -776,19 +1430,34 @@ function refreshSolutionsPanel(store) {
 
   store.solutions.forEach((sol, idx) => {
     const div = document.createElement('div');
-    div.className = 'solution-item';
+    const isActive = store._loadedSnapshotId === sol.id;
+    div.className = 'solution-item' + (isActive ? ' solution-active' : '');
+
+    const sm = sol.json?.structural_meta;
+    const structLines = [];
+    if (sm?.beamMaterial) {
+      const mat = sm.beamMaterial.charAt(0).toUpperCase() + sm.beamMaterial.slice(1).toLowerCase();
+      let line = mat;
+      if (sm.beamSpanM) line += ` · ${sm.beamSpanM} m grid`;
+      if (sm.beamDirection) line += ` · ${sm.beamDirection}`;
+      structLines.push(line);
+    }
+
+    const m = sol.metrics;
+    const metricsStr = m
+      ? `zones: ${m.thermalZones ?? '—'} · risers: ${m.ductRisers ?? '—'} · air: ${m.totalAirLoad != null ? Number(m.totalAirLoad).toFixed(0) : '—'} l/s · cols: ${m.columns ?? '—'}`
+      : '';
 
     div.innerHTML = [
       `<div class="solution-name">`,
-      `  <span>${sol.name}</span>`,
+      `  <span><span style="color:var(--text-muted);margin-right:5px;">#${idx + 1}</span>${sol.name}</span>`,
       `  <span class="solution-time">${sol.timestamp}</span>`,
       `</div>`,
-      `<div class="solution-metrics">`,
-      `  zones: ${sol.metrics.thermalZones} · risers: ${sol.metrics.ductRisers}<br>`,
-      `  air: ${sol.metrics.totalAirLoad.toFixed(0)} l/s · cols: ${sol.metrics.columns}`,
-      `</div>`,
+      metricsStr ? `<div class="solution-metrics">${metricsStr}</div>` : '',
+      structLines.length ? `<div class="solution-metrics" style="color:var(--text-dim);">${structLines.join('<br>')}</div>` : '',
       `<div class="solution-actions">`,
       `  <button class="sol-load-btn">Load</button>`,
+      `  <button class="sol-update-btn">Update</button>`,
       `  <button class="sol-del-btn">Delete</button>`,
       `</div>`,
     ].join('');
@@ -799,10 +1468,21 @@ function refreshSolutionsPanel(store) {
       if (currentLayers) fp.layers = currentLayers;
       store.add(fp);
       store.setActive(fp);
+      store._loadedSnapshotId = sol.id;
       store.notify();
+      refreshSolutionsPanel(store);
+    });
+
+    div.querySelector('.sol-update-btn').addEventListener('click', () => {
+      if (!store.active) return;
+      sol.json    = store.active.toJSON();
+      sol.metrics = _solutionMetrics(store.active);
+      sol.timestamp = new Date().toLocaleTimeString();
+      refreshSolutionsPanel(store);
     });
 
     div.querySelector('.sol-del-btn').addEventListener('click', () => {
+      if (store._loadedSnapshotId === sol.id) store._loadedSnapshotId = null;
       store.solutions.splice(idx, 1);
       refreshSolutionsPanel(store);
     });
@@ -812,18 +1492,30 @@ function refreshSolutionsPanel(store) {
 
   // Comparison table when ≥ 2 solutions exist
   if (store.solutions.length >= 2) {
+    // Backfill cost-per-m² fields for snapshots saved before these metrics were added.
+    store.solutions.forEach(sol => {
+      if (sol.metrics && sol.metrics.structPerM2 === undefined) {
+        try {
+          const fresh = _solutionMetrics(FloorPlan.fromJSON(sol.json));
+          Object.assign(sol.metrics, { structPerM2: fresh.structPerM2, mechPerM2: fresh.mechPerM2, totalPerM2: fresh.totalPerM2 });
+        } catch (_) { /* leave undefined — will display as '—' */ }
+      }
+    });
+
     const table = document.createElement('div');
     table.style.cssText = 'margin-top:8px; border-top:1px solid var(--border); padding-top:6px;';
+    const fmtPerM2 = v => v != null ? `$${Math.round(v)}/m²` : '—';
     const keys = [
-      ['thermalZones', 'Zones'],
-      ['ductRisers',   'Risers'],
-      ['totalAirLoad', 'Air (l/s)'],
-      ['columns',      'Cols'],
+      ['thermalZones', 'Zones',         v => v != null ? String(v) : '—'],
+      ['ductRisers',   'Risers',         v => v != null ? String(v) : '—'],
+      ['totalAirLoad', 'Air (l/s)',      v => v != null ? Number(v).toFixed(0) : '—'],
+      ['columns',      'Cols',           v => v != null ? String(v) : '—'],
+      ['structPerM2',  'Struct $/m²',   fmtPerM2],
+      ['mechPerM2',    'Mech $/m²',     fmtPerM2],
+      ['totalPerM2',   'Total $/m²',    fmtPerM2],
     ];
-    const rows = keys.map(([key, label]) => {
-      const vals = store.solutions.map(s =>
-        key === 'totalAirLoad' ? s.metrics[key].toFixed(0) : String(s.metrics[key])
-      );
+    const rows = keys.map(([key, label, fmt]) => {
+      const vals = store.solutions.map(s => fmt(s.metrics?.[key] ?? null));
       return `<tr><td style="color:var(--text-muted);padding-right:6px;font-size:10px;">${label}</td>${vals.map(v => `<td style="font-size:10px;padding:1px 5px;text-align:right;">${v}</td>`).join('')}</tr>`;
     });
     table.innerHTML = [
@@ -873,6 +1565,35 @@ export function bindUI(store, canvas, mouse) {
       });
 
       if (!found) {
+        // Buildup warning points
+        for (const bp of (fp._buildupPoints || [])) {
+          const dist = Math.hypot(world.x - bp.pt.x, world.y - bp.pt.y);
+          if (dist < 10 / vp.scale) {
+            fp.selectedBuildup  = bp;
+            fp.selectedFitting  = null;
+            fp.selectedDuct     = null;
+            fp.selectedVav      = null;
+            found = true;
+            break;
+          }
+        }
+      }
+
+      if (!found) {
+        // Fitting nodes (elbows, transitions, tees)
+        for (const node of _buildFittingNodes(fp)) {
+          const dist = Math.hypot(world.x - node.pt.x, world.y - node.pt.y);
+          if (dist < 8 / vp.scale) {
+            fp.selectedFitting = node;
+            fp.selectedDuct = null;
+            fp.selectedVav = null;
+            found = true;
+            break;
+          }
+        }
+      }
+
+      if (!found) {
         // Duct Segments
         fp.Duct_Plan.forEach(riser => {
           (riser.ducts || []).forEach(duct => {
@@ -903,9 +1624,23 @@ export function bindUI(store, canvas, mouse) {
     }
 
     if (!found) {
-      fp.selectedDuct = null;
-      fp.selectedVav = null;
+      fp.selectedDuct    = null;
+      fp.selectedVav     = null;
+      fp.selectedFitting = null;
+      fp.selectedBuildup = null;
     }
+    // Tell the select-mode handler (registered separately below, on the
+    // `click` listener) that this interaction already selected a duct-plan
+    // object, so it doesn't immediately clear it again — select mode has no
+    // buildup/fitting/duct/VAV hit-test of its own and would otherwise
+    // always fall through to its "nothing hit" branch and null this
+    // selection out right after mousedown set it. `click` is a distinct
+    // MouseEvent from `mousedown`, so this can't be a property on `e` (that
+    // was the actual bug — the flag never survived to the click handler,
+    // which read a fresh event object every time); it's set unconditionally
+    // on every mousedown, so a drag that never produces a `click` can't
+    // leave a stale value behind either.
+    store._lastDuctPlanHit = found;
     store.update(fp);
   });
 
@@ -1397,6 +2132,7 @@ export function bindUI(store, canvas, mouse) {
       });
       if (nameInput) nameInput.value = '';
       refreshSolutionsPanel(store);
+      setActivePanelTab('snapshots');
     });
   }
 
@@ -1433,6 +2169,15 @@ export function bindUI(store, canvas, mouse) {
 
   if (window.electronAPI?.onServerStatus) {
     window.electronAPI.onServerStatus(_applyServerStatus);
+  } else {
+    // Web mode: poll the health endpoint directly
+    _applyServerStatus({ status: 'starting' });
+    const _pollHealth = async () => {
+      const ok = await checkHealth().catch(() => false);
+      _applyServerStatus({ status: ok ? 'ready' : 'offline' });
+    };
+    _pollHealth();
+    setInterval(_pollHealth, 10000);
   }
 
   // Track mouse movement and constraint flag (Shift key)
@@ -1854,13 +2599,10 @@ export function bindUI(store, canvas, mouse) {
         if (!nearPt.thermalRegions) nearPt.thermalRegions = [];
         const incoming = store._entryPickTarget.regions || [];
         incoming.forEach(r => {
-          const exists = nearPt.thermalRegions.some(er => er.zoneIndex === r.zoneIndex && er.subZoneIndex === r.subZoneIndex);
-          if (!exists) nearPt.thermalRegions.push({ zoneIndex: r.zoneIndex, subZoneIndex: r.subZoneIndex });
+          const exists = nearPt.thermalRegions.some(er => er.zoneIndex === r.zoneIndex && er.vavZoneIndex === r.vavZoneIndex);
+          if (!exists) nearPt.thermalRegions.push({ zoneIndex: r.zoneIndex, vavZoneIndex: r.vavZoneIndex });
         });
-        // Derive legacy fields so the backend still works.
         nearPt.thermalZoneIndices = [...new Set(nearPt.thermalRegions.map(r => r.zoneIndex))];
-        nearPt.thermalSubZoneMap = {};
-        nearPt.thermalRegions.forEach(r => { nearPt.thermalSubZoneMap[r.zoneIndex] = r.subZoneIndex; });
       }
       store._entryPickTarget = null;
       document.getElementById('canvas').style.cursor = '';
@@ -1870,12 +2612,25 @@ export function bindUI(store, canvas, mouse) {
 
     // SELECT MODE: select segment and return
     if (store.mode === "select") {
-      // Check for nearby grid point first (within 8px) — only when layer is visible
-      const pts = store.active.layers?.Points !== false ? (store.active.Points || []) : [];
+      // A duct-plan object (buildup point, fitting, duct segment, VAV) was
+      // already selected by the mousedown handler above — don't immediately
+      // clear it via the "nothing hit" branch below.
+      if (store._lastDuctPlanHit) {
+        store._lastDuctPlanHit = false;
+        return;
+      }
+
+      // Check for nearby grid point first (within 8px) — grid points respect pointsLayer,
+      // but entry points are always selectable when the Entry_Points layer is on.
+      const allPts = store.active.Points || [];
+      const _pointsOn = store.active.layers?.Points !== false;
+      const _entryOn  = store.active.layers?.Entry_Points !== false;
+      const pts = allPts.filter(p => p.entryPoint ? _entryOn : _pointsOn);
       let nearPt = null, nearDist = 8;
       pts.forEach(p => { const d = Math.hypot(x - p.x, y - p.y); if (d < nearDist) { nearDist = d; nearPt = p; } });
       if (nearPt) {
         _setThermalSelection(store, null, null);
+        store.active.selectedBuildup = null;
         store.active.selectedSegment = null;
         if (!store.active.selectedPoints) store.active.selectedPoints = new Set();
         if (e.shiftKey) {
@@ -1898,6 +2653,7 @@ export function bindUI(store, canvas, mouse) {
         ? pickThermalRegionAtPoint(store.active, x, y)
         : null;
       if (thermalHit) {
+        store.active.selectedBuildup = null;
         store.active.selectedSegment = null;
         store.active.selectedCore = false;
         store.active.selectedPoints = new Set();
@@ -1906,19 +2662,19 @@ export function bindUI(store, canvas, mouse) {
         if (e.shiftKey) {
           // Shift-click: toggle this specific region (zone+subzone pair) in the selection list.
           if (!store._selectedRegions) store._selectedRegions = [];
-          const idx = store._selectedRegions.findIndex(r => r.zoneIndex === hit.zoneIndex && r.subZoneIndex === hit.subZoneIndex);
+          const idx = store._selectedRegions.findIndex(r => r.zoneIndex === hit.zoneIndex && r.vavZoneIndex === hit.vavZoneIndex);
           if (idx >= 0) {
             store._selectedRegions = store._selectedRegions.filter((_, i) => i !== idx);
           } else {
-            store._selectedRegions = [...store._selectedRegions, { zoneIndex: hit.zoneIndex, subZoneIndex: hit.subZoneIndex, subZoneSource: hit.subZoneSource }];
+            store._selectedRegions = [...store._selectedRegions, { zoneIndex: hit.zoneIndex, vavZoneIndex: hit.vavZoneIndex }];
           }
           if (!Number.isInteger(store.active.selectedThermalZoneIndex)) {
-            _setThermalSelection(store, hit.zoneIndex, hit.subZoneIndex, hit.subZoneSource);
+            _setThermalSelection(store, hit.zoneIndex, hit.vavZoneIndex);
           }
         } else {
           // Plain click: single region selected.
-          store._selectedRegions = [{ zoneIndex: hit.zoneIndex, subZoneIndex: hit.subZoneIndex, subZoneSource: hit.subZoneSource }];
-          _setThermalSelection(store, hit.zoneIndex, hit.subZoneIndex, hit.subZoneSource);
+          store._selectedRegions = [{ zoneIndex: hit.zoneIndex, vavZoneIndex: hit.vavZoneIndex }];
+          _setThermalSelection(store, hit.zoneIndex, hit.vavZoneIndex);
         }
         store.active._thermalSelectionRegions = store._selectedRegions;
         refreshThermalZonesList(store);
@@ -1930,6 +2686,7 @@ export function bindUI(store, canvas, mouse) {
       const seg = findClosestSegment(store.active, { x, y });
       if (seg) {
         _setThermalSelection(store, null, null);
+        store.active.selectedBuildup = null;
         store.active.selectedPoints = new Set();
         store.active.selectedPoint = null;
         store.active.selectedCore = false;
@@ -1965,6 +2722,7 @@ export function bindUI(store, canvas, mouse) {
         }
         if (hitCoreId) {
           _setThermalSelection(store, null, null);
+          store.active.selectedBuildup = null;
           store.active.selectedCore = hitCoreId;
           store.active.selectedSegment = null;
           store.active.selectedPoints = new Set();
@@ -1972,6 +2730,7 @@ export function bindUI(store, canvas, mouse) {
           store.update(store.active);
         } else {
           _setThermalSelection(store, null, null);
+          store.active.selectedBuildup = null;
           store.active.clearSelection();
           store.update(store.active);
         }
@@ -2248,10 +3007,11 @@ export function bindUI(store, canvas, mouse) {
 
   function _structModalSnapshot() {
     return {
-      method:    document.getElementById('structMethodSelect')?.value ?? 'heuristic',
-      material:  document.getElementById('structMaterialSelect')?.value ?? 'steel+concrete',
-      direction: document.querySelector('input[name="structBeamDir"]:checked')?.value ?? 'horizontal',
-      gridSize:  document.querySelector('input[name="structGridSize"]:checked')?.value ?? '9',
+      method:       document.getElementById('structMethodSelect')?.value ?? 'heuristic',
+      material:     document.getElementById('structMaterialSelect')?.value ?? 'steel+concrete',
+      direction:    document.querySelector('input[name="structBeamDir"]:checked')?.value ?? 'horizontal',
+      beamSpan:     parseFloat(document.getElementById('structBeamSpanInput')?.value ?? '9'),
+      beamDistance: parseFloat(document.getElementById('structBeamDistInput')?.value ?? '9'),
     };
   }
 
@@ -2263,8 +3023,10 @@ export function bindUI(store, canvas, mouse) {
     if (mat) mat.value = state.material;
     const dir = document.querySelector(`input[name="structBeamDir"][value="${state.direction}"]`);
     if (dir) dir.checked = true;
-    const sz = document.querySelector(`input[name="structGridSize"][value="${state.gridSize}"]`);
-    if (sz) sz.checked = true;
+    const spanEl = document.getElementById('structBeamSpanInput');
+    if (spanEl) spanEl.value = state.beamSpan ?? 9;
+    const distEl = document.getElementById('structBeamDistInput');
+    if (distEl) distEl.value = state.beamDistance ?? 9;
   }
 
   function _openStructModal() {
@@ -2284,15 +3046,16 @@ export function bindUI(store, canvas, mouse) {
     const material = document.getElementById('structMaterialSelect')?.value ?? 'steel+concrete';
     const [beamMat, slabMat] = material.split('+');
     const beamDir  = document.querySelector('input[name="structBeamDir"]:checked')?.value ?? 'horizontal';
-    const gridSize = parseInt(document.querySelector('input[name="structGridSize"]:checked')?.value ?? '9', 10);
+    const beamSpan = parseFloat(document.getElementById('structBeamSpanInput')?.value ?? '9');
+    const beamDist = parseFloat(document.getElementById('structBeamDistInput')?.value ?? '9');
     return {
       structural_planning: {
         method,
         beam_material: beamMat,
         slab_material: slabMat,
         beam_direction: beamDir,
-        beamSpan:    gridSize,
-        beamSpacing: gridSize,
+        beamSpan:    beamSpan,
+        beamSpacing: beamDist,
       },
     };
   }
@@ -2309,16 +3072,56 @@ export function bindUI(store, canvas, mouse) {
     const dirLabel    = sp.beam_direction === 'vertical' ? 'vertical' : 'horizontal';
     let msg;
     if (isNoPoints) {
-      msg = `Structural: no valid column positions for a ${gridLabel} grid — the floorplan may be too small for this grid size. ` +
-            `Try a smaller grid size (6 m or 3 m) in Structural Settings.`;
+      msg = `Structural: no valid column positions for a ${gridLabel} grid — the floorplan may be too small for this span/distance. ` +
+            `Try a smaller beam span or distance in Structural Settings.`;
     } else {
       msg = `Structural: solver could not place columns with ${methodLabel} method, ${gridLabel} grid, ${dirLabel} beams. ` +
-            `Try: switch to Heuristic method, use a smaller grid size (6 m or 3 m), or change beam direction.`;
+            `Try: switch to Heuristic method, use a smaller beam span or distance, or change beam direction.`;
     }
     aiError.style.display = 'block';
     aiError.style.color = '';
     aiError.textContent = msg;
   }
+
+  // DUCT ROUTING SETTINGS MODAL
+  // ═══════════════════════════════════════════════════════════
+  const _ductModal = document.getElementById('ductRoutingSettingsModal');
+  function _openDuctModal() { if (_ductModal) _ductModal.style.display = 'block'; }
+  function _closeDuctModal() { if (_ductModal) _ductModal.style.display = 'none'; }
+
+  document.getElementById('openDuctSettingsBtn')?.addEventListener('click', _openDuctModal);
+  document.getElementById('closeDuctSettingsModalBtn')?.addEventListener('click', _closeDuctModal);
+  document.getElementById('ductSettingsOkBtn')?.addEventListener('click', () => {
+    const read = id => { const v = parseFloat(document.getElementById(id)?.value); return isFinite(v) && v > 0 ? v : null; };
+    for (const dir of ['north', 'east', 'south', 'west', 'internal']) {
+      const v = read(`ductLps_${dir}`);
+      if (v) ductRoutingSettings.lpsPerM2[dir] = v;
+    }
+    const vel = read('ductMaxVelocityInput');
+    if (vel) { ductRoutingSettings.maxVelocity = vel; criteriaSettings.pinchVelocity = vel; }
+    const bup = read('ductMaxBuildupInput');
+    if (bup) {
+      ductRoutingSettings.maxBuildupMm = bup;
+      if (store.active) { if (!store.active.buildupSettings) store.active.buildupSettings = {}; store.active.buildupSettings.thresholdMm = bup; store.update(store.active); }
+    }
+    _closeDuctModal();
+  });
+
+  document.getElementById('applyDuctLpsBtn')?.addEventListener('click', () => {
+    if (!store.active) return;
+    const orientMap = { north: 'north', east: 'east', south: 'south', west: 'west', internal: 'internal', perimeter: null };
+    (store.active.Thermal_Zones || []).forEach(zone => {
+      const orient = (zone.orientation ?? '').toLowerCase();
+      const isInternal = zone.type === 'internal' || zone.orientation == null;
+      const key = isInternal ? 'internal' : (orient in ductRoutingSettings.lpsPerM2 ? orient : null);
+      if (key && !Number.isFinite(zone.air_requirement)) {
+        zone.air_requirement = ductRoutingSettings.lpsPerM2[key];
+      }
+    });
+    store.update(store.active);
+    refreshThermalZonesList(store);
+    _closeDuctModal();
+  });
 
   const generateGridBtn   = document.getElementById('generateGridBtn');
   const clearGridBtn      = document.getElementById('clearGridBtn');
@@ -2350,6 +3153,15 @@ export function bindUI(store, canvas, mouse) {
     });
   }
 
+  const resetGridBtn = document.getElementById('resetGridBtn');
+  if (resetGridBtn) {
+    resetGridBtn.addEventListener('click', () => {
+      if (!store.active) return;
+      store.active.resetGridPoints();
+      store.update(store.active);
+    });
+  }
+
   // ═══════════════════════════════════════════════════════════
   // LAYER TOGGLE CONTROLS
   // ═══════════════════════════════════════════════════════════
@@ -2362,6 +3174,8 @@ export function bindUI(store, canvas, mouse) {
     columnsLayer: 'Columns',
     exclusionAreasLayer: 'Exclusion_Areas',
     thermalZonesLayer: 'Thermal_Zones',
+    thermalRegionsLayer: 'Thermal_Regions',
+    vavControlZonesLayer: 'VAV_Control_Zones',
     beamsLayer: 'Beams',
     pointsLayer: 'Points',
     entryPointsLayer: 'Entry_Points',
@@ -2372,7 +3186,7 @@ export function bindUI(store, canvas, mouse) {
 
   const _defaultOnLayers = new Set([
     'Plan_Boundary', 'Boundary_Area', 'Core_Boundary', 'Core_Area',
-    'Columns', 'Exclusion_Areas', 'Thermal_Zones', 'Entry_Points', 'Entry_Connections',
+    'Columns', 'Exclusion_Areas', 'Thermal_Zones', 'VAV_Control_Zones', 'Entry_Points', 'Entry_Connections',
   ]);
 
   Object.entries(layerCheckboxes).forEach(([checkboxId, layerName]) => {
@@ -2409,17 +3223,51 @@ export function bindUI(store, canvas, mouse) {
     });
   });
 
-  // Save floorplan: serialise and send to main via preload API
+  // Quick-save: write to the current file path silently; fall back to Save As if no path yet.
+  function _buildSavePayload() {
+    const data = store.active.toJSON();
+    if (store.solutions.length) data.snapshots = store.solutions.map(s => ({ ...s }));
+    return data;
+  }
+
+  function _flashBtn(btn, successText, failText, ok) {
+    const orig = btn.textContent;
+    btn.textContent = ok ? successText : failText;
+    btn.disabled = true;
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1400);
+  }
+
+  const saveQuickBtn = document.getElementById("saveQuickBtn");
+  if (saveQuickBtn) {
+    saveQuickBtn.addEventListener("click", async () => {
+      if (!store.active) return;
+      if (_currentFilePath) {
+        try {
+          const result = await window.electronAPI.saveFloorplanSilent({
+            filePath: _currentFilePath,
+            payload: _buildSavePayload()
+          });
+          _flashBtn(saveQuickBtn, "Saved ✓", "Save failed", result?.success);
+          if (!result?.success) console.warn("Quick save failed:", result?.error);
+        } catch (err) {
+          _flashBtn(saveQuickBtn, "Saved ✓", "Save failed", false);
+          console.error("Quick save error:", err);
+        }
+      } else {
+        saveFloorplanBtn?.click();
+      }
+    });
+  }
+
+  // Save As: serialise and send to main via preload API
   const saveFloorplanBtn = document.getElementById("saveFloorplanBtn");
   if (saveFloorplanBtn) {
     saveFloorplanBtn.addEventListener("click", async () => {
       if (!store.active) return;
-      const data = store.active.toJSON();
-
       try {
         const result = await window.electronAPI.saveFloorplan({
           filenameSuggested: `floorplan-${store.active.name}.json`,
-          payload: data
+          payload: _buildSavePayload()
         });
         if (result?.success) {
           console.log("Floorplan saved:", result.path);
@@ -2608,6 +3456,14 @@ export function bindUI(store, canvas, mouse) {
           }
           store.setMode("select");
 
+          // Restore snapshots that were saved alongside this floorplan.
+          if (Array.isArray(result.data.snapshots) && result.data.snapshots.length) {
+            store.solutions = result.data.snapshots;
+          } else {
+            store.solutions = [];
+          }
+          refreshSolutionsPanel(store);
+
           // Repopulate requirements form (guard each element in case UI panel
           // is not present in a minimal embed or during tests)
           const req = fp.requirements || {};
@@ -2723,23 +3579,7 @@ export function bindUI(store, canvas, mouse) {
     const applyData = (d) => {
       if (!d) return;
       if (Array.isArray(d.thermal_zones) && d.thermal_zones.length) {
-        const prevMeta = (fp.Thermal_Zones || []).map(z => ({
-          color: z.color ?? null,
-          alpha: z.alpha ?? null,
-          air_requirement: Number.isFinite(z.air_requirement) ? z.air_requirement : null,
-          subZoneAirRequirements: Array.isArray(z.subZoneAirRequirements) ? [...z.subZoneAirRequirements] : [],
-        }));
-        fp.Thermal_Zones = d.thermal_zones.map(({ thermal_region_geometry, vav_control_zones, ...tz }, i) => ({
-          ...tz,
-          subZones: thermal_region_geometry || [],
-          thermalControlZones: vav_control_zones || [],
-          color: tz.color ?? prevMeta[i]?.color ?? null,
-          alpha: tz.alpha ?? prevMeta[i]?.alpha ?? null,
-          air_requirement: Number.isFinite(tz.air_requirement) ? tz.air_requirement : prevMeta[i]?.air_requirement,
-          subZoneAirRequirements: Array.isArray(tz.subZoneAirRequirements)
-            ? tz.subZoneAirRequirements
-            : (prevMeta[i]?.subZoneAirRequirements || []),
-        }));
+        _mergeThermalZonesFromBackend(fp, d.thermal_zones);
       }
       if (d.thermal_zones) refreshThermalZonesList(store);
 
@@ -2777,9 +3617,57 @@ export function bindUI(store, canvas, mouse) {
               return { ...b, start: { x: lenToPx(b.start.x), y: lenToPx(b.start.y) }, end: { x: lenToPx(b.end.x), y: lenToPx(b.end.y) } };
             })
             .filter(Boolean);
+
+          // A grid point where a beam meets the core can't function as an
+          // entry point — a beam runs straight through it. Decommission any
+          // such point's entry-point assignment.
+          const corePolys = (fp.Core_Boundary || []).map(core =>
+            Object.keys(core)
+              .filter(k => /^Pt_\d+$/.test(k))
+              .sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3)))
+              .map(k => core[k])
+          ).filter(poly => poly.length >= 3);
+
+          if (corePolys.length) {
+            const beamEPS = 2;
+            const beamEndpoints = fp.Beams.flatMap(b => [b.start, b.end]).filter(Boolean);
+            (fp.Points || []).forEach(pt => {
+              if (!pt.entryPoint) return;
+              const touchesBeam = beamEndpoints.some(bp => Math.abs(bp.x - pt.x) < beamEPS && Math.abs(bp.y - pt.y) < beamEPS);
+              if (!touchesBeam) return;
+              const onCoreEdge = corePolys.some(poly => fp._isPointOnPolygonEdge(pt.x, pt.y, poly, beamEPS));
+              if (onCoreEdge) pt.entryPoint = false;
+            });
+          }
         }
         fp.layers.Beams   = true;
         fp.layers.Columns = true;
+
+        const cvc = d.cost_volume_calculation;
+        const _pendingCfg = fp._structCfgPending || {};
+        fp._structCfgPending = null;
+        fp.Structural_Meta = {
+          beamMaterial:  cvc?.material     || sc.beam_material  || null,
+          slabMaterial:  sc.slab_material  || null,
+          slabDepthMm:   sc.slab_depth     ?? null,
+          beamDepthMm:   sc.beams?.[0]?.depth  ?? null,
+          beamWidthMm:   sc.beams?.[0]?.width  ?? null,
+          columnWidthMm: sc.columns?.[0]?.width ?? null,
+          beamDirection: _pendingCfg.beam_direction ?? null,
+          beamSpanM:     _pendingCfg.beamSpan       ?? null,
+          // null (not a zeroed object) when the backend never produced a
+          // result — e.g. it threw (d.cost_volume_calculation_error set) or
+          // this snapshot predates cost calculation entirely. A real result,
+          // even an honest $0 (no beams placed), is kept as-is rather than
+          // hidden — see _hasCosts/dashboard rendering below.
+          costsError: d.cost_volume_calculation_error || null,
+          costs: cvc ? {
+            columns: cvc.columns_cost ?? 0,
+            beams:   cvc.beam_cost    ?? 0,
+            slab:    cvc.slab_cost    ?? 0,
+            total:   cvc.total_cost   ?? 0,
+          } : null,
+        };
       }
 
       const rawDuctPlan = d?.mechanical_components?.duct_plan || d?.mechanical_components?.ductPlan || d?.ductPlan || d?.Duct_Plan;
@@ -2884,8 +3772,10 @@ export function bindUI(store, canvas, mouse) {
                         (Array.isArray(fp.Beams)   && fp.Beams.length   > 0);
     if (hasExisting && !window.confirm('Existing structural elements were found. Re-run structural optimisation?')) return;
     const structCfg = _getStructuralConfig();
+    fp._structCfgPending = structCfg.structural_planning;
     const result = await runStage(['structural'], 2000, structCfg);
     if (!result.ok) {
+      fp._structCfgPending = null;
       _showStructuralFailureHint(result.error, structCfg, aiError);
       return;
     }
@@ -2926,8 +3816,9 @@ export function bindUI(store, canvas, mouse) {
     }
     if (shouldRunStructural) {
       const structCfg = _getStructuralConfig();
+      fp._structCfgPending = structCfg.structural_planning;
       const r = await runStage(['structural'], 2000, structCfg);
-      if (!r.ok) { _showStructuralFailureHint(r.error, structCfg, aiError); return; }
+      if (!r.ok) { fp._structCfgPending = null; _showStructuralFailureHint(r.error, structCfg, aiError); return; }
       if (!await waitForContinue('continue', 'Structural optimisation complete. Review columns/beams, then click Continue.')) {
         if (aiError) { aiError.style.display = 'block'; aiError.style.color = '#e6a817'; aiError.textContent = 'Optimisation paused after structural stage.'; }
         return;
@@ -3122,53 +4013,43 @@ function _subregionFormat(sub) {
   return (sub.length && sub[0] && typeof sub[0].x === 'number') ? '{x,y}' : 'unknown';
 }
 
-function _validControlZonePolygons(region) {
-  const controlZones = Array.isArray(region?.thermalControlZones) ? region.thermalControlZones : [];
-  return controlZones
+function _validVavZonePolygons(region) {
+  const vavZones = Array.isArray(region?.vav_control_zones) ? region.vav_control_zones : [];
+  return vavZones
     .map((cz, i) => ({
       polygon: Array.isArray(cz?.polygon)
         ? cz.polygon.filter(pt => pt && typeof pt.x === 'number' && typeof pt.y === 'number')
         : [],
       load: Number.isFinite(cz?.load) ? cz.load : null,
-      index: i,
+      index: i, // original index into vav_control_zones — preserved through filtering
     }))
     .filter(cz => cz.polygon.length >= 3);
 }
 
-function _getDisplayedThermalRegions(region) {
-  const controlPolys = _validControlZonePolygons(region);
-  if (controlPolys.length > 0) {
-    return {
-      source: 'control',
-      items: controlPolys.map(cz => cz.polygon),
-      loads: controlPolys.map(cz => cz.load),
-    };
-  }
-  const subZones = Array.isArray(region?.subZones) ? region.subZones : [];
+function _getDisplayedVavZones(region) {
+  const vavPolys = _validVavZonePolygons(region);
   return {
-    source: 'sub',
-    items: subZones,
-    loads: [],
+    items: vavPolys.map(cz => cz.polygon),
+    loads: vavPolys.map(cz => cz.load),
+    indices: vavPolys.map(cz => cz.index), // original vav_control_zones indices
   };
 }
 
 function _hasThermalGeometry(region) {
-  return Array.isArray(region?.subZones) && region.subZones.some(sub => Array.isArray(sub) && sub.length >= 3);
+  return Array.isArray(region?.thermal_region_geometry) && region.thermal_region_geometry.some(sub => Array.isArray(sub) && sub.length >= 3);
 }
 
-function _setThermalSelection(store, zoneIndex = null, subZoneIndex = null, subZoneSource = null) {
+function _setThermalSelection(store, zoneIndex = null, vavZoneIndex = null) {
   if (!store?.active) return;
   const fp = store.active;
   if (!Number.isInteger(zoneIndex) || zoneIndex < 0 || zoneIndex >= (fp.Thermal_Zones || []).length) {
     fp.selectedThermalZoneIndex = null;
-    fp.selectedThermalSubZoneIndex = null;
-    fp.selectedThermalSubZoneSource = null;
+    fp.selectedVavZoneIndex = null;
     store.selectedAreaId = null;
     return;
   }
   fp.selectedThermalZoneIndex = zoneIndex;
-  fp.selectedThermalSubZoneIndex = Number.isInteger(subZoneIndex) ? subZoneIndex : null;
-  fp.selectedThermalSubZoneSource = Number.isInteger(subZoneIndex) ? (subZoneSource || 'sub') : null;
+  fp.selectedVavZoneIndex = Number.isInteger(vavZoneIndex) ? vavZoneIndex : null;
   const region = fp.Thermal_Zones[zoneIndex];
   store.selectedAreaId = region?.id ?? null;
 }
@@ -3180,6 +4061,78 @@ function _getSelectedThermalRegion(store) {
   return zones[zi] || null;
 }
 
+// Merge a backend "thermal_zones" payload into fp.Thermal_Zones, preserving
+// UI-only metadata (color/alpha/air_requirement/vavAirRequirements) for any
+// field the backend didn't send a fresh value for. Shared by the staged
+// optimisation flow's applyData() and the single-shot sub-zone recalculation
+// triggered from the Thermal Zones panel.
+function _mergeThermalZonesFromBackend(fp, thermalZones) {
+  if (!Array.isArray(thermalZones) || !thermalZones.length) return;
+  const prevMeta = (fp.Thermal_Zones || []).map(z => ({
+    color: z.color ?? null,
+    alpha: z.alpha ?? null,
+    air_requirement: Number.isFinite(z.air_requirement) ? z.air_requirement : null,
+    vavAirRequirements: Array.isArray(z.vavAirRequirements) ? [...z.vavAirRequirements] : [],
+  }));
+  fp.Thermal_Zones = thermalZones.map(({ thermal_region_geometry, vav_control_zones, ...tz }, i) => ({
+    ...tz,
+    thermal_region_geometry: thermal_region_geometry || [],
+    vav_control_zones: vav_control_zones || [],
+    color: tz.color ?? prevMeta[i]?.color ?? null,
+    alpha: tz.alpha ?? prevMeta[i]?.alpha ?? null,
+    air_requirement: Number.isFinite(tz.air_requirement) ? tz.air_requirement : prevMeta[i]?.air_requirement,
+    vavAirRequirements: Array.isArray(tz.vavAirRequirements)
+      ? tz.vavAirRequirements
+      : (prevMeta[i]?.vavAirRequirements || []),
+  }));
+}
+
+// Re-runs the backend "zones" phase so existing sub-zone (vav_control_zones)
+// boundaries reflect an edited zone's air_requirement, then redraws the
+// canvas. Recomputes every zone's sub-zones (the backend has no per-zone
+// scoping today), not just the edited one.
+let _thermalRecomputeInFlight = false;
+async function _recomputeZoneSubdivisions(store) {
+  if (_thermalRecomputeInFlight) return;
+  const fp = store?.active;
+  if (!fp) return;
+
+  const applyBtn = document.getElementById('applyThermalAirBtn');
+  const inputEl = document.getElementById('thermalAirReqInput');
+  const labelEl = document.getElementById('thermalSelectionLabel');
+  const prevLabel = labelEl ? labelEl.textContent : '';
+  _thermalRecomputeInFlight = true;
+  if (applyBtn) applyBtn.disabled = true;
+  if (inputEl) inputEl.disabled = true;
+  if (labelEl) labelEl.textContent = 'Recalculating sub-zones…';
+
+  try {
+    const planJson = fp.toJSON();
+    const units = fp.units || { length: getUnitLabel() || 'm', pxPerUnit: getPixelsPerUnit() || 1 };
+    const started = await startOptimisation(planJson, units, { phases: ['zones'] });
+    if (!started.ok) {
+      alert(`Sub-zone recalculation failed: ${started.error}`);
+      return;
+    }
+    const result = await pollOptimisation(started.job_id, (phase, data) => {
+      _mergeThermalZonesFromBackend(fp, data?.thermal_zones);
+      if (data?.thermal_zones) refreshThermalZonesList(store);
+      store.notify();
+    }, 2000);
+    if (!result.ok) {
+      if (!result.cancelled) alert(`Sub-zone recalculation failed: ${result.error}`);
+      return;
+    }
+    _mergeThermalZonesFromBackend(fp, result.data?.thermal_zones);
+    if (result.data?.thermal_zones) refreshThermalZonesList(store);
+    store.update(fp);
+  } finally {
+    _thermalRecomputeInFlight = false;
+    if (labelEl && labelEl.textContent === 'Recalculating sub-zones…') labelEl.textContent = prevLabel;
+    refreshThermalEditor(store);
+  }
+}
+
 function refreshThermalEditor(store) {
   const labelEl = document.getElementById('thermalSelectionLabel');
   const inputEl = document.getElementById('thermalAirReqInput');
@@ -3187,8 +4140,7 @@ function refreshThermalEditor(store) {
   if (!labelEl || !inputEl || !applyBtn) return;
 
   const region = _getSelectedThermalRegion(store);
-  const subIdx = store?.active?.selectedThermalSubZoneIndex;
-  const subSource = store?.active?.selectedThermalSubZoneSource;
+  const subIdx = store?.active?.selectedVavZoneIndex;
 
   if (!region) {
     labelEl.textContent = 'Selected: none';
@@ -3211,20 +4163,17 @@ function refreshThermalEditor(store) {
   const nSel = (store._selectedRegions || []).length;
   const multiTag = nSel > 1 ? ` (+${nSel - 1} more region${nSel - 1 !== 1 ? 's' : ''} selected)` : '';
   if (Number.isInteger(subIdx)) {
-    const regionLabel = subSource === 'control' ? 'Control Region' : 'Region';
-    labelEl.textContent = `${zoneLabel} / ${regionLabel} ${subIdx + 1}${multiTag}`;
+    labelEl.textContent = `${zoneLabel} / VAV Zone ${subIdx + 1}${multiTag}`;
   } else {
     labelEl.textContent = `${zoneLabel}${multiTag}`;
   }
 
-  if (!Array.isArray(region.subZoneAirRequirements)) {
-    region.subZoneAirRequirements = [];
+  if (!Array.isArray(region.vavAirRequirements)) {
+    region.vavAirRequirements = [];
   }
 
   const currentAir = Number.isInteger(subIdx)
-    ? (subSource === 'control'
-      ? (Array.isArray(region.thermalControlZones) ? region.thermalControlZones[subIdx]?.load : null)
-      : region.subZoneAirRequirements[subIdx])
+    ? (Array.isArray(region.vav_control_zones) ? region.vav_control_zones[subIdx]?.load : null)
     : (Number.isFinite(region.air_requirement) ? region.air_requirement : null);
 
   inputEl.value = Number.isFinite(currentAir) ? String(currentAir) : '';
@@ -3238,19 +4187,21 @@ function refreshThermalEditor(store) {
       return;
     }
     if (Number.isInteger(subIdx)) {
-      if (subSource === 'control') {
-        if (!Array.isArray(region.thermalControlZones)) region.thermalControlZones = [];
-        const cz = region.thermalControlZones[subIdx];
-        if (cz && typeof cz === 'object') {
-          cz.load = val;
-        }
-      } else {
-        region.subZoneAirRequirements[subIdx] = val;
+      if (!Array.isArray(region.vav_control_zones)) region.vav_control_zones = [];
+      const cz = region.vav_control_zones[subIdx];
+      if (cz && typeof cz === 'object') {
+        cz.load = val;
       }
     } else {
       region.air_requirement = val;
     }
     store.update(store.active);
+    // If this zone's air rate changed and it already has sub-zones, those
+    // sub-zone boundaries were computed for the old load — recalculate them.
+    const hasSubZones = Array.isArray(region.vav_control_zones) && region.vav_control_zones.length > 0;
+    if (!Number.isInteger(subIdx) && hasSubZones) {
+      _recomputeZoneSubdivisions(store);
+    }
   };
 
   // ── Entry points section ──────────────────────────────────────────────────
@@ -3278,7 +4229,7 @@ function refreshThermalEditor(store) {
         // List which regions of this zone are assigned to this entry point.
         const regs = (p.thermalRegions || []).filter(r => r.zoneIndex === zoneIdx);
         const regTag = regs.length > 0
-          ? `<span style="color:var(--text-muted); margin-left:4px;">${regs.map(r => `r${r.subZoneIndex + 1}`).join(', ')}</span>`
+          ? `<span style="color:var(--text-muted); margin-left:4px;">${regs.map(r => `v${(r.vavZoneIndex ?? r.subZoneIndex ?? 0) + 1}`).join(', ')}</span>`
           : '';
         return `<div style="display:flex; justify-content:space-between; align-items:center; font-size:var(--fs-xs); padding:2px 0; border-bottom:1px solid var(--border);">` +
           `<span style="color:var(--text); font-family:var(--font);">${p.id}${regTag}</span>` +
@@ -3291,8 +4242,6 @@ function refreshThermalEditor(store) {
           if (pt) {
             pt.thermalRegions = (pt.thermalRegions || []).filter(r => r.zoneIndex !== zoneIdx);
             pt.thermalZoneIndices = [...new Set((pt.thermalRegions || []).map(r => r.zoneIndex))];
-            pt.thermalSubZoneMap = {};
-            (pt.thermalRegions || []).forEach(r => { pt.thermalSubZoneMap[r.zoneIndex] = r.subZoneIndex; });
             store.update(fp);
           }
         });
@@ -3323,6 +4272,67 @@ function refreshThermalEditor(store) {
   }
 }
 
+function _mergeThermalZones(fp, zoneIndices) {
+  if (!fp || !Array.isArray(fp.Thermal_Zones) || zoneIndices.length < 2) return;
+  const sorted = [...zoneIndices].sort((a, b) => a - b);
+  const targetIdx = sorted[0];
+  const toRemove  = sorted.slice(1);
+  const target = fp.Thermal_Zones[targetIdx];
+
+  // Track VAV offset so entry point vavZoneIndex can be remapped
+  const vavOffsets = new Map();
+  for (const srcIdx of toRemove) {
+    const src = fp.Thermal_Zones[srcIdx];
+    vavOffsets.set(srcIdx, (target.vav_control_zones || []).length);
+    target.thermal_region_geometry = [
+      ...(target.thermal_region_geometry || []),
+      ...(src.thermal_region_geometry   || []),
+    ];
+    target.vav_control_zones = [
+      ...(target.vav_control_zones || []),
+      ...(src.vav_control_zones   || []),
+    ];
+    if (!Number.isFinite(target.air_requirement) && Number.isFinite(src.air_requirement)) {
+      target.air_requirement = src.air_requirement;
+    }
+    if (!target.orientation && src.orientation) target.orientation = src.orientation;
+  }
+
+  // Remove merged zones in descending order to preserve lower indices
+  for (const idx of [...toRemove].reverse()) fp.Thermal_Zones.splice(idx, 1);
+
+  // Build old→new zone index remap
+  const originalLength = fp.Thermal_Zones.length + toRemove.length;
+  const removedSet = new Set(toRemove);
+  const remap = new Map();
+  let shift = 0;
+  for (let i = 0; i < originalLength; i++) {
+    if (removedSet.has(i)) { remap.set(i, targetIdx); shift++; }
+    else                   { remap.set(i, i - shift); }
+  }
+
+  // Update entry point assignments
+  (fp.Points || []).forEach(pt => {
+    if (Array.isArray(pt.thermalRegions)) {
+      const seen = new Set();
+      pt.thermalRegions = pt.thermalRegions.map(r => {
+        const newZone = remap.get(r.zoneIndex) ?? r.zoneIndex;
+        const newVav  = removedSet.has(r.zoneIndex) && vavOffsets.has(r.zoneIndex)
+          ? r.vavZoneIndex + vavOffsets.get(r.zoneIndex) : r.vavZoneIndex;
+        return { ...r, zoneIndex: newZone, vavZoneIndex: newVav };
+      }).filter(r => { const k = `${r.zoneIndex}:${r.vavZoneIndex}`; if (seen.has(k)) return false; seen.add(k); return true; });
+    }
+    if (Array.isArray(pt.thermalZoneIndices)) {
+      pt.thermalZoneIndices = [...new Set(pt.thermalZoneIndices.map(zi => remap.get(zi) ?? zi))];
+    }
+  });
+
+  // Fix selected zone index
+  if (Number.isInteger(fp.selectedThermalZoneIndex) && remap.has(fp.selectedThermalZoneIndex)) {
+    fp.selectedThermalZoneIndex = remap.get(fp.selectedThermalZoneIndex);
+  }
+}
+
 export function refreshThermalZonesList(store) {
   const listEl = document.getElementById('thermalZonesList');
   if (!listEl) return;
@@ -3333,26 +4343,46 @@ export function refreshThermalZonesList(store) {
   const regions = store.active?.Thermal_Zones || [];
   if (regions.length === 0) {
     listEl.innerHTML = '<li style="color:var(--text-muted); font-size:0.85em; padding:6px 0;">No zones yet — run Thermal Zones or Full Optimise to generate.</li>';
+    const mergeBtn = document.getElementById('mergeZonesBtn');
+    if (mergeBtn) mergeBtn.disabled = true;
     return;
+  }
+
+  // Enable merge button when 2+ distinct zones are selected via the per-zone toggle buttons.
+  // _mergeSelection is separate from _selectedRegions (canvas/entry-point selection).
+  const selectedZoneIndices = [...new Set((store._mergeSelection || []).map(r => r.zoneIndex))];
+  const mergeBtn = document.getElementById('mergeZonesBtn');
+  if (mergeBtn) {
+    mergeBtn.disabled = selectedZoneIndices.length < 2;
+    mergeBtn.title = selectedZoneIndices.length < 2
+      ? 'Click ○ next to zones below to select for merge'
+      : `Merge ${selectedZoneIndices.length} selected zones into one`;
+    mergeBtn.onclick = () => {
+      if (!store.active || selectedZoneIndices.length < 2) return;
+      _mergeThermalZones(store.active, selectedZoneIndices);
+      store._mergeSelection = [];
+      store.update(store.active);
+      refreshThermalZonesList(store);
+    };
   }
 
   regions.forEach((region, ri) => {
     const isInternal = region.type === 'internal' || region.orientation === null || region.orientation === undefined;
     const colour = _tzColour(ri, isInternal);
     const selectedZone = store.active?.selectedThermalZoneIndex === ri;
-    const displayedRegions = _getDisplayedThermalRegions(region);
+    const displayedRegions = _getDisplayedVavZones(region);
     const subZones = displayedRegions.items;
-    const displayedSource = displayedRegions.source;
     const unitLabel = store.active?.units?.length || 'mm';
     const zoneArea = subZones.reduce((sum, sub) => sum + _thermalAreaInPlanUnits(store, sub), 0);
     const zoneAreaText = Number.isFinite(zoneArea) ? `${zoneArea.toFixed(2)} ${unitLabel}²` : '—';
 
-    // Badge: true if any currently-selected region belongs to this zone.
+    // inMergeSet: zone is queued for merging via the ○ toggle button
+    const inMergeSet = (store._mergeSelection || []).some(r => r.zoneIndex === ri);
+    // inAssignSet: zone has canvas-selected regions (for entry point assignment)
     const inAssignSet = (store._selectedRegions || []).some(r => r.zoneIndex === ri);
     const li = document.createElement('li');
-    li.style.cssText = `display:flex; align-items:flex-start; gap:6px; padding:4px 0; border-bottom:1px solid #2a2a2a; cursor:pointer; user-select:none; ${selectedZone ? 'background:#182018;' : inAssignSet ? 'background:#1a1a2e;' : ''}`;
-    // Zone list click: select zone for editing only. Region selection is via canvas.
-    li.onclick = (ev) => {
+    li.style.cssText = `display:flex; align-items:flex-start; gap:6px; padding:4px 0; border-bottom:1px solid #2a2a2a; cursor:pointer; user-select:none; ${selectedZone ? 'background:#182018;' : inMergeSet ? 'background:#1a2030;' : ''}`;
+    li.onclick = () => {
       _setThermalSelection(store, ri, null);
       store.update(store.active);
     };
@@ -3361,12 +4391,29 @@ export function refreshThermalZonesList(store) {
     const swatch = document.createElement('span');
     swatch.style.cssText = `display:inline-block; width:12px; height:12px; border-radius:2px; background:${colour}; flex-shrink:0; margin-top:2px;`;
     li.appendChild(swatch);
-    // Assignment-set indicator
+    // Merge-set toggle button — always present
+    const mergeToggle = document.createElement('button');
+    mergeToggle.textContent = inMergeSet ? '⊕' : '○';
+    mergeToggle.title = inMergeSet ? 'Selected for merge — click to deselect' : 'Click to select this zone for merge';
+    mergeToggle.style.cssText = `font-size:11px; color:${inMergeSet ? '#7cb8ff' : '#555'}; background:none; border:none; cursor:pointer; flex-shrink:0; padding:0 2px; line-height:1; margin-top:1px;`;
+    mergeToggle.onclick = (ev) => {
+      ev.stopPropagation();
+      if (!store._mergeSelection) store._mergeSelection = [];
+      const already = store._mergeSelection.some(r => r.zoneIndex === ri);
+      if (already) {
+        store._mergeSelection = store._mergeSelection.filter(r => r.zoneIndex !== ri);
+      } else {
+        store._mergeSelection = [...store._mergeSelection, { zoneIndex: ri }];
+      }
+      refreshThermalZonesList(store);
+    };
+    li.appendChild(mergeToggle);
+    // Canvas-selection badge (entry point assignment)
     if (inAssignSet) {
       const badge = document.createElement('span');
       badge.textContent = '⊕';
-      badge.title = 'Shift-selected for entry point assignment';
-      badge.style.cssText = 'font-size:10px; color:#7cb8ff; flex-shrink:0; margin-top:1px; line-height:1;';
+      badge.title = 'Canvas-selected for entry point assignment';
+      badge.style.cssText = 'font-size:10px; color:#f9a825; flex-shrink:0; margin-top:1px; line-height:1;';
       li.appendChild(badge);
     }
 
@@ -3377,12 +4424,12 @@ export function refreshThermalZonesList(store) {
     const type = region.type || 'perimeter';
     const isIntZone = region.orientation === null || region.orientation === undefined;
     const typeLabel = isIntZone ? 'internal' : type;
-    const vavCount = Array.isArray(region.thermalControlZones) ? region.thermalControlZones.length : 0;
+    const vavCount = Array.isArray(region.vav_control_zones) ? region.vav_control_zones.length : 0;
     const airReqPerArea = Number.isFinite(region.air_requirement)
       ? region.air_requirement
       : (Number.isFinite(region.airRequirement) ? region.airRequirement : null);
-    const summedVavLoad = Array.isArray(region.thermalControlZones)
-      ? region.thermalControlZones.reduce((s, z) => s + (Number.isFinite(z?.load) ? z.load : 0), 0)
+    const summedVavLoad = Array.isArray(region.vav_control_zones)
+      ? region.vav_control_zones.reduce((s, z) => s + (Number.isFinite(z?.load) ? z.load : 0), 0)
       : null;
     const totalLoad = (Number.isFinite(region.total_load) && region.total_load > 0)
       ? region.total_load
@@ -3404,22 +4451,16 @@ export function refreshThermalZonesList(store) {
       subList.style.cssText = 'display:flex; flex-direction:column; gap:2px; margin-left:4px;';
       subZones.forEach((sub, si) => {
         const subBtn = document.createElement('button');
-        const isSelectedSub = selectedZone
-          && store.active?.selectedThermalSubZoneIndex === si
-          && (store.active?.selectedThermalSubZoneSource || 'sub') === displayedSource;
-        const subAir = Array.isArray(region.subZoneAirRequirements) ? region.subZoneAirRequirements[si] : null;
+        const vavIdx = displayedRegions.indices[si];
+        const isSelectedSub = selectedZone && store.active?.selectedVavZoneIndex === vavIdx;
         const subArea = _thermalAreaInPlanUnits(store, sub);
         const subAreaText = Number.isFinite(subArea) ? `${subArea.toFixed(2)} ${unitLabel}²` : '—';
-        if (displayedSource === 'control') {
-          const load = displayedRegions.loads[si];
-          subBtn.textContent = `Control region ${si + 1} · ${subAreaText}${Number.isFinite(load) ? ` · ${Math.round(load)} L/s` : ''}${Number.isFinite(subAir) ? ` · ${Math.round(subAir)} L/s·m²` : ''}`;
-        } else {
-          subBtn.textContent = `Region ${si + 1} · ${subAreaText}${Number.isFinite(subAir) ? ` · ${Math.round(subAir)} L/s·m²` : ''}`;
-        }
+        const load = displayedRegions.loads[si];
+        subBtn.textContent = `VAV zone ${vavIdx + 1} · ${subAreaText}${Number.isFinite(load) ? ` · ${Math.round(load)} L/s` : ''}`;
         subBtn.style.cssText = `font-size:10px; padding:2px 4px; text-align:left; background:${isSelectedSub ? '#223822' : '#1a1a1a'}; color:#bbb; border:1px solid #333; cursor:pointer;`;
         subBtn.onclick = (ev) => {
           ev.stopPropagation();
-          _setThermalSelection(store, ri, si, displayedSource);
+          _setThermalSelection(store, ri, vavIdx);
           store.update(store.active);
         };
         subList.appendChild(subBtn);
@@ -3489,7 +4530,7 @@ function findClosestAreaVertex(fp, point, maxDist = SNAP_TO_NODE_DIST) {
 
   // thermal_zones sub-zone vertices ({x,y} objects)
   (fp.Thermal_Zones || []).forEach(region => {
-    (region.subZones || []).forEach(sub => {
+    (region.thermal_region_geometry || []).forEach(sub => {
       (sub || []).forEach(v => {
         if (v && typeof v.x === 'number' && typeof v.y === 'number') {
           const dx = point.x - v.x;
@@ -3516,11 +4557,10 @@ function pickThermalRegionAtPoint(fp, x, y) {
 
   for (let zi = 0; zi < fp.Thermal_Zones.length; zi++) {
     const region = fp.Thermal_Zones[zi];
-    const displayedRegions = _getDisplayedThermalRegions(region);
-    const subZones = displayedRegions.items;
-    const source = displayedRegions.source;
-    for (let si = 0; si < subZones.length; si++) {
-      const sub = subZones[si];
+    // Only hit-test vav_control_zones — users select VAV zones, not raw geometry polygons.
+    const vavZones = _getDisplayedVavZones(region);
+    for (let si = 0; si < vavZones.items.length; si++) {
+      const sub = vavZones.items[si];
       if (!Array.isArray(sub) || sub.length < 3) continue;
       const poly = sub
         .map(pt => (pt && typeof pt.x === 'number' && typeof pt.y === 'number') ? [toCanvas(pt.x), toCanvas(pt.y)] : null)
@@ -3530,7 +4570,8 @@ function pickThermalRegionAtPoint(fp, x, y) {
       const inside = fp._isPointInPolygon ? fp._isPointInPolygon(x, y, poly) : false;
       const onEdge = fp._isPointOnPolygonEdge ? fp._isPointOnPolygonEdge(x, y, poly, 3) : false;
       if (inside || onEdge) {
-        return { zoneIndex: zi, subZoneIndex: si, subZoneSource: source };
+        // Return the original vav_control_zones index (preserved through polygon filtering).
+        return { zoneIndex: zi, vavZoneIndex: vavZones.indices[si] };
       }
     }
   }

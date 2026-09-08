@@ -1,15 +1,16 @@
 // renderer/drawing/view3d.js
 // 3D visualisation of the active FloorPlan using Three.js + OrbitControls.
 //
-// Renders: extruded boundary walls, core boundaries, columns, exclusion areas
-// and a flat floor plane. Camera is fully orbitable with mouse.
+// Components (added incrementally):
+//   ✓ Floor slab + boundary walls
+//   ○ Core walls
+//   ○ Columns
+//   ○ Structural beams
+//   ○ Duct routing
 
 import * as THREE from '../vendor/three.module.js';
 import { OrbitControls } from '../vendor/OrbitControls.js';
 import { getNodeById } from '../models/floorPlanUtils.js';
-
-const WALL_THICKNESS_RATIO  = 0.008; // fraction of plan footprint size
-const WALL_HEIGHT_RATIO     = 0.15;  // fraction of plan footprint size
 
 export class View3D {
   constructor(container) {
@@ -21,107 +22,76 @@ export class View3D {
     this._rafId      = null;
     this._active     = false;
     this._resizeObserver = null;
-    this._fp         = null;                   // last FloorPlan shown
-    this._heightPx    = null;                  // null = auto (ratio fallback)
+    this._fp         = null;
+    this._heightPx   = null;
   }
 
-  // ── Public API ──────────────────────────────────────────────────────────
+  // ── Public API ─────────────────────────────────────────────────────────────
 
-  /** Render the given FloorPlan in 3D and start the animation loop.
-   * @param {object} fp        Active FloorPlan
-   * @param {number} [heightCm]  Optional initial wall height in centimetres
-   */
   show(fp, heightCm = null) {
+    if (!fp) return;
     if (!this._renderer) this._initRenderer();
     this._renderer.domElement.style.display = '';
     this._active = true;
     this._fp = fp;
-    if (heightCm !== null) this._heightPx = this._cmToPx(heightCm);
+    if (heightCm !== null) this._heightPx = this._cmToPx(fp, heightCm);
     this._buildScene(fp);
     this._startLoop();
   }
 
-  /**
-   * Update the wall height in centimetres and rebuild the scene.
-   * @param {number} cm  Wall height in cm (clamped 270–600)
-   */
   setHeightCm(cm) {
-    this._heightPx = this._cmToPx(Math.max(270, Math.min(600, cm)));
-    if (this._fp && this._active) this._buildScene(this._fp, { preserveView: true });
+    if (!this._fp || !this._active) return;
+    this._heightPx = this._cmToPx(this._fp, Math.max(270, Math.min(600, cm)));
+    this._buildScene(this._fp, { preserveView: true });
   }
 
-  /**
-   * Convert a centimetre value to canvas pixels using the FloorPlan's unit scale.
-   * Falls back to treating 1 px = 1 unit when no scale is configured.
-   */
-  _cmToPx(cm) {
-    const pxPerUnit = this._fp?.units?.pxPerUnit || 1;
-    const unit      = this._fp?.units?.length    || 'm';
-    // How many plan-units fit in 1 cm
-    const unitsPerCm = { mm: 10, cm: 1, m: 0.01, in: 0.3937, ft: 0.032808 }[unit] ?? 10;
-    return cm * unitsPerCm * pxPerUnit;
-  }
-
-  /** Pause the 3D view (hides the WebGL canvas, stops RAF). */
   hide() {
     this._active = false;
     this._stopLoop();
-    if (this._renderer) {
-      this._renderer.domElement.style.display = 'none';
-    }
+    if (this._renderer) this._renderer.domElement.style.display = 'none';
   }
 
-  /** Fully dispose renderer and remove element from DOM. */
   dispose() {
     this._active = false;
     this._stopLoop();
-    if (this._resizeObserver) {
-      this._resizeObserver.disconnect();
-      this._resizeObserver = null;
-    }
-    if (this._controls) {
-      this._controls.dispose();
-      this._controls = null;
-    }
+    if (this._resizeObserver) { this._resizeObserver.disconnect(); this._resizeObserver = null; }
+    if (this._controls)       { this._controls.dispose(); this._controls = null; }
     if (this._renderer) {
       this._renderer.dispose();
       const el = this._renderer.domElement;
       if (el.parentNode) el.parentNode.removeChild(el);
       this._renderer = null;
     }
-    this._scene  = null;
-    this._camera = null;
+    this._scene = this._camera = null;
   }
 
-  // ── Initialisation ──────────────────────────────────────────────────────
+  // ── Renderer init ─────────────────────────────────────────────────────────
 
   _initRenderer() {
-    const w = this._container.clientWidth  || 512;
-    const h = this._container.clientHeight || 512;
+    const w = this._container.clientWidth  || 800;
+    const h = this._container.clientHeight || 600;
 
     this._renderer = new THREE.WebGLRenderer({ antialias: true });
     this._renderer.setPixelRatio(window.devicePixelRatio);
     this._renderer.setSize(w, h);
-    this._renderer.setClearColor(0x1a1a2e);
-    this._renderer.shadowMap.enabled = true;
-    this._renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this._renderer.setClearColor(0x1e1e2e);
 
-    const canvas3d = this._renderer.domElement;
-    canvas3d.style.position = 'absolute';
-    canvas3d.style.top      = '0';
-    canvas3d.style.left     = '0';
-    canvas3d.style.width    = '100%';
-    canvas3d.style.height   = '100%';
-    canvas3d.style.display  = 'none'; // hidden until show() is called
-    this._container.appendChild(canvas3d);
+    const el = this._renderer.domElement;
+    el.style.position = 'absolute';
+    el.style.top      = '0';
+    el.style.left     = '0';
+    el.style.width    = '100%';
+    el.style.height   = '100%';
+    el.style.display  = 'none';
+    this._container.appendChild(el);
 
     this._camera = new THREE.PerspectiveCamera(50, w / h, 0.1, 1e7);
 
-    this._controls = new OrbitControls(this._camera, canvas3d);
-    this._controls.enableDamping  = true;
-    this._controls.dampingFactor  = 0.06;
+    this._controls = new OrbitControls(this._camera, el);
+    this._controls.enableDamping   = true;
+    this._controls.dampingFactor   = 0.06;
     this._controls.screenSpacePanning = false;
-    this._controls.minDistance = 10;
+    this._controls.minDistance     = 5;
 
     this._resizeObserver = new ResizeObserver(() => this._onResize());
     this._resizeObserver.observe(this._container);
@@ -131,27 +101,38 @@ export class View3D {
     if (!this._renderer || !this._camera) return;
     const w = this._container.clientWidth;
     const h = this._container.clientHeight;
+    if (!w || !h) return;
     this._camera.aspect = w / h;
     this._camera.updateProjectionMatrix();
     this._renderer.setSize(w, h);
   }
 
-  // ── Scene construction ──────────────────────────────────────────────────
+  // ── Coordinate helpers ────────────────────────────────────────────────────
+
+  _cmToPx(fp, cm) {
+    const pxPerUnit  = fp.units?.pxPerUnit || 1;
+    const unit       = fp.units?.length    || 'm';
+    const unitsPerCm = { mm: 10, cm: 1, m: 0.01, in: 0.3937, ft: 0.032808 }[unit] ?? 0.01;
+    return cm * unitsPerCm * pxPerUnit;
+  }
+
+  // ── Scene ─────────────────────────────────────────────────────────────────
 
   _buildScene(fp, { preserveView = false } = {}) {
     const prevView = preserveView ? this._captureView() : null;
+
     this._scene = new THREE.Scene();
     const scene = this._scene;
 
-    // ── Bounding box of the plan ───────────────────────────────────────────
+    // ── Bounding box ────────────────────────────────────────────────────────
     const nodes = fp.wall_graph?.nodes || [];
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    nodes.forEach(n => {
+    for (const n of nodes) {
       const x = n.x ?? n[0];
       const y = n.y ?? n[1];
       if (x < minX) minX = x; if (x > maxX) maxX = x;
       if (y < minY) minY = y; if (y > maxY) maxY = y;
-    });
+    }
     if (!isFinite(minX)) { minX = 0; maxX = 512; minY = 0; maxY = 512; }
 
     const planW    = maxX - minX;
@@ -160,57 +141,37 @@ export class View3D {
     const cx       = (minX + maxX) / 2;
     const cy       = (minY + maxY) / 2;
 
-    const WALL_H = this._heightPx !== null ? this._heightPx : planSize * WALL_HEIGHT_RATIO;
-    const WALL_T = Math.max(planSize * WALL_THICKNESS_RATIO, 2);
-
-    // Canvas pixel → Three.js world coordinate helpers.
-    //   canvas.x → world X  (unchanged)
-    //   canvas.y → world Z  (negated: canvas Y grows down, Three.js Z grows toward viewer)
-    //
-    // For THREE.Shape coordinates (extruded along local Z, then rotated by
-    // rotation.x = -π/2 so local Z becomes world Y):
-    //   shape.x  = toX(canvas.x)
-    //   shape.y  = toSY(canvas.y)   NOTE: world Z = -(shape.y) after rotation
-    const toX  = x => x - cx;
+    // Canvas pixel → Three.js world:
+    //   x axis: unchanged (toX)
+    //   y axis: canvas Y grows downward → Three.js Z grows toward viewer (toZ)
+    //   For Shape (extruded along local Z, then rotated -π/2 around X → local Z becomes world Y):
+    //     shape.x = toX,  shape.y = toSY
+    const toX  = x =>  (x - cx);
     const toZ  = y => -(y - cy);
-    const toSY = y =>  (y - cy);  // shape Y before rotation.x = -PI/2
+    const toSY = y =>  (y - cy);
 
-    // ── Lighting ───────────────────────────────────────────────────────────
-    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+    const WALL_H = this._heightPx !== null ? this._heightPx : this._cmToPx(fp, 400);
+    const WALL_T = Math.max(planSize * 0.006, 1.5);
 
-    const sun = new THREE.DirectionalLight(0xfff4d6, 1.0);
-    sun.position.set(planSize * 0.8, planSize, planSize * 0.6);
-    sun.castShadow = true;
-    sun.shadow.camera.near   = 1;
-    sun.shadow.camera.far    = planSize * 4;
-    sun.shadow.camera.left   = -planSize;
-    sun.shadow.camera.right  =  planSize;
-    sun.shadow.camera.top    =  planSize;
-    sun.shadow.camera.bottom = -planSize;
-    sun.shadow.mapSize.set(2048, 2048);
+    // ── Lighting ────────────────────────────────────────────────────────────
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+
+    const sun = new THREE.DirectionalLight(0xfffbe6, 1.2);
+    sun.position.set(planSize * 0.6, planSize * 0.9, planSize * 0.5);
     scene.add(sun);
 
-    const fill = new THREE.DirectionalLight(0xc8d8ff, 0.35);
-    fill.position.set(-planSize, planSize * 0.4, -planSize * 0.5);
+    const fill = new THREE.DirectionalLight(0xc8d8ff, 0.4);
+    fill.position.set(-planSize * 0.5, planSize * 0.3, -planSize * 0.4);
     scene.add(fill);
 
-    // ── Materials ──────────────────────────────────────────────────────────
-    const wireframe = true;
-    const wallMat  = new THREE.MeshLambertMaterial({ color: 0xd4d0c8, wireframe });
-    const coreMat  = new THREE.MeshLambertMaterial({ color: 0xe06060, wireframe });
-    const colMat   = new THREE.MeshLambertMaterial({ color: 0x787878, wireframe });
-    const floorMat = new THREE.MeshLambertMaterial({ color: 0xf2ede0, side: THREE.DoubleSide });
-    const exclMat  = new THREE.MeshLambertMaterial({
-      color: 0xcc3333, transparent: true, opacity: 0.28, side: THREE.DoubleSide, wireframe,
-    });
+    // ── Materials ────────────────────────────────────────────────────────────
+    const wallMat        = new THREE.MeshLambertMaterial({ color: 0xddd8cc });
+    const wallMatGlass   = new THREE.MeshLambertMaterial({ color: 0xa8c8e8, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false });
+    const floorMat       = new THREE.MeshLambertMaterial({ color: 0xf0ebe2, side: THREE.DoubleSide });
+    const coreMat        = new THREE.MeshLambertMaterial({ color: 0xb06060 });
 
-    // ── Floor slab ─────────────────────────────────────────────────────────
-    // Build the boundary polygon in correct edge-traversal order.
-    // Using wall_graph.nodes array order is NOT reliable — when a segment is
-    // split, the new node is appended to the end of the array rather than
-    // inserted at the correct polygon position. Traversing via edge
-    // adjacency always gives the right winding regardless of array order.
-    const boundaryPoly = this._buildOrderedFloorPoly(fp);
+    // ── Floor slab ───────────────────────────────────────────────────────────
+    const boundaryPoly = this._buildOrderedPoly(fp);
     if (boundaryPoly.length >= 3) {
       const shape = new THREE.Shape();
       boundaryPoly.forEach(({ x, y }, i) => {
@@ -218,145 +179,199 @@ export class View3D {
         else         shape.lineTo(toX(x), toSY(y));
       });
       shape.closePath();
-
       const floorMesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), floorMat);
       floorMesh.rotation.x = -Math.PI / 2;
-      floorMesh.receiveShadow = true;
       scene.add(floorMesh);
     }
 
-    // ── Boundary walls ─────────────────────────────────────────────────────
-    (fp.wall_graph?.edges || []).forEach(edge => {
+    // ── Boundary walls ───────────────────────────────────────────────────────
+    // Opaque walls first so they write to the depth buffer before glass is blended.
+    const boundaryEdges = (fp.wall_graph?.edges || []).filter(e => e.wallType !== 'core');
+    for (const edge of boundaryEdges) {
+      if (edge.translucent) continue;
       const n1 = getNodeById(nodes, edge.v1);
       const n2 = getNodeById(nodes, edge.v2);
-      if (!n1 || !n2) return;
-      const seg = this._wallSegment(
+      if (!n1 || !n2) continue;
+      scene.add(this._wallBox(toX(n1.x), toZ(n1.y), toX(n2.x), toZ(n2.y), WALL_H, WALL_T, wallMat));
+    }
+    for (const edge of boundaryEdges) {
+      if (!edge.translucent) continue;
+      const n1 = getNodeById(nodes, edge.v1);
+      const n2 = getNodeById(nodes, edge.v2);
+      if (!n1 || !n2) continue;
+      scene.add(this._wallBox(toX(n1.x), toZ(n1.y), toX(n2.x), toZ(n2.y), WALL_H, WALL_T, wallMatGlass));
+    }
+
+    // ── Core walls ────────────────────────────────────────────────────────────
+    for (const edge of (fp.wall_graph?.edges || [])) {
+      if (edge.wallType !== 'core') continue;
+      const n1 = getNodeById(nodes, edge.v1);
+      const n2 = getNodeById(nodes, edge.v2);
+      if (!n1 || !n2) continue;
+      scene.add(this._wallBox(
         toX(n1.x), toZ(n1.y),
         toX(n2.x), toZ(n2.y),
-        WALL_H, WALL_T, wallMat,
-      );
-      scene.add(seg);
-    });
+        WALL_H, WALL_T, coreMat,
+      ));
+    }
 
-    // ── Core boundary walls ────────────────────────────────────────────────
-    // Core_Boundary items are {Pt_0:[x,y,0], Pt_1:[x,y,0], ...} — the last
-    // stored point is always a duplicate of Pt_0 (the explicit closing point
-    // added by addCoreBoundary).  Drop it so we don't add a zero-length wall.
-    (fp.Core_Boundary || []).forEach(core => {
-      let pts = Object.values(core);
-      if (pts.length < 3) return;
-      // Remove the closing duplicate if present
-      const last = pts[pts.length - 1];
-      const first = pts[0];
-      if (last[0] === first[0] && last[1] === first[1]) pts = pts.slice(0, -1);
-      for (let i = 0; i < pts.length; i++) {
-        const [x1, y1] = pts[i];
-        const [x2, y2] = pts[(i + 1) % pts.length];
-        scene.add(this._wallSegment(toX(x1), toZ(y1), toX(x2), toZ(y2), WALL_H, WALL_T, coreMat));
+    // ── Columns ───────────────────────────────────────────────────────────────
+    // col.x/y are canvas pixels; col.width is in mm (section dimension).
+    const colMat = new THREE.MeshLambertMaterial({ color: 0x4a4a5a });
+    const pxPerUnit = fp.units?.pxPerUnit || 1;
+    const unit      = fp.units?.length    || 'm';
+    const mmPerUnit = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 }[unit] ?? 1000;
+
+    const defaultColPx = Math.max(4, (300 / mmPerUnit) * pxPerUnit); // 300mm fallback
+    for (const col of (fp.Columns || [])) {
+      if (col.x === undefined || col.y === undefined) continue;
+      const wPx = col.width !== undefined ? (col.width / mmPerUnit) * pxPerUnit : defaultColPx;
+      const dPx = col.depth !== undefined ? (col.depth / mmPerUnit) * pxPerUnit : wPx;
+      const geo  = new THREE.BoxGeometry(wPx, WALL_H, dPx);
+      const mesh = new THREE.Mesh(geo, colMat);
+      mesh.position.set(toX(col.x), WALL_H / 2, toZ(col.y));
+      scene.add(mesh);
+    }
+
+    // ── Structural beams ─────────────────────────────────────────────────────
+    // Beams hang from the ceiling: top at WALL_H, bottom at WALL_H - depthPx.
+    // Flange width approximated as depth × 0.5 (no separate width field in data).
+    const beams   = (fp.Beams || []).filter(b => b.start && b.end);
+    const beamMat = new THREE.MeshLambertMaterial({ color: 0x3a3a52 });
+    for (const beam of beams) {
+      const depthPx  = beam.depth !== undefined ? (beam.depth / mmPerUnit) * pxPerUnit : WALL_H * 0.15;
+      const flangePx = depthPx * 0.5;
+      const x1 = toX(beam.start.x), z1 = toZ(beam.start.y);
+      const x2 = toX(beam.end.x),   z2 = toZ(beam.end.y);
+      const length = Math.hypot(x2 - x1, z2 - z1);
+      if (length < 0.5) continue;
+      const geo  = new THREE.BoxGeometry(length, depthPx, flangePx);
+      const mesh = new THREE.Mesh(geo, beamMat);
+      mesh.position.set((x1 + x2) / 2, WALL_H - depthPx / 2, (z1 + z2) / 2);
+      mesh.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
+      scene.add(mesh);
+    }
+
+    // ── Ducts ────────────────────────────────────────────────────────────────
+    // duct[idA, idB, widthM, heightM, flow] — widthM/heightM in plan length units.
+    // All ducts hang from the ceiling by default; segments crossing a beam are
+    // lowered to pass under it (top of duct = bottom of beam).
+    const pointMap = new Map();
+    (fp.Points || []).forEach(p => { if (p.id) pointMap.set(p.id, p); });
+
+    const beamTolPx    = pxPerUnit * 1.1;
+    const PARALLEL_COS = 0.9;
+
+    // Standard 2D signed-area cross product.
+    const cross2d = (ox, oy, px, py, qx, qy) => (px - ox) * (qy - oy) - (py - oy) * (qx - ox);
+    // True only when both segment pairs strictly straddle each other.
+    const segsCross = (ax, ay, bx, by, cx, cy, dx, dy) => {
+      const d1 = cross2d(cx, cy, dx, dy, ax, ay), d2 = cross2d(cx, cy, dx, dy, bx, by);
+      const d3 = cross2d(ax, ay, bx, by, cx, cy), d4 = cross2d(ax, ay, bx, by, dx, dy);
+      return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+             ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+    };
+    const ptSegDist = (px, py, ax, ay, bx, by) => {
+      const dx = bx - ax, dy = by - ay, lenSq = dx * dx + dy * dy;
+      const t  = lenSq < 1e-10 ? 0 : Math.max(0, Math.min(1, ((px-ax)*dx + (py-ay)*dy) / lenSq));
+      return Math.hypot(px - (ax + t*dx), py - (ay + t*dy));
+    };
+
+    // Returns the deepest beam depth (canvas px) that this duct segment must
+    // go under, or 0 when no beam interaction is detected.
+    const ductBeamDepthPx = (pAx, pAy, pBx, pBy) => {
+      const ddx = pBx - pAx, ddy = pBy - pAy;
+      const dlen = Math.hypot(ddx, ddy);
+      let maxDepth = 0;
+      for (const b of beams) {
+        const { x: bsx, y: bsy } = b.start, { x: bex, y: bey } = b.end;
+        const bdx = bex - bsx, bdy = bey - bsy;
+        const blen = Math.hypot(bdx, bdy);
+        if (blen < 1e-6) continue;
+        // Exclude parallel duct segments (running alongside a beam, not across it).
+        if (dlen > 1e-6 && Math.abs((ddx*bdx + ddy*bdy) / (dlen*blen)) > PARALLEL_COS) continue;
+        const crosses = segsCross(pAx, pAy, pBx, pBy, bsx, bsy, bex, bey) ||
+                        Math.min(ptSegDist(pAx, pAy, bsx, bsy, bex, bey),
+                                 ptSegDist(pBx, pBy, bsx, bsy, bex, bey)) <= beamTolPx;
+        if (crosses) maxDepth = Math.max(maxDepth, (b.depth ?? 300) / mmPerUnit * pxPerUnit);
+      }
+      return maxDepth;
+    };
+
+    const RISER_COLS = [0x00bcd4, 0xff9800, 0x8bc34a, 0xe91e63, 0x9c27b0, 0x03a9f4,
+                        0xff5722, 0x4caf50, 0xf44336, 0x3f51b5];
+    const ductMats = (fp.Duct_Plan || []).map((_, ri) =>
+      new THREE.MeshLambertMaterial({ color: RISER_COLS[ri % RISER_COLS.length] })
+    );
+
+    (fp.Duct_Plan || []).forEach((riser, ri) => {
+      const mat = ductMats[ri];
+      for (const d of (riser.ducts || [])) {
+        if (d.length !== 5) continue;
+        const [idA, idB, widthM, heightM] = d;
+        const pA = pointMap.get(idA), pB = pointMap.get(idB);
+        if (!pA || !pB) continue;
+
+        const widthPx  = widthM  * pxPerUnit;
+        const heightPx = heightM * pxPerUnit;
+
+        // Vertical position: hang from ceiling, drop below any crossed beam.
+        const beamDropPx = ductBeamDepthPx(pA.x, pA.y, pB.x, pB.y);
+        const centerY    = WALL_H - beamDropPx - heightPx / 2;
+
+        const x1 = toX(pA.x), z1 = toZ(pA.y);
+        const x2 = toX(pB.x), z2 = toZ(pB.y);
+        const length = Math.hypot(x2 - x1, z2 - z1);
+        if (length < 0.5) continue;
+
+        const geo  = new THREE.BoxGeometry(length, heightPx, widthPx);
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set((x1 + x2) / 2, centerY, (z1 + z2) / 2);
+        mesh.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
+        scene.add(mesh);
       }
     });
 
-    // ── Columns (extruded polygons) ────────────────────────────────────────
-    (fp.Columns || []).forEach(col => {
-      const pts = Object.values(col);
-      if (pts.length < 3) return;
-      const shape = new THREE.Shape();
-      pts.forEach(([x, y], i) => {
-        if (i === 0) shape.moveTo(toX(x), toSY(y));
-        else         shape.lineTo(toX(x), toSY(y));
-      });
-      shape.closePath();
-      const geo  = new THREE.ExtrudeGeometry(shape, { depth: WALL_H, bevelEnabled: false });
-      const mesh = new THREE.Mesh(geo, colMat);
-      mesh.rotation.x = -Math.PI / 2;
-      mesh.castShadow    = true;
-      mesh.receiveShadow = true;
-      scene.add(mesh);
-    });
-
-    // ── Exclusion / temperature areas (floor markers) ──────────────────────
-    const exclAreas = [
-      ...(fp.Exclusion_Areas || []),
-      ...(fp.areas || []).filter(a => a.label && a.label !== 'boundary'),
-    ];
-    exclAreas.forEach(area => {
-      const pts = area.vertices;
-      if (!pts || pts.length < 3) return;
-      const shape = new THREE.Shape();
-      pts.forEach(([x, y], i) => {
-        if (i === 0) shape.moveTo(toX(x), toSY(y));
-        else         shape.lineTo(toX(x), toSY(y));
-      });
-      const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), exclMat);
-      mesh.rotation.x = -Math.PI / 2;
-      mesh.position.y = 2; // float slightly above floor to avoid z-fighting
-      scene.add(mesh);
-    });
-
-    // ── Ground reference grid ──────────────────────────────────────────────
-    const grid = new THREE.GridHelper(planSize * 2.5, 20, 0x3a4a5a, 0x2a3445);
-    grid.position.y = -3;
+    // ── Ground grid ──────────────────────────────────────────────────────────
+    const grid = new THREE.GridHelper(planSize * 2.5, 20, 0x404055, 0x2a2a3a);
+    grid.position.y = -1;
     scene.add(grid);
 
-    // ── Position camera ────────────────────────────────────────────────────
+    // ── Camera ────────────────────────────────────────────────────────────────
     if (prevView) {
       this._restoreView(prevView);
     } else {
-      const target = new THREE.Vector3(0, WALL_H * 0.3, 0);
+      const target = new THREE.Vector3(0, WALL_H * 0.4, 0);
       this._controls.target.copy(target);
-      this._camera.position.set(planSize * 0.55, planSize * 0.45, planSize * 0.75);
+      this._camera.position.set(planSize * 0.5, planSize * 0.5, planSize * 0.7);
       this._camera.lookAt(target);
       this._controls.update();
     }
   }
 
-  // ── Geometry helpers ────────────────────────────────────────────────────
+  // ── Geometry helpers ──────────────────────────────────────────────────────
 
-  /**
-   * Traverse wall_graph edges to produce boundary polygon vertices in
-   * correct polygon order.
-   *
-   * Why not just iterate wall_graph.nodes?
-   * Splitting a segment appends the new node at the END of the nodes
-   * array instead of inserting it between the two halves.  The nodes
-   * array order therefore diverges from polygon-traversal order the
-   * moment any segment has been split, which earcut triangulates as a
-   * self-intersecting polygon and produces missing triangles.
-   *
-   * Supports both formats:
-   *   - Newer: node = {id, x, y},  edge.v1 / edge.v2 = string ID
-   *   - Legacy: node = [x, y],     edge.v1 / edge.v2 = [x, y] array
-   */
-  _buildOrderedFloorPoly(fp) {
+  _buildOrderedPoly(fp) {
     const nodes = fp.wall_graph?.nodes || [];
     const edges = fp.wall_graph?.edges || [];
-    if (nodes.length < 3 || edges.length < 3) return [];
 
-    // ── Build a stable key for each node ────────────────────────────────
-    const nodeKey = n => {
-      if (n?.id)                         return n.id;
-      if (Array.isArray(n))              return `${n[0]},${n[1]}`;
-      if (n?.x !== undefined)            return `${n.x},${n.y}`;
-      return null;
-    };
-    const edgeKey = ref => {
-      if (typeof ref === 'string')       return ref;          // modern: ID string
-      if (ref?.id)                       return ref.id;
-      if (Array.isArray(ref))            return `${ref[0]},${ref[1]}`;
-      if (ref?.x !== undefined)          return `${ref.x},${ref.y}`;
-      return null;
-    };
+    // Only include boundary edges (skip core edges)
+    const boundaryEdges = edges.filter(e => !e.wallType || e.wallType === 'boundary');
+    if (nodes.length < 3 || boundaryEdges.length < 3) {
+      return nodes.map(n => ({ x: n.x ?? n[0], y: n.y ?? n[1] }));
+    }
 
-    // ── key → {x, y} coordinate lookup ──────────────────────────────────
+    const nodeKey = n => n?.id ?? (Array.isArray(n) ? `${n[0]},${n[1]}` : `${n.x},${n.y}`);
+    const edgeKey = r => typeof r === 'string' ? r : (r?.id ?? (Array.isArray(r) ? `${r[0]},${r[1]}` : `${r.x},${r.y}`));
+
     const coordOf = new Map();
     nodes.forEach(n => {
       const k = nodeKey(n);
       if (k) coordOf.set(k, { x: n.x ?? n[0], y: n.y ?? n[1] });
     });
 
-    // ── Undirected adjacency list ────────────────────────────────────────
     const adj = new Map();
-    edges.forEach(e => {
+    boundaryEdges.forEach(e => {
       const u = edgeKey(e.v1), v = edgeKey(e.v2);
       if (!u || !v) return;
       if (!adj.has(u)) adj.set(u, []);
@@ -365,10 +380,8 @@ export class View3D {
       adj.get(v).push(u);
     });
 
-    // ── Walk the polygon starting from node[0] ───────────────────────────
     const startKey = nodeKey(nodes[0]);
     if (!startKey || !adj.has(startKey)) {
-      // Fallback: node array order
       return nodes.map(n => ({ x: n.x ?? n[0], y: n.y ?? n[1] }));
     }
 
@@ -384,46 +397,36 @@ export class View3D {
       cur = next;
     }
 
-    // If traversal found fewer than 3 vertices, fall back to array order
-    return poly.length >= 3
-      ? poly
-      : nodes.map(n => ({ x: n.x ?? n[0], y: n.y ?? n[1] }));
+    return poly.length >= 3 ? poly : nodes.map(n => ({ x: n.x ?? n[0], y: n.y ?? n[1] }));
   }
 
-  /**
-   * Create a wall panel (BoxGeometry) spanning (x1, z1) → (x2, z2)
-   * at the given height and thickness.
-   */
-  _wallSegment(x1, z1, x2, z2, height, thickness, material) {
+  _wallBox(x1, z1, x2, z2, height, thickness, material) {
     const length = Math.hypot(x2 - x1, z2 - z1);
     if (length < 0.5) return new THREE.Object3D();
-
     const geo  = new THREE.BoxGeometry(length, height, thickness);
     const mesh = new THREE.Mesh(geo, material);
     mesh.position.set((x1 + x2) / 2, height / 2, (z1 + z2) / 2);
     mesh.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
-    mesh.castShadow    = true;
-    mesh.receiveShadow = true;
     return mesh;
   }
 
   _captureView() {
     if (!this._camera || !this._controls) return null;
     return {
-      position: this._camera.position.clone(),
+      position:   this._camera.position.clone(),
       quaternion: this._camera.quaternion.clone(),
-      target: this._controls.target.clone(),
+      target:     this._controls.target.clone(),
     };
   }
 
-  _restoreView(view) {
-    this._camera.position.copy(view.position);
-    this._camera.quaternion.copy(view.quaternion);
-    this._controls.target.copy(view.target);
+  _restoreView({ position, quaternion, target }) {
+    this._camera.position.copy(position);
+    this._camera.quaternion.copy(quaternion);
+    this._controls.target.copy(target);
     this._controls.update();
   }
 
-  // ── Render loop ─────────────────────────────────────────────────────────
+  // ── Render loop ───────────────────────────────────────────────────────────
 
   _startLoop() {
     const loop = () => {

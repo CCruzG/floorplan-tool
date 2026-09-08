@@ -57,7 +57,7 @@ export const DrawingService = {
     // Thermal zones (BuildWeave segmentation/zone results) — behind walls
     if (fp.layers?.Thermal_Zones !== false) {
       R.drawThermalZones(ctx, fp);
-      R.drawThermalControlZones(ctx, fp);
+      if (fp.layers?.VAV_Control_Zones !== false) R.drawThermalControlZones(ctx, fp);
     }
     if (fp.layers?.Exclusion_Areas !== false) {
       R.drawExclusionAreas(ctx, fp);
@@ -99,6 +99,7 @@ export const DrawingService = {
     // Duct plan (BuildWeave duct routing results) — on top of grid
     if (fp.layers?.Duct_Plan !== false) {
       R.drawDuctPlan(ctx, fp);
+      R.drawBuildupWarnings(ctx, fp);
     }
     R.drawEntrances(ctx, fp);
     if (options.showVertices) R.drawVertices(ctx, fp);
@@ -151,6 +152,11 @@ export const DrawingService = {
     }
 
     if (_hasVP) ctx.restore();
+
+    // HUD elements — screen space, outside the pan/zoom transform, so they
+    // stay fixed on the canvas rather than moving/resizing with the plan.
+    R.drawScaleBar(ctx, fp, _vp?.scale ?? 1);
+    R.drawNorthSymbol(ctx);
   },
 
   // keep convenient re-exports for existing callers

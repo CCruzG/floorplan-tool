@@ -168,7 +168,7 @@ ipcMain.handle('save-floorplan-silent', async (event, { filePath, payload }) => 
     await fs.writeFile(filePath, json, 'utf-8');
     return { success: true, path: filePath };
   } catch (err) {
-    console.error('Failed to save floorplan silently:', err);
+    console.error('[main/save] FAILED:', err);
     return { success: false, error: String(err) };
   }
 });

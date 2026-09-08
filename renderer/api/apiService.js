@@ -10,7 +10,12 @@
  * runOptimisation(fp, opts) → Promise<{ ok, data?, error? }>
  */
 
-const API_BASE = 'http://127.0.0.1:5001';
+// In dev (npm run web), Vite exposes VITE_API_BASE from .env.
+// In production builds, set VITE_API_BASE='' so all API calls go to
+// the same origin (nginx proxies /health, /run, /status, /cancel to Flask).
+const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE !== undefined)
+  ? import.meta.env.VITE_API_BASE
+  : 'http://127.0.0.1:5001';
 
 // ── coordinate helpers ───────────────────────────────────────────────────────
 
@@ -147,26 +152,26 @@ export function floorplanToInstance(planJson, units) {
   if (rawThermalZones.length) {
     // Build per-zone region→entry-point assignments from planJson.grid_points.
     // Uses thermalRegions (new format) with fallback to thermalZoneIndices (legacy).
-    // entriesByZone[zi] = Map<subZoneIndex|null, ptId> (last writer wins per sub-zone).
-    const entriesByZone = {};  // zi -> { subZoneAssignments: [{subZoneIndex, ptId}], ptIds: Set }
+    const entriesByZone = {};  // zi -> { regions: [{vavZoneIndex, ptId}], ptIds: Set }
     (planJson.grid_points || []).forEach(p => {
       if (!p.entryPoint) return;
       if (Array.isArray(p.thermalRegions) && p.thermalRegions.length > 0) {
         p.thermalRegions.forEach(r => {
           const e = entriesByZone[r.zoneIndex] || (entriesByZone[r.zoneIndex] = { regions: [], ptIds: new Set() });
-          e.regions.push({ subZoneIndex: r.subZoneIndex, ptId: p.id });
+          // Accept both vavZoneIndex (new) and subZoneIndex (legacy) for backward compat.
+          e.regions.push({ vavZoneIndex: r.vavZoneIndex ?? r.subZoneIndex, ptId: p.id });
           e.ptIds.add(p.id);
         });
       } else {
         (Array.isArray(p.thermalZoneIndices) ? p.thermalZoneIndices : []).forEach(zi => {
           const e = entriesByZone[zi] || (entriesByZone[zi] = { regions: [], ptIds: new Set() });
-          e.regions.push({ subZoneIndex: null, ptId: p.id });
+          e.regions.push({ vavZoneIndex: null, ptId: p.id });
           e.ptIds.add(p.id);
         });
       }
     });
 
-    const normalizeSubGeom = zone => ((zone.thermal_region_geometry || zone.subZones) || []).map(sub =>
+    const normalizeSubGeom = zone => (zone.thermal_region_geometry || []).map(sub =>
       (sub || [])
         .map(pt => {
           if (!pt) return null;
@@ -179,7 +184,7 @@ export function floorplanToInstance(planJson, units) {
 
     instance.thermal_zones = rawThermalZones.map((zone, i) => {
       const assigned = entriesByZone[i];
-      const baseVavZones = zone.vav_control_zones || zone.thermalControlZones || [];
+      const baseVavZones = zone.vav_control_zones || [];
 
       if (!assigned || assigned.regions.length === 0) {
         // No user assignments — preserve backend-provided entry candidates as-is.
@@ -200,26 +205,45 @@ export function floorplanToInstance(planJson, units) {
           entry_groups.push({ candidates: [ptId] });
         }
       });
+      const nUserGroups = entry_groups.length;
 
-      // Map sub-zone index → entry group index based on user's region assignments.
-      const subZoneToGroup = {};
-      assigned.regions.forEach(({ subZoneIndex, ptId }) => {
-        if (subZoneIndex != null) subZoneToGroup[subZoneIndex] = ptIdToGroupIdx[ptId];
+      // Map vav_control_zone index → entry group index based on user's assignments.
+      const vavZoneToGroup = {};
+      assigned.regions.forEach(({ vavZoneIndex, ptId }) => {
+        if (vavZoneIndex != null) vavZoneToGroup[vavZoneIndex] = ptIdToGroupIdx[ptId];
       });
 
-      // Patch vav_control_zones entry_point to match user's sub-zone→entry-group mapping.
-      const updatedVavZones = baseVavZones.map((vz, sv) =>
-        sv in subZoneToGroup ? { ...vz, entry_point: subZoneToGroup[sv] } : vz
-      );
+      // For unassigned VAV zones, carry forward the original riser-based entry grouping.
+      // Each unique original riser index that has at least one unassigned zone gets a new
+      // solver-free entry group using the original full candidate pool — so the solver can
+      // still pick the best physical position for those groups.
+      const origEntryNum = zone.entry_number || 1;
+      const origCandidates = Array.isArray(zone.entry_candidates) && zone.entry_candidates.length
+        ? zone.entry_candidates
+        : (planJson.grid_points || []).filter(p => p.entryPoint).map(p => p.id);
+      const origGroupRemapping = {};  // original riser index → new entry_groups index
+
+      const updatedVavZones = baseVavZones.map((vz, vi) => {
+        if (vi in vavZoneToGroup) {
+          return { ...vz, entry_point: vavZoneToGroup[vi] };
+        }
+        // Clamp stale riser entry_point to a valid range before remapping.
+        const origRiser = typeof vz.entry_point === 'number' && vz.entry_point >= 0 && vz.entry_point < origEntryNum
+          ? vz.entry_point : 0;
+        if (!(origRiser in origGroupRemapping)) {
+          origGroupRemapping[origRiser] = entry_groups.length;
+          entry_groups.push({ candidates: origCandidates });
+        }
+        return { ...vz, entry_point: origGroupRemapping[origRiser] };
+      });
 
       return {
         ...zone,
         thermal_region_geometry: normalizeSubGeom(zone),
         vav_control_zones: updatedVavZones,
-        // entry_groups: per-group single-candidate sets — forces solver to use user's assignment.
         entry_groups,
         entry_number: entry_groups.length,
-        entry_candidates: [...assigned.ptIds],
+        entry_candidates: [...new Set([...origCandidates, ...assigned.ptIds])],
       };
     });
   }
