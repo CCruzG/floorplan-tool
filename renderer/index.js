@@ -4,6 +4,7 @@ import { FloorPlanStore } from './state/store.js';
 import { FloorPlan } from './models/FloorPlan.js';
 import { DrawingService } from './drawing/drawingService.js';
 import { bindUI } from './ui/ui.js';
+import { initHelp } from './help/help.js';
 import { setScalePixelsPerUnit } from '../config.js';
 
 const store = new FloorPlanStore();
@@ -80,6 +81,9 @@ store.onChange(() => {
 
 // Bind UI events (will update mouse and call store.update as needed)
 bindUI(store, canvas, mouse);
+
+// Wire the Help & how-to modal (self-contained, content in help/help.js)
+initHelp();
 
 // Keep the canvas bitmap pixel-aligned to its CSS size as the panel resizes.
 // This must happen after bindUI so the resize fires into a fully wired store.

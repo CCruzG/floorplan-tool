@@ -91,7 +91,9 @@ function _snapGrid(coord, intervalPx) {
  * properties, or an empty-state message when nothing is selected.
  */
 function refreshInspector(fp, store) {
-  const panel = document.getElementById('inspectorPanel');
+  // Write into the inner body, not the panel itself, so the persistent
+  // "Properties" panel-label survives these innerHTML rewrites.
+  const panel = document.getElementById('inspectorBody');
   if (!panel) return;
 
   // ── Buildup Inspector ──────────────────────────────────────────────────────

@@ -19,6 +19,9 @@ package-lock.json
 .env
 thread.md
 
+# graphify (generated knowledge-graph output)
+graphify-out/
+
 # OS
 .DS_Store
 Thumbs.db

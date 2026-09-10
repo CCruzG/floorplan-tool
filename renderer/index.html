@@ -31,6 +31,7 @@
       <span id="serverStatusDot" class="server-dot dot-starting"></span>
       <span id="serverStatusLabel" class="server-label">starting…</span>
     </div>
+    <button id="helpBtn" title="Help &amp; how-to (Esc to close)" aria-label="Help">?</button>
   </div>
 
   <!-- Main App -->
@@ -222,6 +223,18 @@
       </div>
     </div>
 
+    <!-- Help / how-to modal (content populated from renderer/help/help.js) -->
+    <div id="helpModal" class="floating-modal" style="display:none;">
+      <div class="modal-header">
+        <span class="modal-title">Help &amp; How-To</span>
+        <button id="closeHelpModalBtn" class="modal-close">×</button>
+      </div>
+      <div class="help-layout">
+        <nav id="helpToc" class="help-toc"></nav>
+        <div id="helpContent" class="help-content"></div>
+      </div>
+    </div>
+
     <!-- Top block: canvas + JSON -->
     <div id="canvasAndJson">
       <div id="canvasPanel">
@@ -274,6 +287,7 @@
 
       <div id="panelResizeHandle"></div>
       <div id="jsonPanel" class="panel">
+        <div class="panel-label">Results</div>
         <div class="panel-tabs">
           <button type="button" class="panel-tab active" data-panel-tab="dashboard">Dashboard</button>
           <button type="button" class="panel-tab" data-panel-tab="snapshots">Snapshots</button>
@@ -305,7 +319,8 @@
     <div id="bottomPanels">
 
       <div id="inspectorPanel" class="panel">
-        <p class="inspector-empty">Properties (Nothing Selected)</p>
+        <div class="panel-label">Properties</div>
+        <div id="inspectorBody"><p class="inspector-empty">Nothing selected</p></div>
       </div>
 
       <div id="thermalZonesPanel" class="panel">
@@ -363,6 +378,7 @@
       </div>
 
       <div id="layersPanel" class="panel">
+        <div class="panel-label">Display</div>
         <div class="panel-tabs">
           <button type="button" class="panel-tab active" data-display-tab="grid">Grid</button>
           <button type="button" class="panel-tab" data-display-tab="layers">Layers</button>
