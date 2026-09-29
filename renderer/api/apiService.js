@@ -268,6 +268,24 @@ export function floorplanToInstance(planJson, units) {
     });
   }
 
+  // ── mechanical components: existing duct plan (risers + VAV boxes) ─────────
+  // Round-trips the backend's own duct_plan verbatim — grid-point-id edges, metre
+  // dims, l/s flow. Each per-riser plan already nests its riser (entryPoint) and
+  // vav boxes, so those ride along; nothing to convert. The backend overwrites this
+  // on a normal solve and only reads it for reuse / reverse flows, so sending it
+  // never perturbs a structural→HVAC run.
+  // The 2.x schema (FloorPlan.toJSON) nests the plan under mechanical_components,
+  // not a top-level Duct_Plan key — read it from there.
+  const rawDuctPlan = Array.isArray(planJson.mechanical_components?.duct_plan)
+    ? planJson.mechanical_components.duct_plan
+    : [];
+  if (rawDuctPlan.length) {
+    instance.mechanical_components = {
+      ...(instance.mechanical_components || {}),
+      duct_plan: rawDuctPlan,
+    };
+  }
+
   // ── required wrapper fields (new in feat/gui_input) ──────────────────────
   // load_data() asserts these keys exist before merging structural/mechanical data.
   if (!instance.structural_components) instance.structural_components = {};

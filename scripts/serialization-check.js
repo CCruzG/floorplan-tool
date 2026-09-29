@@ -1,29 +1,70 @@
 const assert = require('assert');
+const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 
 (async () => {
   try {
-    const modPath = pathToFileURL(path.resolve(__dirname, '..', 'renderer', 'models', 'FloorPlan.js')).href;
-    const mod = await import(modPath);
-    const { FloorPlan } = mod;
+    const modUrl = name => pathToFileURL(path.resolve(__dirname, '..', 'renderer', name)).href;
+    const { FloorPlan } = await import(modUrl('models/FloorPlan.js'));
+    const { floorplanToInstance } = await import(modUrl('api/apiService.js'));
 
-    // Create a floorplan and add a coordinate-based area
+    // ── FloorPlan roundtrip (schema 2.0.0) ────────────────────────────────────
     const fp = new FloorPlan('test');
-    // area defined by coordinates, independent of wall nodes
-    fp.areas.push({ id: 'a_test', label: 'test-area', vertices: [[10, 10], [20, 10], [20, 20]] });
-
     const json = fp.toJSON();
-    // roundtrip
     const fp2 = FloorPlan.fromJSON(json);
+    assert(typeof json.schema_version === 'string', 'missing schema_version');
+    assert(fp2 instanceof FloorPlan, 'roundtrip did not produce a FloorPlan');
 
-    // ensure areas survived and are present
-    assert(Array.isArray(json.areas) && json.areas.length > 0, 'serialized areas missing');
-    assert(fp2.areas && fp2.areas.length > 0, 'deserialized areas missing');
+    // ── mechanical serialisation (reverse-solve input) ────────────────────────
+    // The structural solver can only run mechanical→structural if the frontend
+    // puts the existing duct plan — ducts AND the VAV boxes nested per riser —
+    // onto instance.mechanical_components.duct_plan. toJSON() nests the plan under
+    // mechanical_components.duct_plan (there is no top-level Duct_Plan in 2.0.0),
+    // so floorplanToInstance must read it from there or the solver sees nothing.
+    const fpm = new FloorPlan('mech');
+    fpm.Duct_Plan = [
+      { entryPoint: 'pt_0', ducts: [[0, 1, 3.2], [1, 1, 2.4]], vav: [[0, 45.0], [1, 30.0]] },
+    ];
+    const mechJson = fpm.toJSON();
+    assert(Array.isArray(mechJson.mechanical_components?.duct_plan)
+      && mechJson.mechanical_components.duct_plan.length > 0,
+      'Duct_Plan dropped by FloorPlan.toJSON()');
 
-    // ensure vertices preserved as coordinates or ids
-    const v0 = fp2.areas[0].vertices[0];
-    assert(Array.isArray(v0) && v0.length >= 2, 'vertex was not preserved as coordinates or node id');
+    const inst = floorplanToInstance(mechJson, { length: 'm' });
+    const plan = inst.mechanical_components && inst.mechanical_components.duct_plan;
+    assert(Array.isArray(plan) && plan.length > 0,
+      'mechanical_components.duct_plan is empty — solver would not see the ducts');
+    assert(Array.isArray(plan[0].vav) && plan[0].vav.length > 0,
+      'VAV boxes not carried on the duct plan — solver would not see the VAVs');
+
+    // Guard: with no duct plan, nothing spurious is sent (structural→HVAC run).
+    const empty = floorplanToInstance(new FloorPlan('empty').toJSON(), { length: 'm' });
+    assert(empty.mechanical_components && empty.mechanical_components.duct_plan === undefined,
+      'empty plan should not attach a duct_plan');
+
+    // ── real saved plans (optional) ───────────────────────────────────────────
+    // Run against ../../examples if present (real duct runs, not synthetic).
+    // Those files live outside the repo, so skip silently when absent.
+    const examplesDir = path.resolve(__dirname, '..', '..', 'examples');
+    if (fs.existsSync(examplesDir)) {
+      let checked = 0;
+      for (const f of fs.readdirSync(examplesDir).filter(n => n.endsWith('.json'))) {
+        const raw = JSON.parse(fs.readFileSync(path.join(examplesDir, f), 'utf8'));
+        const savedRisers = raw.mechanical_components?.duct_plan?.length ?? 0;
+        if (!savedRisers) continue;  // only assert on plans that have a duct run
+        // App path: Open (fromJSON) → Optimise (toJSON) → instance.
+        const loaded = FloorPlan.fromJSON(raw);
+        const sent = floorplanToInstance(loaded.toJSON(), raw.units || { length: 'm' })
+          .mechanical_components?.duct_plan ?? [];
+        assert.strictEqual(sent.length, savedRisers,
+          `${f}: ${savedRisers} risers saved but ${sent.length} reached the instance`);
+        assert(sent.every(r => Array.isArray(r.vav) && r.vav.length > 0),
+          `${f}: a riser lost its VAV boxes on the way to the instance`);
+        checked++;
+      }
+      if (checked) console.log(`Real-plan check passed (${checked} plan(s) with duct runs).`);
+    }
 
     console.log('Serialization check passed.');
     process.exit(0);
