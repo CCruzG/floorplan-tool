@@ -13,6 +13,8 @@ This is an early-stage design tool for the **structural and mechanical services*
 
 It follows a **kit-of-parts** approach: beams, columns, slabs and ducts are drawn from a costed catalogue, so the numbers on the dashboard reflect buildable components rather than abstract geometry.
 
+The costs shown are for comparison between options, not final budgets: **mechanical costs represent primary ductwork only** and do not reflect the total cost of the mechanical services to the floor, and **structural costs are an estimate**.
+
 > The tool is a decision aid for early design coordination — it informs choices about structure and services, it does not produce construction documentation.
 
 ## The workflow
@@ -49,11 +51,11 @@ If you are tracing over an imported reference image, use **Calibrate Scale** ins
 
 ## 3 · Draw Core
 
-**Draw Core** defines the service cores — lift shafts, stairs and riser groups — as closed polygons inside the boundary. Cores are treated as voids: the grid is not placed inside them, and they are where duct risers drop into the plate.
+**Draw Core** defines the service cores — lift shafts, stairs and riser groups — as closed polygons inside the boundary. Cores are treated as voids: the grid is not placed inside them, and they are where duct floor branch takeoffs are located.
 
 Draw the core outline the same way as the boundary, then press **Finish Core** to close it. You can place more than one core.
 
-> Core position matters for duct routing: entry points (riser drops) are taken from the core edges, so a central core and a perimeter core produce very different duct solutions.
+> Core position matters for duct routing: floor takeoffs are taken from the core edges, so a central core and a perimeter core produce very different duct solutions.
 
 ## 4 · Place Door
 
@@ -65,13 +67,13 @@ You can import a PNG, JPG or PDF to trace over — architectural plans, sketches
 
 ## 5 · Place Grid
 
-**Place Grid…** discretises the plate into a regular grid of points. These points are what the optimiser reasons about — candidate locations for columns, mechanical equipment and duct entry.
+**Place Grid…** discretises the plate into a regular grid of points. These points are what the optimiser reasons about — candidate locations for columns, mechanical equipment and duct floor takeoffs.
 
 Each grid point carries flags that control what may sit on it:
 
 - **column** / **beam** — eligible for structure.
 - **mechanical** — eligible for services equipment and duct routing.
-- **entry point** — a riser/entry location (typically on a core edge).
+- **floor takeoff** — a floor branch takeoff location (typically on a core edge).
 
 Use **exclusion zones** to keep the grid out of areas that must stay clear. Set the grid spacing in the modal before generating.
 
@@ -83,15 +85,17 @@ Use **exclusion zones** to keep the grid out of areas that must stay clear. Set 
 
 ## 6b · Duct Settings
 
-**Duct Settings…** configures the duct-routing stage — air-flow rates and the parameters that govern how risers, branches and fittings are placed. Air-flow rate can be edited per unit (l/s·m²) in the criteria panel and per thermal region on the canvas.
+**Duct Settings…** configures the duct-routing stage — air-flow rates and the parameters that govern how floor takeoffs, branches and fittings are placed. Air-flow rate can be edited per unit (l/s·m²) in the criteria panel and per thermal region on the canvas.
 
-## Thermal zones & entry points
+## Thermal zones & floor takeoffs
 
 The thermal stage groups the plate into **VAV control zones**. You can edit flow values per region, and they are reflected on the canvas. Once zones are generated, the canvas shows only the VAV control zones to keep the view readable.
 
-**Entry points** (riser drops) can be assigned to thermal zones and, if you want to override the optimiser, **pinned** manually — a pinned entry point is used as a hard location rather than a candidate. Use **Clear Entry Point Assignment** to release manual pins; assignments also auto-clear when you re-optimise the thermal zones.
+**Floor takeoffs** (riser drops) can be assigned to serve particular thermal zones and, if you want to override the optimiser, **pinned** manually — a pinned floor takeoff is used as a hard location rather than a candidate. Use **Clear Entry Point Assignment** to release manual pins; assignments also auto-clear when you re-optimise the thermal zones.
 
-> If a duct run reports "no feasible plan", check that entry points are flagged and not all sharing a single location — the router needs a distinct entry per zone group.
+> **Terminology:** the interface labels floor takeoffs as **Entry Points** (the inspector flag, the *Assign Entry Point* button, the *Entry Points* layer, the *Risers* count on the dashboard). The terms are used interchangeably — they all refer to the floor branch takeoff location where a riser drops onto the plate.
+
+> If a duct run reports "no feasible plan", check that floor takeoffs are flagged and not all sharing a single location — the router needs a distinct takeoff per zone group.
 
 ## 7 · Running optimisation
 
@@ -99,7 +103,7 @@ Run the stages in order, or all at once:
 
 - **Structure** — places beams, columns and slab.
 - **Thermal Zones** — groups the plate into VAV control zones.
-- **Duct Routing** — routes ducts from the core risers to the zones.
+- **Duct Routing** — routes ducts from the core branch takeoffs to the zones.
 - **Full Optimise** — runs all three in sequence.
 
 All optimise buttons disable together while a run is in progress. Use **stop** to cancel a run and **continue** to resume where offered. A status line reports progress underneath the buttons.
@@ -111,7 +115,7 @@ All optimise buttons disable together while a run is in progress. Use **stop** t
 The dashboard panel visualises the optimisation results:
 
 - **Structural** — material, beam size, column footprint, slab depth, per-component cost and cost/m².
-- **Duct** — full costing (linear metres plus fittings by type), per-branch colour-coded breakdown.
+- **Duct** — costing of primary ductwork only (linear metres plus bends, branches and transitions), no VAV boxes or secondary ductwork is included, per branch colour-coded breakdown.
 - **Buildup analysis** — where ducts clash with each other or with beams (height conflicts), with a user-settable threshold and severity tiers.
 
 Pinch/stress points and heights come from the backend and are drawn on the canvas.
@@ -137,4 +141,4 @@ Pinch/stress points and heights come from the backend and are drawn on the canva
 - **Server status** — the dot in the top toolbar shows the optimisation server state. It must be green/ready before you can run a stage; "starting…" means wait a moment.
 - **A stage won't run** — check the step above it has completed (structure before thermal, thermal before duct) and the server is ready.
 - **Costs look wrong** — re-check the canvas scale first, then confirm the relevant optimise stage has actually been run.
-- **Duct routing reports no feasible plan** — check entry points are flagged, distinct, and not filtered out (see Thermal zones & entry points).
+- **Duct routing reports no feasible plan** — check floor takeoffs are flagged, distinct, and not filtered out (see Thermal zones & floor takeoffs).
