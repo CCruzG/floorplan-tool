@@ -2575,6 +2575,14 @@ export function drawBuildupWarnings(ctx, fp) {
     ctx.lineWidth   = isSelected ? 2 : 1;
     ctx.fill();
     ctx.stroke();
+
+    if (bp.label != null) {
+      ctx.fillStyle    = '#fff';
+      ctx.font         = 'bold 9px sans-serif';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(bp.label), pt.x, pt.y + 0.5);
+    }
   });
   ctx.restore();
 }

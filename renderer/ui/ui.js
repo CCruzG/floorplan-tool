@@ -138,7 +138,7 @@ function refreshInspector(fp, store) {
       `<div class="inspector-body">`,
       `<div class="inspector-row"><span class="inspector-label">Width</span><span class="inspector-value">${Math.round(duct.width * 1000)} mm</span></div>`,
       `<div class="inspector-row"><span class="inspector-label">Height</span><span class="inspector-value">${Math.round(duct.height * 1000)} mm</span></div>`,
-      `<div class="inspector-row"><span class="inspector-label">Flow</span><span class="inspector-value">${duct.flow.toFixed(2)} l/s</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Flow</span><span class="inspector-value">${Math.round(duct.flow)} l/s</span></div>`,
       `</div>`
     ].join('');
     return;
@@ -152,7 +152,7 @@ function refreshInspector(fp, store) {
       `<div class="inspector-header"><span class="inspector-kind">VAV Terminal</span></div>`,
       `<div class="inspector-body">`,
       `<div class="inspector-row"><span class="inspector-label">Grid ID</span><span class="inspector-value">${vav.ptId}</span></div>`,
-      `<div class="inspector-row"><span class="inspector-label">Load</span><span class="inspector-value">${vav.load.toFixed(2)} l/s</span></div>`,
+      `<div class="inspector-row"><span class="inspector-label">Load</span><span class="inspector-value">${Math.round(vav.load)} l/s</span></div>`,
       pt ? `<div class="inspector-row"><span class="inspector-label">Entry Point</span><span class="inspector-value">${pt.entryPoint ? 'Yes' : 'No'}</span></div>` : '',
       `</div>`
     ].join('');
@@ -811,6 +811,12 @@ function _computeBuildupPoints(fp) {
     results.push({ pt: { x: pt.x, y: pt.y }, buildupMm, thresholdMm, type, detail });
   }
 
+  // Worst first, then number the flagged points (≥ 80% of threshold) 1..n so the
+  // canvas markers and the dashboard table share one labelling.
+  results.sort((a, b) => b.buildupMm - a.buildupMm);
+  let n = 0;
+  results.forEach(bp => { if (bp.buildupMm / bp.thresholdMm >= 0.8) bp.label = ++n; });
+
   return results;
 }
 
@@ -1066,6 +1072,25 @@ function refreshDashboardPanel(fp, store) {
   const bCritical  = buildupPoints.filter(b => b.buildupMm >= bThreshold).length;
   const bWarning   = buildupPoints.filter(b => b.buildupMm >= bThreshold * 0.8 && b.buildupMm < bThreshold).length;
 
+  // Critical-points table — one row per numbered marker (label matches the canvas).
+  const _buildupTypeLabel = t =>
+    t === 'duct-duct-beam' ? 'Duct × duct × beam' : t === 'duct-duct' ? 'Duct × duct' : 'Duct × beam';
+  const flaggedBuildup = buildupPoints.filter(b => b.label != null);
+  const buildupTableHTML = flaggedBuildup.length ? [
+    `<div class="dash-table">`,
+    ...flaggedBuildup.map(b => {
+      const pct   = Math.round(b.buildupMm / b.thresholdMm * 100);
+      const color = b.buildupMm >= b.thresholdMm ? '#e53935' : '#fb8c00';
+      return [
+        `<div class="dash-row">`,
+        `<span class="dash-row-label"><b style="color:${color}">#${b.label}</b> ${_buildupTypeLabel(b.type)}</span>`,
+        `<span>${Math.round(b.buildupMm)} mm · ${pct}%</span>`,
+        `</div>`,
+      ].join('');
+    }),
+    `</div>`,
+  ].join('') : '';
+
   const buildupHTML = hasMechanical ? [
     `<div class="dashboard-section buildup-section">`,
     `<div class="dashboard-section-title" style="margin-bottom:6px">Buildup</div>`,
@@ -1078,6 +1103,7 @@ function refreshDashboardPanel(fp, store) {
       bWarning  > 0 ? `<div class="buildup-stat buildup-warning">${bWarning} warning</div>` : '',
       bCritical === 0 && bWarning === 0 ? `<div class="buildup-stat buildup-ok">${buildupPoints.length} crossing${buildupPoints.length !== 1 ? 's' : ''} — OK</div>` : '',
     ].join('') : `<div class="buildup-stat" style="color:var(--text-muted)">No crossings detected</div>`,
+    buildupTableHTML,
     `</div>`,
   ].join('') : '';
 
@@ -4223,7 +4249,7 @@ function refreshThermalEditor(store) {
     ? (Array.isArray(region.vav_control_zones) ? region.vav_control_zones[subIdx]?.load : null)
     : (Number.isFinite(region.air_requirement) ? region.air_requirement : null);
 
-  inputEl.value = Number.isFinite(currentAir) ? String(currentAir) : '';
+  inputEl.value = Number.isFinite(currentAir) ? currentAir.toFixed(1) : '';
   inputEl.disabled = false;
   applyBtn.disabled = false;
 
