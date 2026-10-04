@@ -11,6 +11,7 @@
 import * as THREE from '../vendor/three.module.js';
 import { OrbitControls } from '../vendor/OrbitControls.js';
 import { getNodeById } from '../models/floorPlanUtils.js';
+import { riserColour } from './renderers.js';
 
 export class View3D {
   constructor(container) {
@@ -276,6 +277,22 @@ export class View3D {
       const t  = lenSq < 1e-10 ? 0 : Math.max(0, Math.min(1, ((px-ax)*dx + (py-ay)*dy) / lenSq));
       return Math.hypot(px - (ax + t*dx), py - (ay + t*dy));
     };
+    // Full segment intersection — unlike segsCross, this also catches a shared
+    // node, a T-touch and collinear overlap. Grid-aligned ducts meet AT nodes,
+    // so two crossing ducts share a node rather than strictly straddle.
+    const _onSeg = (ax, ay, bx, by, px, py) =>
+      px >= Math.min(ax, bx) - 1e-6 && px <= Math.max(ax, bx) + 1e-6 &&
+      py >= Math.min(ay, by) - 1e-6 && py <= Math.max(ay, by) + 1e-6;
+    const segsIntersect = (ax, ay, bx, by, cx, cy, dx, dy) => {
+      const d1 = cross2d(cx, cy, dx, dy, ax, ay), d2 = cross2d(cx, cy, dx, dy, bx, by);
+      const d3 = cross2d(ax, ay, bx, by, cx, cy), d4 = cross2d(ax, ay, bx, by, dx, dy);
+      if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+      if (Math.abs(d1) < 1e-9 && _onSeg(cx, cy, dx, dy, ax, ay)) return true;
+      if (Math.abs(d2) < 1e-9 && _onSeg(cx, cy, dx, dy, bx, by)) return true;
+      if (Math.abs(d3) < 1e-9 && _onSeg(ax, ay, bx, by, cx, cy)) return true;
+      if (Math.abs(d4) < 1e-9 && _onSeg(ax, ay, bx, by, dx, dy)) return true;
+      return false;
+    };
 
     // Returns the deepest beam depth (canvas px) that this duct segment must
     // go under, or 0 when no beam interaction is detected.
@@ -298,38 +315,60 @@ export class View3D {
       return maxDepth;
     };
 
-    const RISER_COLS = [0x00bcd4, 0xff9800, 0x8bc34a, 0xe91e63, 0x9c27b0, 0x03a9f4,
-                        0xff5722, 0x4caf50, 0xf44336, 0x3f51b5];
-    const ductMats = (fp.Duct_Plan || []).map((_, ri) =>
-      new THREE.MeshLambertMaterial({ color: RISER_COLS[ri % RISER_COLS.length] })
+    // Colour ducts to match the 2D view (per the riser's thermal zone). THREE's
+    // setStyle parses hsl()/rgb()/hex but not the alpha form, so drop any alpha.
+    const _css3 = s => s.replace(/^hsla/, 'hsl').replace(/^rgba/, 'rgb').replace(/,\s*[\d.]+\)\s*$/, ')');
+    const ductMats = (fp.Duct_Plan || []).map(riser =>
+      new THREE.MeshLambertMaterial({ color: new THREE.Color().setStyle(_css3(riserColour(fp, riser))) })
     );
 
+    // Flatten to segments so crossing ducts can be stacked: when two ducts
+    // cross, the later one drops a layer to pass under the earlier one — the
+    // same way a duct drops under a beam.
+    const segs = [];
     (fp.Duct_Plan || []).forEach((riser, ri) => {
-      const mat = ductMats[ri];
       for (const d of (riser.ducts || [])) {
         if (d.length !== 5) continue;
         const [idA, idB, widthM, heightM] = d;
         const pA = pointMap.get(idA), pB = pointMap.get(idB);
         if (!pA || !pB) continue;
-
-        const widthPx  = widthM  * pxPerUnit;
-        const heightPx = heightM * pxPerUnit;
-
-        // Vertical position: hang from ceiling, drop below any crossed beam.
-        const beamDropPx = ductBeamDepthPx(pA.x, pA.y, pB.x, pB.y);
-        const centerY    = WALL_H - beamDropPx - heightPx / 2;
-
-        const x1 = toX(pA.x), z1 = toZ(pA.y);
-        const x2 = toX(pB.x), z2 = toZ(pB.y);
-        const length = Math.hypot(x2 - x1, z2 - z1);
-        if (length < 0.5) continue;
-
-        const geo  = new THREE.BoxGeometry(length, heightPx, widthPx);
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.position.set((x1 + x2) / 2, centerY, (z1 + z2) / 2);
-        mesh.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
-        scene.add(mesh);
+        segs.push({
+          ri, ax: pA.x, ay: pA.y, bx: pB.x, by: pB.y,
+          widthPx: widthM * pxPerUnit, heightPx: heightM * pxPerUnit,
+          beamDropPx: ductBeamDepthPx(pA.x, pA.y, pB.x, pB.y), layer: 0,
+        });
       }
+    });
+
+    // Greedy layering: each segment takes the lowest layer not used by an
+    // already-placed segment from a DIFFERENT riser that it meets, so two
+    // crossing ducts never share a height. Same-riser segments share nodes by
+    // design (one duct network), so they are not treated as crossings.
+    const stepPx = segs.length ? Math.max(...segs.map(s => s.heightPx)) : 1;
+    segs.forEach((s, i) => {
+      const used = new Set();
+      for (let j = 0; j < i; j++) {
+        const t = segs[j];
+        if (s.ri !== t.ri && segsIntersect(s.ax, s.ay, s.bx, s.by, t.ax, t.ay, t.bx, t.by)) used.add(t.layer);
+      }
+      let L = 0; while (used.has(L)) L++;
+      s.layer = L;
+    });
+
+    segs.forEach(s => {
+      const x1 = toX(s.ax), z1 = toZ(s.ay);
+      const x2 = toX(s.bx), z2 = toZ(s.by);
+      const length = Math.hypot(x2 - x1, z2 - z1);
+      if (length < 0.5) return;
+      // Hang from ceiling; drop under any crossed beam, then one step per layer
+      // of crossing ducts above it. Clamp so a duct never sinks below the floor.
+      const drop    = s.beamDropPx + s.layer * stepPx;
+      const centerY = Math.max(s.heightPx / 2, WALL_H - drop - s.heightPx / 2);
+      const geo  = new THREE.BoxGeometry(length, s.heightPx, s.widthPx);
+      const mesh = new THREE.Mesh(geo, ductMats[s.ri]);
+      mesh.position.set((x1 + x2) / 2, centerY, (z1 + z2) / 2);
+      mesh.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
+      scene.add(mesh);
     });
 
     // ── Ground grid ──────────────────────────────────────────────────────────

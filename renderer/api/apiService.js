@@ -187,12 +187,20 @@ export function floorplanToInstance(planJson, units) {
       const baseVavZones = zone.vav_control_zones || [];
 
       if (!assigned || assigned.regions.length === 0) {
-        // No user assignments — preserve backend-provided entry candidates as-is.
+        // No user assignments — let the solver place one riser per zone, picking
+        // the most suitable from the full pool of placed entry points. Mirror the
+        // assigned-branch fallback: derive the candidate pool from flagged grid
+        // points when the zone carries none, and set entry_number so the backend
+        // actually forms an entry group (0 → no group → empty-pool crash).
+        const candidates = Array.isArray(zone.entry_candidates) && zone.entry_candidates.length
+          ? zone.entry_candidates
+          : (planJson.grid_points || []).filter(p => p.entryPoint).map(p => p.id);
         return {
           ...zone,
           thermal_region_geometry: normalizeSubGeom(zone),
           vav_control_zones: baseVavZones,
-          entry_candidates: zone.entry_candidates || [],
+          entry_candidates: candidates,
+          entry_number: zone.entry_number || (candidates.length ? 1 : 0),
         };
       }
 

@@ -121,18 +121,12 @@
         </div>
       </div>
       <div class="cg-row">
-        <label class="cg-label" for="structBeamSpanInput">Beam span</label>
-        <div class="cg-input-group">
-          <input type="number" id="structBeamSpanInput" value="9" min="1" step="0.5" style="width:60px;">
-          <span class="cg-unit">m</span>
-        </div>
-      </div>
-      <div class="cg-row">
-        <label class="cg-label" for="structBeamDistInput">Beam distance</label>
-        <div class="cg-input-group">
-          <input type="number" id="structBeamDistInput" value="9" min="1" step="0.5" style="width:60px;">
-          <span class="cg-unit">m</span>
-        </div>
+        <label class="cg-label" for="structGridModuleSelect">Grid module</label>
+        <select id="structGridModuleSelect">
+          <option value="9">9 × 9 m</option>
+          <option value="6">6 × 6 m</option>
+          <option value="3">3 × 3 m</option>
+        </select>
       </div>
       <div class="cg-row gp-btn-row" style="margin-top:8px;">
         <button id="structSettingsOkBtn" class="gp-btn">OK</button>
@@ -301,6 +295,22 @@
           <div class="dash-snapshot-bar">
             <input type="text" id="snapshotNameInput" placeholder="Snapshot name…" class="solutions-name-input">
             <button id="snapshotBtn" class="gp-btn">+ Snapshot</button>
+          </div>
+          <div class="dash-snapshot-bar">
+            <label class="cg-label" for="compareAxisSelect" style="white-space:nowrap;">Compare by</label>
+            <select id="compareAxisSelect">
+              <option value="grid">Grid size</option>
+              <option value="material">Material</option>
+            </select>
+            <select id="compareGridLock" title="Grid module to hold fixed while materials vary" style="display:none;">
+              <option value="9">at 9 × 9 m</option>
+              <option value="6">at 6 × 6 m</option>
+              <option value="3">at 3 × 3 m</option>
+            </select>
+            <button id="compareRunBtn" class="gp-btn" title="Run structural optimisation for each option in parallel and save one snapshot each for comparison">⊞ Compare</button>
+          </div>
+          <div class="dash-snapshot-bar">
+            <span id="compareGridStatus" style="font-size:11px;color:var(--text-muted);"></span>
           </div>
           <div id="solutionsList" class="solutions-list"></div>
         </div>

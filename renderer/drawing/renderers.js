@@ -1915,6 +1915,28 @@ function _zoneColour(zoneIndex, isInternal) {
   };
 }
 
+// Colour for a riser's ducts: the colour of the thermal zone it serves, so the
+// 2D canvas and the 3D view show the same duct colours. Shared by both.
+export function riserColour(fp, riser) {
+  if (riser.vav && riser.vav.length > 0) {
+    const firstVavId = typeof riser.vav[0][0] === 'string'
+      ? riser.vav[0][0]
+      : fp.Points?.[riser.vav[0][0]]?.id;
+    if (firstVavId) {
+      const region = (fp.Thermal_Zones || []).find(r =>
+        (r.vav_control_zones || []).some(cz => cz.points.includes(firstVavId))
+      );
+      if (region) {
+        if (region.color && /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/.test(region.color)) return region.color;
+        const zi = fp.Thermal_Zones.indexOf(region);
+        const isInternal = region.type === 'internal' || region.orientation === null;
+        return _zoneColour(zi, isInternal).stroke;
+      }
+    }
+  }
+  return '#888';
+}
+
 function _orientationName(azimuth) {
   if (azimuth === null || azimuth === undefined) return 'internal';
   // BuildWeave uses y-up (mathematical) coords; canvas y-axis is flipped (y-down),
@@ -2314,30 +2336,8 @@ export function drawDuctPlan(ctx, fp) {
   ];
 
   plan.forEach((riser, ri) => {
-    // Colour derived from the thermal zone this riser serves
-    // Note: A riser (riser.vav[0]) corresponds to a control zone.
-    // We search the Thermal_Zones to find the region and control zone that matches.
-    let colour = '#888'; // Default grey
-    if (riser.vav && riser.vav.length > 0) {
-      const firstVavId = typeof riser.vav[0][0] === 'string' ? riser.vav[0][0] : fp.Points[riser.vav[0][0]]?.id;
-      if (firstVavId) {
-        // Find which thermal zone contains this point
-        const region = (fp.Thermal_Zones || []).find(r => 
-          (r.vav_control_zones || []).some(cz => cz.points.includes(firstVavId))
-        );
-        if (region) {
-          // Use explicit color if present, else fallback to zoneColor logic
-          if (region.color && /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/.test(region.color)) {
-            colour = region.color;
-          } else {
-            const ri = fp.Thermal_Zones.indexOf(region);
-            const isInternal = region.type === 'internal' || region.orientation === null;
-            const zoneColor = _zoneColour(ri, isInternal);
-            colour = zoneColor.stroke;
-          }
-        }
-      }
-    }
+    // Colour derived from the thermal zone this riser serves (shared with 3D).
+    const colour = riserColour(fp, riser);
 
     // Draw duct edges
     (riser.ducts || []).forEach((duct) => {

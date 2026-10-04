@@ -1450,6 +1450,93 @@ function _solutionMetrics(fp) {
   return { thermalZones, ductRisers, columns, totalAirLoad, structPerM2, mechPerM2, totalPerM2 };
 }
 
+// Apply a structural solve result (columns, beams, cost meta) to a floorplan.
+// Self-contained on (fp, d) so it can run on the active plan or on an isolated
+// clone (grid-module compare builds one snapshot per clone). fp._structCfgPending
+// carries the config used, so Structural_Meta records the grid/direction.
+function applyStructuralResult(fp, d) {
+  if (!d || !d.structural_components) return;
+  const sc = d.structural_components;
+  const mmMap = { mm: 1, cm: 10, m: 1000, 'in': 25.4, ft: 304.8 };
+  const srcUnit = sc?.units?.length || d?.units?.length || fp.units?.length || 'm';
+  const mmPerSrc = mmMap[srcUnit] ?? 1000;
+  const mmPerCanvas = mmMap[fp.units?.length ?? 'm'] ?? 1000;
+  const lenToPx = v => v * (fp.units?.pxPerUnit ?? 1) * mmPerSrc / mmPerCanvas;
+  if (Array.isArray(sc.columns) && sc.columns.length) {
+    fp.Columns = sc.columns
+      .map((c, i) => {
+        if (Array.isArray(c)) {
+          const pts = c.filter(p => p && typeof p.x === 'number' && typeof p.y === 'number');
+          if (!pts.length) return null;
+          const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+          const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+          return { id: `Column_${i}`, x: lenToPx(cx), y: lenToPx(cy) };
+        }
+        return { ...c, x: lenToPx(c.x), y: lenToPx(c.y) };
+      })
+      .filter(Boolean);
+    const EPS = 2;
+    (fp.Points || []).forEach(pt => {
+      if (fp.Columns.some(col => Math.abs(col.x - pt.x) < EPS && Math.abs(col.y - pt.y) < EPS)) {
+        pt.mechanical = false;
+      }
+    });
+  }
+  if (Array.isArray(sc.beams) && sc.beams.length) {
+    fp.Beams = sc.beams
+      .map(b => {
+        if (!b?.start || !b?.end) return null;
+        return { ...b, start: { x: lenToPx(b.start.x), y: lenToPx(b.start.y) }, end: { x: lenToPx(b.end.x), y: lenToPx(b.end.y) } };
+      })
+      .filter(Boolean);
+
+    // A grid point where a beam meets the core can't function as an
+    // entry point — a beam runs straight through it. Decommission any
+    // such point's entry-point assignment.
+    const corePolys = (fp.Core_Boundary || []).map(core =>
+      Object.keys(core)
+        .filter(k => /^Pt_\d+$/.test(k))
+        .sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3)))
+        .map(k => core[k])
+    ).filter(poly => poly.length >= 3);
+
+    if (corePolys.length) {
+      const beamEPS = 2;
+      const beamEndpoints = fp.Beams.flatMap(b => [b.start, b.end]).filter(Boolean);
+      (fp.Points || []).forEach(pt => {
+        if (!pt.entryPoint) return;
+        const touchesBeam = beamEndpoints.some(bp => Math.abs(bp.x - pt.x) < beamEPS && Math.abs(bp.y - pt.y) < beamEPS);
+        if (!touchesBeam) return;
+        const onCoreEdge = corePolys.some(poly => fp._isPointOnPolygonEdge(pt.x, pt.y, poly, beamEPS));
+        if (onCoreEdge) pt.entryPoint = false;
+      });
+    }
+  }
+  fp.layers.Beams   = true;
+  fp.layers.Columns = true;
+
+  const cvc = d.cost_volume_calculation;
+  const _pendingCfg = fp._structCfgPending || {};
+  fp._structCfgPending = null;
+  fp.Structural_Meta = {
+    beamMaterial:  cvc?.material     || sc.beam_material  || null,
+    slabMaterial:  sc.slab_material  || null,
+    slabDepthMm:   sc.slab_depth     ?? null,
+    beamDepthMm:   sc.beams?.[0]?.depth  ?? null,
+    beamWidthMm:   sc.beams?.[0]?.width  ?? null,
+    columnWidthMm: sc.columns?.[0]?.width ?? null,
+    beamDirection: _pendingCfg.beam_direction ?? null,
+    beamSpanM:     _pendingCfg.beamSpan       ?? null,
+    costsError: d.cost_volume_calculation_error || null,
+    costs: cvc ? {
+      columns: cvc.columns_cost ?? 0,
+      beams:   cvc.beam_cost    ?? 0,
+      slab:    cvc.slab_cost    ?? 0,
+      total:   cvc.total_cost   ?? 0,
+    } : null,
+  };
+}
+
 function refreshSolutionsPanel(store) {
   const listEl = document.getElementById('solutionsList');
   if (!listEl) return;
@@ -2159,6 +2246,113 @@ export function bindUI(store, canvas, mouse) {
   if (snapshotBtn) {
     snapshotBtn.addEventListener('click', () => {
       snapshotSolutionBtn?.click(); // reuse the same handler
+    });
+  }
+
+  // Compare mode — run structural optimisation for each option in parallel and
+  // save one snapshot each. Two axes: vary grid size (material fixed) or vary
+  // material (grid size locked). The solver only honours span == spacing, so a
+  // grid option sets beamSpan == beamSpacing. The Snapshots panel's ≥2
+  // comparison table does the side-by-side.
+  const compareAxisSelect = document.getElementById('compareAxisSelect');
+  const compareGridLock   = document.getElementById('compareGridLock');
+  const compareRunBtn     = document.getElementById('compareRunBtn');
+  const compareGridStatus = document.getElementById('compareGridStatus');
+  let _compareRunning = false;
+
+  if (compareAxisSelect && compareGridLock) {
+    const _syncCompareAxis = () => {
+      compareGridLock.style.display = compareAxisSelect.value === 'material' ? '' : 'none';
+      // Default the locked grid to whatever Structural Settings currently shows.
+      const cur = document.getElementById('structGridModuleSelect')?.value;
+      if (cur) compareGridLock.value = cur;
+    };
+    compareAxisSelect.addEventListener('change', _syncCompareAxis);
+    _syncCompareAxis();
+  }
+
+  if (compareRunBtn) {
+    compareRunBtn.addEventListener('click', async () => {
+      if (_compareRunning) return;
+      const fp = store.active;
+      if (!fp) return;
+      if (!fp.boundaryClosed || (fp.wall_graph?.nodes?.length ?? 0) < 3 || !(fp.Points && fp.Points.length)) {
+        if (compareGridStatus) compareGridStatus.textContent = 'Need a closed boundary and a grid first.';
+        return;
+      }
+      if (!(await checkHealth())) {
+        if (compareGridStatus) compareGridStatus.textContent = 'Server not responding.';
+        return;
+      }
+
+      const base = _getStructuralConfig().structural_planning;
+      const axis = compareAxisSelect?.value || 'grid';
+
+      // Build the variants to solve: each is { label, config }.
+      let variants;
+      if (axis === 'material') {
+        const lockGrid = parseFloat(compareGridLock?.value ?? '9');
+        const matOpts = [...(document.getElementById('structMaterialSelect')?.options ?? [])];
+        variants = matOpts.map(o => {
+          const [beamMat, slabMat] = o.value.split('+');
+          return {
+            label: `${o.textContent.trim()} @ ${lockGrid}×${lockGrid} m`,
+            config: { ...base, beam_material: beamMat, slab_material: slabMat, beamSpan: lockGrid, beamSpacing: lockGrid },
+          };
+        });
+      } else {
+        const gridOpts = [...(document.getElementById('structGridModuleSelect')?.options ?? [])];
+        variants = gridOpts.map(o => {
+          const m = parseFloat(o.value);
+          return { label: `Grid ${m}×${m} m`, config: { ...base, beamSpan: m, beamSpacing: m } };
+        });
+      }
+
+      _compareRunning = true;
+      compareRunBtn.disabled = true;
+      const baseJson = fp.toJSON();
+      const units = fp.units || { length: getUnitLabel() || 'm', pxPerUnit: getPixelsPerUnit() || 1 };
+      let done = 0;
+      const setStatus = () => { if (compareGridStatus) compareGridStatus.textContent = `solving ${done}/${variants.length}…`; };
+      setStatus();
+
+      const runOne = async (v) => {
+        const started = await startOptimisation(baseJson, units, { phases: ['structural'], config: { structural_planning: v.config } });
+        if (!started.ok) { done++; setStatus(); return { label: v.label, ok: false, error: started.error }; }
+        const result = await pollOptimisation(started.job_id, () => {}, 2000);
+        done++; setStatus();
+        if (!result.ok) return { label: v.label, ok: false, error: result.error };
+        const clone = FloorPlan.fromJSON(baseJson);
+        clone._structCfgPending = { beam_direction: v.config.beam_direction, beamSpan: v.config.beamSpan };
+        applyStructuralResult(clone, result.data);
+        return {
+          label: v.label, ok: true,
+          snapshot: {
+            id:        `${Date.now()}-${v.label}`,
+            name:      v.label,
+            timestamp: new Date().toLocaleTimeString(),
+            json:      clone.toJSON(),
+            metrics:   _solutionMetrics(clone),
+          },
+        };
+      };
+
+      try {
+        const results = await Promise.all(variants.map(runOne));
+        // Push in the variants' order regardless of which solve finished first.
+        results.filter(r => r.ok).forEach(r => store.solutions.push(r.snapshot));
+        refreshSolutionsPanel(store);
+        setActivePanelTab('snapshots');
+        const failed = results.filter(r => !r.ok);
+        if (compareGridStatus) {
+          compareGridStatus.textContent = failed.length
+            ? `${results.length - failed.length}/${results.length} ok — ${failed.map(f => `${f.label}: ${f.error}`).join('; ')}`
+            : `Done — ${results.length} snapshots added.`;
+        }
+      } finally {
+        _compareRunning = false;
+        compareRunBtn.disabled = false;
+      }
     });
   }
 
@@ -3070,8 +3264,7 @@ export function bindUI(store, canvas, mouse) {
       method:       document.getElementById('structMethodSelect')?.value ?? 'heuristic',
       material:     document.getElementById('structMaterialSelect')?.value ?? 'steel+concrete',
       direction:    document.querySelector('input[name="structBeamDir"]:checked')?.value ?? 'horizontal',
-      beamSpan:     parseFloat(document.getElementById('structBeamSpanInput')?.value ?? '9'),
-      beamDistance: parseFloat(document.getElementById('structBeamDistInput')?.value ?? '9'),
+      gridModule:   parseFloat(document.getElementById('structGridModuleSelect')?.value ?? '9'),
     };
   }
 
@@ -3083,10 +3276,8 @@ export function bindUI(store, canvas, mouse) {
     if (mat) mat.value = state.material;
     const dir = document.querySelector(`input[name="structBeamDir"][value="${state.direction}"]`);
     if (dir) dir.checked = true;
-    const spanEl = document.getElementById('structBeamSpanInput');
-    if (spanEl) spanEl.value = state.beamSpan ?? 9;
-    const distEl = document.getElementById('structBeamDistInput');
-    if (distEl) distEl.value = state.beamDistance ?? 9;
+    const gridEl = document.getElementById('structGridModuleSelect');
+    if (gridEl) gridEl.value = String(state.gridModule ?? 9);
   }
 
   function _openStructModal() {
@@ -3106,16 +3297,17 @@ export function bindUI(store, canvas, mouse) {
     const material = document.getElementById('structMaterialSelect')?.value ?? 'steel+concrete';
     const [beamMat, slabMat] = material.split('+');
     const beamDir  = document.querySelector('input[name="structBeamDir"]:checked')?.value ?? 'horizontal';
-    const beamSpan = parseFloat(document.getElementById('structBeamSpanInput')?.value ?? '9');
-    const beamDist = parseFloat(document.getElementById('structBeamDistInput')?.value ?? '9');
+    // The solver only honours span == spacing (grid modules 9/6/3), so one
+    // control drives both.
+    const gridModule = parseFloat(document.getElementById('structGridModuleSelect')?.value ?? '9');
     return {
       structural_planning: {
         method,
         beam_material: beamMat,
         slab_material: slabMat,
         beam_direction: beamDir,
-        beamSpan:    beamSpan,
-        beamSpacing: beamDist,
+        beamSpan:    gridModule,
+        beamSpacing: gridModule,
       },
     };
   }
@@ -3132,11 +3324,11 @@ export function bindUI(store, canvas, mouse) {
     const dirLabel    = sp.beam_direction === 'vertical' ? 'vertical' : 'horizontal';
     let msg;
     if (isNoPoints) {
-      msg = `Structural: no valid column positions for a ${gridLabel} grid — the floorplan may be too small for this span/distance. ` +
-            `Try a smaller beam span or distance in Structural Settings.`;
+      msg = `Structural: no valid column positions for a ${gridLabel} grid — the floorplan may be too small for this grid module. ` +
+            `Try a smaller grid module in Structural Settings.`;
     } else {
       msg = `Structural: solver could not place columns with ${methodLabel} method, ${gridLabel} grid, ${dirLabel} beams. ` +
-            `Try: switch to Heuristic method, use a smaller beam span or distance, or change beam direction.`;
+            `Try: switch to Heuristic method, use a smaller grid module, or change beam direction.`;
     }
     aiError.style.display = 'block';
     aiError.style.color = '';
@@ -3643,92 +3835,7 @@ export function bindUI(store, canvas, mouse) {
       }
       if (d.thermal_zones) refreshThermalZonesList(store);
 
-      if (d.structural_components) {
-        const sc = d.structural_components;
-        const mmMap = { mm: 1, cm: 10, m: 1000, 'in': 25.4, ft: 304.8 };
-        const srcUnit = sc?.units?.length || d?.units?.length || fp.units?.length || 'm';
-        const mmPerSrc = mmMap[srcUnit] ?? 1000;
-        const mmPerCanvas = mmMap[fp.units?.length ?? 'm'] ?? 1000;
-        const lenToPx = v => v * (fp.units?.pxPerUnit ?? 1) * mmPerSrc / mmPerCanvas;
-        if (Array.isArray(sc.columns) && sc.columns.length) {
-          fp.Columns = sc.columns
-            .map((c, i) => {
-              if (Array.isArray(c)) {
-                const pts = c.filter(p => p && typeof p.x === 'number' && typeof p.y === 'number');
-                if (!pts.length) return null;
-                const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
-                const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
-                return { id: `Column_${i}`, x: lenToPx(cx), y: lenToPx(cy) };
-              }
-              return { ...c, x: lenToPx(c.x), y: lenToPx(c.y) };
-            })
-            .filter(Boolean);
-          const EPS = 2;
-          (fp.Points || []).forEach(pt => {
-            if (fp.Columns.some(col => Math.abs(col.x - pt.x) < EPS && Math.abs(col.y - pt.y) < EPS)) {
-              pt.mechanical = false;
-            }
-          });
-        }
-        if (Array.isArray(sc.beams) && sc.beams.length) {
-          fp.Beams = sc.beams
-            .map(b => {
-              if (!b?.start || !b?.end) return null;
-              return { ...b, start: { x: lenToPx(b.start.x), y: lenToPx(b.start.y) }, end: { x: lenToPx(b.end.x), y: lenToPx(b.end.y) } };
-            })
-            .filter(Boolean);
-
-          // A grid point where a beam meets the core can't function as an
-          // entry point — a beam runs straight through it. Decommission any
-          // such point's entry-point assignment.
-          const corePolys = (fp.Core_Boundary || []).map(core =>
-            Object.keys(core)
-              .filter(k => /^Pt_\d+$/.test(k))
-              .sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3)))
-              .map(k => core[k])
-          ).filter(poly => poly.length >= 3);
-
-          if (corePolys.length) {
-            const beamEPS = 2;
-            const beamEndpoints = fp.Beams.flatMap(b => [b.start, b.end]).filter(Boolean);
-            (fp.Points || []).forEach(pt => {
-              if (!pt.entryPoint) return;
-              const touchesBeam = beamEndpoints.some(bp => Math.abs(bp.x - pt.x) < beamEPS && Math.abs(bp.y - pt.y) < beamEPS);
-              if (!touchesBeam) return;
-              const onCoreEdge = corePolys.some(poly => fp._isPointOnPolygonEdge(pt.x, pt.y, poly, beamEPS));
-              if (onCoreEdge) pt.entryPoint = false;
-            });
-          }
-        }
-        fp.layers.Beams   = true;
-        fp.layers.Columns = true;
-
-        const cvc = d.cost_volume_calculation;
-        const _pendingCfg = fp._structCfgPending || {};
-        fp._structCfgPending = null;
-        fp.Structural_Meta = {
-          beamMaterial:  cvc?.material     || sc.beam_material  || null,
-          slabMaterial:  sc.slab_material  || null,
-          slabDepthMm:   sc.slab_depth     ?? null,
-          beamDepthMm:   sc.beams?.[0]?.depth  ?? null,
-          beamWidthMm:   sc.beams?.[0]?.width  ?? null,
-          columnWidthMm: sc.columns?.[0]?.width ?? null,
-          beamDirection: _pendingCfg.beam_direction ?? null,
-          beamSpanM:     _pendingCfg.beamSpan       ?? null,
-          // null (not a zeroed object) when the backend never produced a
-          // result — e.g. it threw (d.cost_volume_calculation_error set) or
-          // this snapshot predates cost calculation entirely. A real result,
-          // even an honest $0 (no beams placed), is kept as-is rather than
-          // hidden — see _hasCosts/dashboard rendering below.
-          costsError: d.cost_volume_calculation_error || null,
-          costs: cvc ? {
-            columns: cvc.columns_cost ?? 0,
-            beams:   cvc.beam_cost    ?? 0,
-            slab:    cvc.slab_cost    ?? 0,
-            total:   cvc.total_cost   ?? 0,
-          } : null,
-        };
-      }
+      applyStructuralResult(fp, d);
 
       const rawDuctPlan = d?.mechanical_components?.duct_plan || d?.mechanical_components?.ductPlan || d?.ductPlan || d?.Duct_Plan;
       if (Array.isArray(rawDuctPlan)) {
