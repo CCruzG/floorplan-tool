@@ -1004,11 +1004,16 @@ export function drawHoverTooltip(ctx, fp, options) {
 }
 
 export function drawGhost(ctx, fp, mouse, { constrain = false } = {}) {
-  if (!fp || fp.boundaryClosed || fp.wall_graph.nodes.length === 0) return;
+  if (!fp || fp.boundaryClosed) return;
 
-  const last = fp.wall_graph.nodes.at(-1);
-  const lastX = last.x;
-  const lastY = last.y;
+  // Rubber-band from the pen vertex (the node the next segment attaches to),
+  // not the last node in the array — so resuming after a gap draws from the
+  // vertex the user picked. No pen yet → nothing to preview.
+  const pen = fp._penNodeId != null
+    ? fp.wall_graph.nodes.find(n => n.id === fp._penNodeId) : null;
+  if (!pen) return;
+  const lastX = pen.x;
+  const lastY = pen.y;
 
   let ghostX = mouse.x;
   let ghostY = mouse.y;

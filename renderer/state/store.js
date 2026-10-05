@@ -48,6 +48,9 @@ export class FloorPlanStore {
     } else {
       this.tempAreaActive = false;
     }
+    // Entering draw mode starts with no pen vertex — the first click picks or
+    // places the vertex the next segment will attach to.
+    if (mode === "draw" && this.active) this.active._penNodeId = null;
     this.notify();
   }
 

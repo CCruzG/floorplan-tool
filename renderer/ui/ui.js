@@ -3008,51 +3008,68 @@ export function bindUI(store, canvas, mouse) {
       return;
     }
 
-    // DRAW MODE: boundary creation
+    // DRAW MODE: boundary creation (pen-based — resume from a chosen vertex)
+    const fp = store.active;
     const drawConstrain = e.shiftKey;
 
-    // Apply grid snap as baseline (node/projection snap will override if closer)
+    // A stale pen (its node was deleted) is cleared
+    if (fp._penNodeId != null && !fp.wall_graph.nodes.some(n => n.id === fp._penNodeId)) {
+      fp._penNodeId = null;
+    }
+    let penNode = fp._penNodeId != null
+      ? fp.wall_graph.nodes.find(n => n.id === fp._penNodeId) : null;
+
+    // Grid snap baseline (node snap below overrides when closer)
     if (!drawConstrain && gridSettings.snapEnabled) {
-      const gip = _gridIntervalPx(store.active);
+      const gip = _gridIntervalPx(fp);
       x = _snapGrid(x, gip);
       y = _snapGrid(y, gip);
     }
-
-    if (drawConstrain && store.active.wall_graph.nodes.length > 0) {
-      const lastNode = store.active.wall_graph.nodes[store.active.wall_graph.nodes.length - 1];
-      const snapped = snapTo45(lastNode.x, lastNode.y, x, y);
-      x = snapped.x;
-      y = snapped.y;
+    // 45° constrain relative to the pen vertex
+    if (drawConstrain && penNode) {
+      const snapped = snapTo45(penNode.x, penNode.y, x, y);
+      x = snapped.x; y = snapped.y;
     }
 
-    if (store.active.wall_graph.nodes.length > 0) {
-      const first = store.active.wall_graph.nodes[0];
-      const fx = first.x;
-      const fy = first.y;
-      const dist = Math.hypot(x - fx, y - fy);
-      if (dist < 10) {
-        // Close the boundary without adding a duplicate vertex
-        store.active.closeBoundary();
-        store.update(store.active);
-        console.log("Boundary closed");
+    // Snap to an existing vertex when not holding the 45° constraint
+    const nodeSnap = drawConstrain ? null : findClosestNode(fp, { x, y }, SNAP_TO_NODE_DIST);
+    const hitNode = nodeSnap ? fp.wall_graph.nodes[nodeSnap.index] : null;
+
+    if (!penNode) {
+      // No pen yet: pick a start vertex, or begin a fresh boundary
+      if (hitNode) {
+        fp._penNodeId = hitNode.id;                 // pen down on an existing vertex
+      } else if (fp.wall_graph.nodes.length === 0) {
+        fp._penNodeId = fp.addNode(x, y);           // first vertex of a fresh boundary
+      } else {
+        return;  // open geometry exists and no vertex picked → ignore (no stray nodes)
+      }
+      store.update(fp);
+      return;
+    }
+
+    // Pen is set — clicking another existing vertex bridges / closes the loop
+    if (hitNode && hitNode.id !== fp._penNodeId) {
+      fp.connectBoundaryNodes(fp._penNodeId, hitNode.id);
+      if (fp.isBoundaryClosedNow()) {
+        fp.finalizeBoundary();                      // closes + regenerates outline
+        store.update(fp);
         store.setMode("select");
         return;
       }
+      fp._penNodeId = hitNode.id;                   // keep drawing from here
+      store.update(fp);
+      return;
     }
+    if (hitNode && hitNode.id === fp._penNodeId) return;  // clicked the pen itself — ignore
 
-    // Projection snapping (only when not constraining to 45°)
+    // Empty space: add a new vertex and continue from it
     if (!drawConstrain) {
-      const proj = findClosestProjection(store.active, { x, y });
-      if (proj && Math.hypot(x - proj.x, y - proj.y) < 10) {
-        x = proj.x;
-        y = proj.y;
-        console.log("Snapped to projection", proj);
-      }
+      const proj = findClosestProjection(fp, { x, y });
+      if (proj && Math.hypot(x - proj.x, y - proj.y) < 10) { x = proj.x; y = proj.y; }
     }
-
-    // Add vertex to boundary
-    store.active.addVertex(x, y, { constrain: drawConstrain });
-    store.update(store.active);
+    fp._penNodeId = fp.addVertexFrom(fp._penNodeId, x, y);
+    store.update(fp);
   });
 
 
@@ -3124,6 +3141,11 @@ export function bindUI(store, canvas, mouse) {
     if (store.mode === "select" && e.key === "Escape") {
       store.active.clearSelection();
       store.update(store.active);
+    }
+    // Esc in draw mode: drop the pen and return to select
+    if (store.mode === "draw" && e.key === "Escape") {
+      if (store.active) store.active._penNodeId = null;
+      store.setMode("select");
     }
     // Optional: Esc to cancel
     if (store.mode === "area" && e.key === "Escape") {

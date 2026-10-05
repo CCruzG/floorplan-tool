@@ -70,7 +70,7 @@ const { pathToFileURL } = require('url');
     const fpd = new FloorPlan('del');
     const a = fpd.addNode(0, 0), b = fpd.addNode(100, 0), c = fpd.addNode(50, 80);
     fpd.addEdge(a, b); fpd.addEdge(b, c); fpd.addEdge(c, a);
-    for (const e of fpd.wall_graph.edges) e.wallType = 'boundary';
+    // drawn boundary edges carry no explicit wallType (undefined === boundary)
     fpd.boundaryClosed = true;
     fpd.boundaryArea = { id: 'boundary_0', label: 'boundary', vertices: [a, b, c] };
     fpd.deleteSegment(0);                       // remove edge a–b
@@ -87,6 +87,21 @@ const { pathToFileURL } = require('url');
     fpd.deleteSegment(fpd.wall_graph.edges.findIndex(e => e.id === pe));
     assert.strictEqual(fpd.wall_graph.nodes.length, nBefore - 2, 'orphaned partition nodes should be removed');
     console.log('deleteSegment check passed.');
+
+    // ── pen drawing: chain from a start vertex, bridge the gap, auto-close ─────
+    const fpp = new FloorPlan('pen');
+    const v0 = fpp.addNode(0, 0);
+    fpp._penNodeId = v0;
+    fpp._penNodeId = fpp.addVertexFrom(fpp._penNodeId, 100, 0);
+    fpp._penNodeId = fpp.addVertexFrom(fpp._penNodeId, 100, 100);
+    fpp._penNodeId = fpp.addVertexFrom(fpp._penNodeId, 0, 100);
+    assert.strictEqual(fpp.isBoundaryClosedNow(), false, 'open chain should not be closed');
+    fpp.connectBoundaryNodes(fpp._penNodeId, v0);           // bridge last → start
+    assert.strictEqual(fpp.isBoundaryClosedNow(), true, 'bridging the last gap should close the loop');
+    fpp.finalizeBoundary();
+    assert.strictEqual(fpp.boundaryClosed, true, 'finalizeBoundary should set boundaryClosed');
+    assert.strictEqual(fpp._penNodeId, null, 'finalizeBoundary should clear the pen');
+    console.log('pen-drawing check passed.');
 
     console.log('Serialization check passed.');
     process.exit(0);

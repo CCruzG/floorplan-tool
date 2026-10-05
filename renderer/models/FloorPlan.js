@@ -511,6 +511,50 @@ export class FloorPlan {
     }
   }
 
+  // ── Pen-based drawing (pick a start vertex, then add/bridge from it) ───────
+  // Add a vertex at (x,y) joined to an existing pen vertex; returns the new id.
+  addVertexFrom(penNodeId, x, y) {
+    const id = this.addNode(x, y);
+    if (penNodeId != null) this.addEdge(penNodeId, id, false);
+    return id;
+  }
+
+  // Join two existing vertices with a boundary edge (no-op if already linked).
+  connectBoundaryNodes(aId, bId) {
+    if (aId == null || bId == null || aId === bId) return false;
+    const exists = (this.wall_graph.edges || []).some(e =>
+      (e.v1 === aId && e.v2 === bId) || (e.v1 === bId && e.v2 === aId));
+    if (exists) return false;
+    this.addEdge(aId, bId, false);
+    return true;
+  }
+
+  // True when boundary edges form a closed polygon: ≥3 edges and every
+  // boundary vertex has exactly two boundary walls.
+  isBoundaryClosedNow() {
+    const deg = new Map();
+    let count = 0;
+    for (const e of (this.wall_graph.edges || [])) {
+      if (!this._isBoundaryEdge(e)) continue;
+      count++;
+      deg.set(e.v1, (deg.get(e.v1) || 0) + 1);
+      deg.set(e.v2, (deg.get(e.v2) || 0) + 1);
+    }
+    if (count < 3 || deg.size === 0) return false;
+    for (const d of deg.values()) if (d !== 2) return false;
+    return true;
+  }
+
+  // Mark an already-connected boundary closed and regenerate derived data,
+  // without adding an edge (closeBoundary adds the last→first edge itself).
+  finalizeBoundary() {
+    this.boundaryClosed = true;
+    this._penNodeId = null;
+    this._normalizeBoundaryClockwise();
+    this._updateBoundaryArea();
+    return true;
+  }
+
   _isBoundaryEdge(edge) {
     return !!edge && (!edge.wallType || edge.wallType === 'boundary');
   }
@@ -1411,7 +1455,9 @@ export class FloorPlan {
 
     const n1 = this.wall_graph.nodes.find(n => n.id === edge.v1);
     const n2 = this.wall_graph.nodes.find(n => n.id === edge.v2);
-    const wasBoundary = edge.wallType === 'boundary';
+    // Drawn boundary edges carry no explicit wallType; _isBoundaryEdge treats
+    // a missing type as boundary, matching the rest of the model.
+    const wasBoundary = this._isBoundaryEdge(edge);
 
     this.wall_graph.edges.splice(segmentIndex, 1);
 
