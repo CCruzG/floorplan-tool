@@ -3080,9 +3080,12 @@ export function bindUI(store, canvas, mouse) {
     }
   });
 
-  // Delete core: Delete or Backspace key
+  // Delete selected core or wall: Delete or Backspace key
   window.addEventListener('keydown', (e) => {
     if (store.mode === 'select' && (e.key === 'Delete' || e.key === 'Backspace')) {
+      // Don't delete while typing in a field (e.g. a coordinate input)
+      const tag = document.activeElement?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       const fp = store.active;
       if (!fp) return;
       if (fp.selectedCore) {
@@ -3092,8 +3095,11 @@ export function bindUI(store, canvas, mouse) {
         const edge = fp.wall_graph.edges[fp.selectedSegment];
         if (edge?.wallType === 'core') {
           fp.deleteCore(_findCoreIdForEdge(fp, edge));
-          store.update(fp);
+        } else {
+          // Boundary / partition wall → remove it (boundary walls open the loop)
+          fp.deleteSegment(fp.selectedSegment);
         }
+        store.update(fp);
       }
     }
   });

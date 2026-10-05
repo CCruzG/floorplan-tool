@@ -1402,6 +1402,45 @@ export class FloorPlan {
     this.clearSelection();
   }
 
+  // Delete a single wall segment (boundary or partition). Deleting a boundary
+  // wall opens the closed loop — the user redraws the missing wall and re-closes,
+  // which regenerates the derived outline. Cores are deleted via deleteCore().
+  deleteSegment(segmentIndex) {
+    const edge = this.wall_graph.edges[segmentIndex];
+    if (!edge) return false;
+
+    const n1 = this.wall_graph.nodes.find(n => n.id === edge.v1);
+    const n2 = this.wall_graph.nodes.find(n => n.id === edge.v2);
+    const wasBoundary = edge.wallType === 'boundary';
+
+    this.wall_graph.edges.splice(segmentIndex, 1);
+
+    // Remove the matching Wall entry (endpoint match, either orientation)
+    if (n1 && n2) {
+      const EPS = 1;
+      const matches = (a, b) =>
+        Math.abs(a.x - b.x) < EPS && Math.abs(a.y - b.y) < EPS;
+      this.Walls = (this.Walls || []).filter(w => !(
+        (matches(w.start, n1) && matches(w.end, n2)) ||
+        (matches(w.start, n2) && matches(w.end, n1))));
+    }
+
+    // Drop any node no longer referenced by an edge (a boundary wall's two
+    // endpoints each keep their other adjacent edge, so they survive).
+    const usedNodeIds = new Set(this.wall_graph.edges.flatMap(e => [e.v1, e.v2]));
+    this.wall_graph.nodes = this.wall_graph.nodes.filter(n => usedNodeIds.has(n.id));
+
+    // Reopen the boundary and invalidate the stale closed-polygon data.
+    if (wasBoundary) {
+      this.boundaryClosed = false;
+      this.boundaryArea = null;
+      this.Plan_Boundary = [];
+    }
+
+    this.clearSelection();
+    return true;
+  }
+
   clearSelection() {
     this.selectedSegment = null;
     this.selectedPoint = null;

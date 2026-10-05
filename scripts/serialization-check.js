@@ -66,6 +66,28 @@ const { pathToFileURL } = require('url');
       if (checked) console.log(`Real-plan check passed (${checked} plan(s) with duct runs).`);
     }
 
+    // ── deleteSegment: a boundary wall opens the loop; its endpoints survive ───
+    const fpd = new FloorPlan('del');
+    const a = fpd.addNode(0, 0), b = fpd.addNode(100, 0), c = fpd.addNode(50, 80);
+    fpd.addEdge(a, b); fpd.addEdge(b, c); fpd.addEdge(c, a);
+    for (const e of fpd.wall_graph.edges) e.wallType = 'boundary';
+    fpd.boundaryClosed = true;
+    fpd.boundaryArea = { id: 'boundary_0', label: 'boundary', vertices: [a, b, c] };
+    fpd.deleteSegment(0);                       // remove edge a–b
+    assert.strictEqual(fpd.wall_graph.edges.length, 2, 'deleteSegment should drop one edge');
+    assert.strictEqual(fpd.wall_graph.nodes.length, 3, 'boundary endpoints should survive (still used by neighbours)');
+    assert.strictEqual(fpd.boundaryClosed, false, 'deleting a boundary wall should open the loop');
+    assert.strictEqual(fpd.boundaryArea, null, 'stale boundaryArea should be cleared');
+
+    // a non-boundary wall between otherwise-unused nodes takes its nodes with it
+    const p1 = fpd.addNode(200, 200), p2 = fpd.addNode(300, 200);
+    const pe = fpd.addEdge(p1, p2);
+    fpd.wall_graph.edges.find(e => e.id === pe).wallType = 'partition';
+    const nBefore = fpd.wall_graph.nodes.length;
+    fpd.deleteSegment(fpd.wall_graph.edges.findIndex(e => e.id === pe));
+    assert.strictEqual(fpd.wall_graph.nodes.length, nBefore - 2, 'orphaned partition nodes should be removed');
+    console.log('deleteSegment check passed.');
+
     console.log('Serialization check passed.');
     process.exit(0);
   } catch (err) {
